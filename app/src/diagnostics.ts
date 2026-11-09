@@ -1,6 +1,10 @@
 // Live checks of the connection to Signal through this server's relay. They use no account.
 
+import { fromBinary } from '@bufbuild/protobuf';
 import QRCode from 'qrcode';
+import { StickerPackSchema } from './gen/Stickers_pb';
+import { httpsRequest } from './signal/http-client';
+import { decryptStickerFile } from './wasm/signal_migration_wasm';
 import { linkDevice } from './signal/link';
 import { SignalSession } from './signal/session';
 import { connectChat } from './signal/socket';
@@ -24,6 +28,12 @@ async function checkProvisioningSocket(): Promise<void> {
   const keepalive = await socket.request('GET', '/v1/keepalive/provisioning');
   report(`keepalive answered: ${keepalive.status}`);
   socket.close();
+
+  // Signal's public "Bandit the Cat" pack, over HTTPS inside the page's own TLS session to cdn.signal.org.
+  const response = await httpsRequest('cdn.signal.org', 'GET', '/stickers/9acc9e8aba563d26a4994e69263e3b25/manifest.proto');
+  const key = new Uint8Array('5a6dff3948c28efb9b7aaf93ecc375c69fc316e78077ed26867a14d10a0f6a12'.match(/../g)!.map((h) => parseInt(h, 16)));
+  const pack = fromBinary(StickerPackSchema, decryptStickerFile(response.body, key));
+  report(`HTTPS to cdn.signal.org: ${response.status}, ${response.body.length} bytes, decrypted "${pack.title}" with ${pack.stickers.length} stickers`);
 }
 
 async function checkLinkCycle(): Promise<void> {

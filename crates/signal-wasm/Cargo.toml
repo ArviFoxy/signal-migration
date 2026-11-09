@@ -22,10 +22,16 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 # ring and rustls's time type have no randomness or clock source on wasm32-unknown-unknown without these.
 ring = { version = "0.17", features = ["wasm32_unknown_unknown_js"] }
 rustls-pki-types = { version = "1", features = ["web"] }
-hmac = "0.13.0"
+libsignal-account-keys = { path = "../../third_party/libsignal/rust/account-keys" }
+signal-crypto = { path = "../../third_party/libsignal/rust/crypto" }
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
+httparse = "1.10"
+js-sys = "0.3"
+# The versions libsignal's workspace uses.
+hkdf = "0.13.0"
 sha2 = "0.11"
-aes = "0.9.1"
-ctr = "0.10.1"
+base64 = "0.22.1"
+subtle = "2.6"
 
 [profile.release]
 opt-level = 3

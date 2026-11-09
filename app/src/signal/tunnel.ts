@@ -1,17 +1,12 @@
-// A TLS connection to a Signal host, carried through a WebSocket to our relay.
+// Carries a WebAssembly connection's ciphertext through a WebSocket to our relay.
 //
-// The TLS session runs in this page (rustls in WebAssembly) and trusts only Signal's root certificates, so the
-// relay forwards ciphertext it cannot read or alter.
+// TLS to the Signal host runs in this page (rustls in WebAssembly) and trusts only Signal's root certificates, so
+// the relay forwards ciphertext it cannot read or alter.
 
-import { TlsSession } from '../wasm/signal_migration_wasm';
-import { loadSignalWasm } from './wasm';
-
-/** A bidirectional byte stream. */
-export interface ByteStream {
-  write(bytes: Uint8Array): void;
-  close(): void;
-  onData: (bytes: Uint8Array) => void;
-  onClose: (reason: string) => void;
+/** The ciphertext side of a TLS connection object from the WebAssembly module. */
+export interface EncryptedEndpoint {
+  receiveEncrypted(data: Uint8Array): void;
+  takeEncrypted(): Uint8Array;
 }
 
 /** The relay endpoint on this page's own origin. */
@@ -20,72 +15,50 @@ export function relayUrl(host: string): string {
   return `${scheme}//${location.host}/tunnel/${host}`;
 }
 
-export class TlsTunnel implements ByteStream {
-  onData: (bytes: Uint8Array) => void = () => undefined;
-  onClose: (reason: string) => void = () => undefined;
+export class RelayLink {
   #socket: WebSocket;
-  #session: TlsSession;
+  #endpoint: EncryptedEndpoint;
   #closed = false;
 
-  private constructor(socket: WebSocket, session: TlsSession) {
-    this.#socket = socket;
-    this.#session = session;
+  /**
+   * Opens the relay to `host` for `endpoint`. `onReceive` runs after each batch of ciphertext is fed in; it may
+   * throw, which closes the link. `onClose` runs once, when the link closes for any reason.
+   */
+  constructor(host: string, endpoint: EncryptedEndpoint, onReceive: () => void, onClose: (reason: string) => void) {
+    this.#endpoint = endpoint;
+    this.#socket = new WebSocket(relayUrl(host));
+    this.#socket.binaryType = 'arraybuffer';
+    this.#socket.onopen = () => this.flush();
+    this.#socket.onmessage = (event) => {
+      try {
+        endpoint.receiveEncrypted(new Uint8Array(event.data as ArrayBuffer));
+        this.flush();
+        onReceive();
+      } catch (error) {
+        this.#shutdown(`connection to ${host} failed: ${error instanceof Error ? error.message : String(error)}`, onClose);
+      }
+    };
+    this.#socket.onclose = () => this.#shutdown(`relay to ${host} closed`, onClose);
   }
 
-  /** Connects through the relay and completes the TLS handshake with `host`. */
-  static async open(host: string): Promise<TlsTunnel> {
-    await loadSignalWasm();
-    return new Promise((resolve, reject) => {
-      const socket = new WebSocket(relayUrl(host));
-      socket.binaryType = 'arraybuffer';
-      const tunnel = new TlsTunnel(socket, new TlsSession(host));
-      let ready = false;
-      socket.onopen = () => tunnel.#flush();
-      socket.onmessage = (event) => {
-        try {
-          tunnel.#session.receiveEncrypted(new Uint8Array(event.data as ArrayBuffer));
-          tunnel.#flush();
-          if (!ready && !tunnel.#session.isHandshaking) {
-            ready = true;
-            resolve(tunnel);
-          }
-          const plaintext = tunnel.#session.takePlaintext();
-          if (plaintext.length > 0) tunnel.onData(plaintext);
-        } catch (error) {
-          const reason = `TLS to ${host} failed: ${error instanceof Error ? error.message : String(error)}`;
-          tunnel.#shutdown(reason);
-          if (!ready) reject(new Error(reason));
-        }
-      };
-      socket.onclose = () => {
-        const reason = `tunnel to ${host} closed`;
-        tunnel.#shutdown(reason);
-        if (!ready) reject(new Error(reason));
-      };
-    });
-  }
-
-  write(bytes: Uint8Array): void {
-    if (this.#closed) throw new Error('tunnel is closed');
-    this.#session.sendPlaintext(bytes);
-    this.#flush();
-  }
-
-  close(): void {
-    this.#shutdown('closed by this page');
-  }
-
-  #flush(): void {
-    const encrypted = this.#session.takeEncrypted();
+  /** Sends whatever ciphertext the endpoint has produced. */
+  flush(): void {
+    const encrypted = this.#endpoint.takeEncrypted();
     if (encrypted.length > 0 && this.#socket.readyState === WebSocket.OPEN) this.#socket.send(encrypted);
   }
 
-  #shutdown(reason: string): void {
+  close(): void {
+    this.flush();
+    this.#closed = true;
+    this.#socket.onclose = null;
+    this.#socket.close();
+  }
+
+  #shutdown(reason: string, onClose: (reason: string) => void): void {
     if (this.#closed) return;
     this.#closed = true;
     this.#socket.onclose = null;
     this.#socket.close();
-    this.#session.free();
-    this.onClose(reason);
+    onClose(reason);
   }
 }

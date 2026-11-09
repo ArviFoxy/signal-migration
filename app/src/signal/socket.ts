@@ -1,5 +1,5 @@
-// Signal's chat WebSocket protocol: request/response messages in both directions, matched by id,
-// over a WebSocket that runs inside our TLS tunnel.
+// Signal's chat WebSocket protocol: request/response messages in both directions, matched by id, over a
+// WebSocket (tungstenite) inside the page's own TLS session (rustls), carried through our relay.
 
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import {
@@ -10,10 +10,66 @@ import {
   WebSocketRequestMessageSchema,
   WebSocketResponseMessageSchema,
 } from '../gen/chat_websocket_pb';
-import { TlsTunnel } from './tunnel';
-import { type MessageChannel, openWebSocket } from './websocket-client';
+import { TlsWebSocket } from '../wasm/signal_migration_wasm';
+import { RelayLink } from './tunnel';
+import { loadSignalWasm } from './wasm';
 
 export const CHAT_HOST = 'chat.signal.org';
+
+/** A binary message channel. */
+export interface MessageChannel {
+  send(bytes: Uint8Array): void;
+  close(code?: number): void;
+  onMessage: (bytes: Uint8Array) => void;
+  onClose: (code: number, reason: string) => void;
+}
+
+/** Opens a WebSocket to `host`'s `path` with extra handshake `headers` ("Name: value"), through the relay. */
+export async function openTunnelWebSocket(host: string, path: string, headers: string[]): Promise<MessageChannel> {
+  await loadSignalWasm();
+  const socket = new TlsWebSocket(host, path, headers);
+  return new Promise((resolve, reject) => {
+    let opened = false;
+    let closed = false;
+    const channel: MessageChannel = {
+      send: (bytes) => {
+        socket.send(bytes);
+        link.flush();
+      },
+      close: (code = 1000) => {
+        if (closed) return;
+        closed = true;
+        socket.close(code);
+        link.close();
+        socket.free();
+      },
+      onMessage: () => undefined,
+      onClose: () => undefined,
+    };
+    const finish = (code: number, reason: string) => {
+      if (closed) return;
+      closed = true;
+      link.close();
+      socket.free();
+      if (opened) channel.onClose(code, reason);
+      else reject(new Error(`WebSocket to ${host}${path} did not open: ${reason}`));
+    };
+    const link = new RelayLink(
+      host,
+      socket,
+      () => {
+        if (!opened && socket.isOpen) {
+          opened = true;
+          resolve(channel);
+        }
+        for (const message of socket.takeMessages() as Uint8Array[]) channel.onMessage(message);
+        const code = socket.closeCode;
+        if (code !== undefined) finish(code, 'closed by the server');
+      },
+      (reason) => finish(1006, reason),
+    );
+  });
+}
 
 /** How often to send Signal's keepalive request. Signal's clients use about 30 s; idle connections get dropped. */
 const KEEPALIVE_INTERVAL_MS = 30_000;
@@ -85,7 +141,5 @@ export class SignalSocket {
  * on a linking socket and `/v1/keepalive` otherwise.
  */
 export async function connectChat(path: string, keepalivePath: string, headers: string[] = []): Promise<SignalSocket> {
-  const tunnel = await TlsTunnel.open(CHAT_HOST);
-  const channel = await openWebSocket(tunnel, CHAT_HOST, path, headers);
-  return new SignalSocket(channel, keepalivePath);
+  return new SignalSocket(await openTunnelWebSocket(CHAT_HOST, path, headers), keepalivePath);
 }

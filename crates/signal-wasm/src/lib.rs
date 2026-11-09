@@ -1,21 +1,21 @@
-//! WebAssembly bindings to the parts of libsignal that linking a device from a browser page needs.
+//! WebAssembly bindings for the web app: libsignal (linking, prekeys, storage service and sticker encryption),
+//! and TLS (rustls) with WebSocket (tungstenite) and HTTP (httparse) to Signal hosts through the relay.
 //!
 //! Secret keys cross this boundary only as inputs. Nothing here logs or stores them.
 
-use aes::cipher::{KeyIvInit, StreamCipher};
-use hmac::{Hmac, KeyInit, Mac};
 use libsignal_protocol::kem;
 use libsignal_protocol::{KeyPair, PrivateKey, PublicKey};
 use libsignal_provisioning::RecvProvisionCiphertextState;
-use rand::rngs::OsRng;
 use rand::TryRngCore;
-use sha2::Sha256;
+use rand::rngs::OsRng;
 use wasm_bindgen::prelude::*;
 
+mod crypto;
+mod http;
 mod tls;
+mod websocket;
 
-type HmacSha256 = Hmac<Sha256>;
-type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
+use crypto::hmac_sha256;
 
 pub(crate) fn js_error(error: impl std::fmt::Display) -> JsError {
     JsError::new(&error.to_string())
@@ -90,12 +90,6 @@ pub struct EncryptedDeviceName {
     pub ciphertext: Vec<u8>,
 }
 
-fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
-    let mut mac = <HmacSha256 as KeyInit>::new_from_slice(key).expect("HMAC accepts keys of any length");
-    mac.update(data);
-    mac.finalize().into_bytes().into()
-}
-
 /// Encrypts the device name the way Signal Desktop does (`encryptDeviceName` in `ts/Crypto.node.ts`),
 /// so the account's other devices can show it.
 #[wasm_bindgen(js_name = encryptDeviceName)]
@@ -108,8 +102,10 @@ pub fn encrypt_device_name(name: &str, identity_public_key: &[u8]) -> Result<Enc
     let synthetic_iv = hmac_sha256(&hmac_sha256(&master_secret, b"auth"), plaintext)[..16].to_vec();
     let cipher_key = hmac_sha256(&hmac_sha256(&master_secret, b"cipher"), &synthetic_iv);
 
+    // Desktop uses AES-256-CTR with a 16-byte zero counter block; libsignal's Aes256Ctr32 with a 12-byte zero
+    // nonce and counter 0 produces the same keystream for names shorter than 2^32 blocks.
     let mut ciphertext = plaintext.to_vec();
-    Aes256Ctr::new(&cipher_key.into(), &[0u8; 16].into()).apply_keystream(&mut ciphertext);
+    signal_crypto::Aes256Ctr32::from_key(&cipher_key, &[0u8; 12], 0).map_err(js_error)?.process(&mut ciphertext);
 
     Ok(EncryptedDeviceName { ephemeral_public: ephemeral.public_key.serialize().to_vec(), synthetic_iv, ciphertext })
 }

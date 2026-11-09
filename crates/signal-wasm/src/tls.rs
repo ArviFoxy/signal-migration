@@ -1,16 +1,15 @@
-//! A TLS client session to a Signal host that trusts only Signal's own root certificates.
+//! TLS to Signal hosts, trusting only Signal's own root certificates, over an in-memory transport.
 //!
-//! The page carries the encrypted side through a WebSocket tunnel to a relay, so the relay sees only
-//! ciphertext. Bytes move in and out explicitly; this type does no I/O of its own.
+//! The page carries the encrypted bytes through a WebSocket tunnel to the relay, so the relay sees only ciphertext.
+//! `Transport` is the in-memory socket: the page pushes received ciphertext in and takes ciphertext to send out.
 
+use std::cell::RefCell;
 use std::io::{ErrorKind, Read, Write};
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, ClientConnection, RootCertStore};
-use wasm_bindgen::prelude::*;
-
-use crate::js_error;
 
 /// The roots libsignal pins for every Signal service (`rust/net/src/certs.rs`).
 const SIGNAL_ROOTS: [&[u8]; 2] = [
@@ -31,72 +30,59 @@ fn config() -> Arc<ClientConfig> {
                 .expect("ring supports the default protocol versions")
                 .with_root_certificates(roots)
                 .with_no_client_auth();
-            // HTTP/1.1, because the page speaks HTTP/1.1 and the WebSocket upgrade itself.
+            // HTTP/1.1, the protocol of the WebSocket upgrade and of the storage service requests.
             config.alpn_protocols = vec![b"http/1.1".to_vec()];
             Arc::new(config)
         })
         .clone()
 }
 
-#[wasm_bindgen]
-pub struct TlsSession {
-    connection: ClientConnection,
+#[derive(Default)]
+pub struct Buffers {
+    pub incoming: Vec<u8>,
+    pub outgoing: Vec<u8>,
 }
 
-#[wasm_bindgen]
-impl TlsSession {
-    /// Starts a session to `host`; the first `takeEncrypted` returns the ClientHello.
-    #[wasm_bindgen(constructor)]
-    pub fn new(host: &str) -> Result<TlsSession, JsError> {
-        let name = ServerName::try_from(host.to_owned()).map_err(js_error)?;
-        Ok(TlsSession { connection: ClientConnection::new(config(), name).map_err(js_error)? })
-    }
+/// An in-memory socket. Reading with nothing received yet reports `WouldBlock`, like a non-blocking socket.
+#[derive(Clone, Default)]
+pub struct Transport(pub Rc<RefCell<Buffers>>);
 
-    /// Feeds encrypted bytes received from the tunnel. Fails if the server's certificate does not chain to
-    /// Signal's roots or the connection is otherwise broken.
-    #[wasm_bindgen(js_name = receiveEncrypted)]
-    pub fn receive_encrypted(&mut self, mut data: &[u8]) -> Result<(), JsError> {
-        while !data.is_empty() {
-            self.connection.read_tls(&mut data).map_err(js_error)?;
-            self.connection.process_new_packets().map_err(js_error)?;
+impl Read for Transport {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut buffers = self.0.borrow_mut();
+        if buffers.incoming.is_empty() {
+            return Err(ErrorKind::WouldBlock.into());
         }
+        let n = buf.len().min(buffers.incoming.len());
+        buf[..n].copy_from_slice(&buffers.incoming[..n]);
+        buffers.incoming.drain(..n);
+        Ok(n)
+    }
+}
+
+impl Write for Transport {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.borrow_mut().outgoing.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
         Ok(())
     }
+}
 
-    /// Returns the decrypted bytes received so far (possibly none).
-    #[wasm_bindgen(js_name = takePlaintext)]
-    pub fn take_plaintext(&mut self) -> Result<Vec<u8>, JsError> {
-        let mut plaintext = Vec::new();
-        let mut buffer = [0u8; 16 * 1024];
-        loop {
-            match self.connection.reader().read(&mut buffer) {
-                Ok(0) => break,
-                Ok(n) => plaintext.extend_from_slice(&buffer[..n]),
-                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(error) => return Err(js_error(error)),
-            }
-        }
-        Ok(plaintext)
+impl Transport {
+    pub fn push_received(&self, data: &[u8]) {
+        self.0.borrow_mut().incoming.extend_from_slice(data);
     }
+    pub fn take_outgoing(&self) -> Vec<u8> {
+        std::mem::take(&mut self.0.borrow_mut().outgoing)
+    }
+}
 
-    /// Queues plaintext to send; collect the result with `takeEncrypted`.
-    #[wasm_bindgen(js_name = sendPlaintext)]
-    pub fn send_plaintext(&mut self, data: &[u8]) -> Result<(), JsError> {
-        self.connection.writer().write_all(data).map_err(js_error)
-    }
-
-    /// Returns the encrypted bytes waiting to go through the tunnel (possibly none).
-    #[wasm_bindgen(js_name = takeEncrypted)]
-    pub fn take_encrypted(&mut self) -> Result<Vec<u8>, JsError> {
-        let mut encrypted = Vec::new();
-        while self.connection.wants_write() {
-            self.connection.write_tls(&mut encrypted).map_err(js_error)?;
-        }
-        Ok(encrypted)
-    }
-
-    #[wasm_bindgen(getter, js_name = isHandshaking)]
-    pub fn is_handshaking(&self) -> bool {
-        self.connection.is_handshaking()
-    }
+/// A TLS client connection to `host` with no limit on plaintext buffered before the handshake completes.
+pub fn connect(host: &str) -> Result<ClientConnection, String> {
+    let name = ServerName::try_from(host.to_owned()).map_err(|e| e.to_string())?;
+    let mut connection = ClientConnection::new(config(), name).map_err(|e| e.to_string())?;
+    connection.set_buffer_limit(None);
+    Ok(connection)
 }
