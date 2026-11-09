@@ -126,7 +126,7 @@ export type DiagramPart = { symbol: TemplateResult; name: string } | { link: str
  * bracket from one end to the other that says how the connection is encrypted.
  */
 export function connectionDiagram(parts: DiagramPart[], encryption: string): TemplateResult {
-  return html`<div class="flex flex-col border-t border-line pt-4 pb-2" aria-hidden="true">
+  return html`<div class="flex flex-col pt-2 pb-2" aria-hidden="true">
     <div class="flex items-start">
       ${parts.map((part) =>
         'link' in part
