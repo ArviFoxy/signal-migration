@@ -210,6 +210,9 @@ export function appServices(
         deviceId: account.deviceId,
         password: 'simulated',
         storageServiceKey: account.storageServiceKey,
+        identityPublic: new Uint8Array(33),
+        identityPrivate: new Uint8Array(32),
+        registrationId: 1,
       },
       onUnlinked: () => undefined,
       get isLinked() {
@@ -217,6 +220,7 @@ export function appServices(
       },
       withChat: (action) => account.withChat(action),
       storage: () => account.storage(),
+      announceStickerPacks: (packs) => account.announceStickerPacks(packs),
       async unlink() {
         user.phone.unlink(account.deviceId);
         device.onUnlinked();

@@ -1,10 +1,6 @@
 // Builds the web app into dist/: bundles each entry point, copies the static files and the WebAssembly modules.
 // The bundles are not minified.
 //
-// With --demo it builds the demo instead, into dist-demo/: the same wizard against simulated Telegram and Signal
-// accounts, served by the server in demo mode on its own port (crates/server, MODE=demo). The app's build never
-// contains the demo.
-//
 // TDLib's web client (tdweb) is bundled from ../build/tdweb/dist/tdweb.js, which scripts/build-tdweb-js.sh builds
 // with this project's patches; the "tdweb" package in node_modules provides only its types. tdweb.js starts a worker
 // by a file name relative to the page, and the worker loads its second part and TDLib's WebAssembly module the same
@@ -17,9 +13,8 @@ import path from 'node:path';
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib';
 
 const tdwebDist = '../build/tdweb/dist';
-const demo = process.argv.includes('--demo');
-const outdir = demo ? 'dist-demo' : 'dist';
-const entries = [demo ? 'demo/demo.ts' : 'src/main.ts', 'src/kinds/stickers/apng-worker.ts', 'src/fonts.css'];
+const outdir = 'dist';
+const entries = ['src/main.ts', 'src/kinds/stickers/apng-worker.ts', 'src/fonts.css'];
 
 fs.rmSync(outdir, { recursive: true, force: true });
 fs.mkdirSync(outdir, { recursive: true });
@@ -38,12 +33,10 @@ await build({
 execFileSync('node_modules/.bin/tailwindcss', ['--input', 'src/styles.css', '--output', `${outdir}/styles.css`], {
   stdio: 'inherit',
 });
-fs.copyFileSync(demo ? 'demo/demo.html' : 'public/index.html', `${outdir}/index.html`);
+fs.copyFileSync('public/index.html', `${outdir}/index.html`);
 fs.copyFileSync('src/wasm/signal_migration_wasm_bg.wasm', `${outdir}/signal_migration_wasm_bg.wasm`);
-if (!demo) {
-  for (const file of fs.readdirSync(tdwebDist)) {
-    if (file !== 'tdweb.js') fs.copyFileSync(path.join(tdwebDist, file), path.join(outdir, file));
-  }
+for (const file of fs.readdirSync(tdwebDist)) {
+  if (file !== 'tdweb.js') fs.copyFileSync(path.join(tdwebDist, file), path.join(outdir, file));
 }
 
 // Brotli and gzip copies of every file a browser downloads, which the server sends to browsers that accept them.

@@ -33,15 +33,14 @@ const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: stri
     title: 'Signal',
     plain:
       'Your browser talks to Signal through the migration server, which this website comes from. The connection is encrypted end to end, so the migration server passes it on but cannot read it.',
-    technical: html`A browser cannot connect to Signal's servers directly, because they use certificates from Signal's
-    own certificate authority, which browsers do not trust. So your browser opens a WebSocket to the migration server,
-    which forwards the bytes to Signal's servers. Inside the WebSocket, your browser runs its own TLS connection to
-    ${code('*.signal.org')}, and accepts only certificates signed by Signal's own root certificate.`,
+    technical: html`Signal uses their own certificate authority which is not trusted by the browser. To work around this
+    the browser opens a WebSocket to the migration server, and runs its own TLS connection to ${code('*.signal.org')}
+    inside it, checked against Signal's root certificate.`,
   },
   index: {
     title: 'Sticker pack index',
     plain:
-      'The migration server, which this website comes from, keeps a list of the packs already on Signal. When you upload a pack, the migration server receives only its hash and its Signal pack ID.',
+      'The migration server keeps a list of the packs already on Signal. When you upload a pack, the migration server receives only its hash and its Signal pack ID without the pack key.',
     technical: html`Your browser downloads the whole list over HTTPS and looks up your packs on your computer.`,
   },
 };

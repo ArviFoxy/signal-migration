@@ -76,12 +76,23 @@ export class SignalLink extends EventTarget {
     this.#set({ kind: 'off', unlinked: 'from-phone' });
   }
 
-  /** Uses the device an earlier visit linked. If it was unlinked meanwhile, its first use reports that. */
+  /**
+   * Uses the device an earlier visit linked. If it was unlinked meanwhile, its first use reports that. A device
+   * linked by an earlier version of the app, without the keys to message the other devices, is unlinked, and the
+   * Signal step asks to link again.
+   */
   restore(stored: StoredDevice): void {
     if (this.state.kind !== 'off') return;
     const device = this.services.restore(stored);
     device.onUnlinked = () => void this.#enqueue(() => this.#lost(device));
     this.#set({ kind: 'linked', device });
+    if (!stored.identityPrivate) {
+      void this.unlink('by-user').then(() => {
+        this.error =
+          'Link Signal again. The device linked earlier could not tell your phone about new sticker packs, so it was unlinked.';
+        this.dispatchEvent(new Event('change'));
+      });
+    }
   }
 
   /** Shows a code to scan and links the device when the phone scans it. Does nothing unless off. */

@@ -12,6 +12,7 @@ use wasm_bindgen::prelude::*;
 
 mod crypto;
 mod http;
+mod sessions;
 mod tls;
 mod websocket;
 

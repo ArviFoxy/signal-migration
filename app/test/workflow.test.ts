@@ -246,6 +246,63 @@ describe('the workflow', () => {
     await until(() => page.workflow.step === 'signal', 'the Signal step');
   });
 
+  // Detects: packs installed only in the storage service, which the phone does not show: iOS installs packs only
+  // from sync messages, and Android reads the storage only when told or once a day.
+  it("tells the account's other devices about every pack it installs", async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A'), world.pack('B'), world.pack('C')]);
+    await world.migrateElsewhere(world.pack('B'));
+    const page = await openPage(alice, new Browser());
+    await signIn(page);
+    await link(page);
+    await migrate(page);
+    const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    const installed = (await alice.installedPacks()).map((pack) => `${hex(pack.packId)}:${hex(pack.packKey)}`);
+    expect(installed).toHaveLength(3);
+    expect(new Set(world.signal.toldInstalled.get(alice.aci))).toEqual(new Set(installed));
+    expect(world.signal.toldToFetchStorage.get(alice.aci)).toBeGreaterThan(0);
+  });
+
+  // Detects: the migration finishing, and unlinking the device, before the other devices were told; afterwards
+  // nothing could tell them any more.
+  it('does not finish until the other devices were told', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const page = await openPage(alice, new Browser());
+    await signIn(page);
+    await link(page);
+    world.signal.failAnnouncements = 1000;
+    page.workflow.startMigration();
+    await until(() => page.workflow.stickers?.announceError != null, 'the failure to tell the other devices');
+    await settle(page);
+    expect(page.workflow.phase.kind).toBe('migrating');
+    expect(page.workflow.signal.state.kind).toBe('linked');
+    world.signal.failAnnouncements = 0;
+    page.workflow.tryAgain();
+    await until(() => page.workflow.phase.kind === 'finished', 'the end of the migration');
+    expect(world.signal.toldInstalled.get(alice.aci)).toHaveLength(1);
+  });
+
+  // Detects: keeping a device linked by an earlier version, which has no keys to message the other devices, so that
+  // the migration installs packs that never reach the phone.
+  it('unlinks a device linked by an earlier version and asks to link again', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+    const deviceId = deviceIdOf(first);
+    await settle(first);
+    browser.closePage();
+    const kept = browser.snapshot as { signal: Record<string, unknown> };
+    for (const field of ['identityPublic', 'identityPrivate', 'registrationId']) delete kept.signal[field];
+
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.signal.error !== null, 'the request to link again');
+    expect(world.signal.isLinked(alice.aci, deviceId)).toBe(false);
+  });
+
   // Detects: the browser's storage holding the account's master key, which decrypts much more than the migration
   // needs.
   it('keeps only the storage service key, never the master key', async () => {

@@ -73,6 +73,8 @@ export type MigrationServices = { clock: Clock; convert: ConvertSticker; index: 
  * 72 minutes. Used only for estimates; the actual waits follow the Retry-After that Signal's server answers with.
  */
 export const UPLOAD_BURST = 50;
+/** How many installed packs are told to the other devices in one go, during the migration. */
+const ANNOUNCE_BATCH = 10;
 export const UPLOAD_INTERVAL_MS = 72 * 60_000;
 
 const THUMBNAILS_PER_PACK = 4;
@@ -141,6 +143,10 @@ export class StickerMigration extends EventTarget {
    */
   uploadIntervalMs = UPLOAD_INTERVAL_MS;
   #limitReached = false;
+  /** Why telling the account's other devices about installed packs failed, until it works. */
+  announceError: string | null = null;
+  /** Installed packs that the account's other devices were not told about yet. */
+  #unannounced = new Set<PackEntry>();
   /** Packs uploaded, packs added to the index and packs installed during this visit. */
   uploaded = 0;
   addedToIndex = 0;
@@ -283,8 +289,35 @@ export class StickerMigration extends EventTarget {
     this.#changed();
   }
 
+  /** How many installed packs the account's other devices were not told about yet. */
+  get unannounced(): number {
+    return this.#unannounced.size;
+  }
+
+  /**
+   * Tells the account's other devices about installed packs (SignalAccount.announceStickerPacks), so that they
+   * show them. Packs are told in batches, to stay within Signal's rate limit for messages: `force` sends whatever
+   * is waiting, otherwise a batch goes once it holds ANNOUNCE_BATCH packs. A failure keeps the packs waiting.
+   */
+  async #announce(signal: SignalAccount, installed: PackEntry[], force: boolean): Promise<void> {
+    for (const entry of installed) if (entry.packId) this.#unannounced.add(entry);
+    if (this.#unannounced.size === 0 || (!force && this.#unannounced.size < ANNOUNCE_BATCH)) return;
+    const batch = [...this.#unannounced];
+    try {
+      await signal.announceStickerPacks(
+        batch.map((entry) => ({ packId: entry.packId!, packKey: entry.identity.packKey })),
+      );
+      for (const entry of batch) this.#unannounced.delete(entry);
+      this.announceError = null;
+    } catch (error) {
+      this.announceError = message(error);
+    }
+    this.#changed();
+  }
+
   /** Puts the packs that failed back in line, for the next run. */
   retryFailed(): void {
+    this.announceError = null;
     for (const entry of this.selected)
       if (entry.state === 'failed') Object.assign(entry, { state: 'to-upload', error: null, progress: null });
     this.#changed();
@@ -459,6 +492,12 @@ export class StickerMigration extends EventTarget {
     const { clock } = this.#services;
     Object.assign(this, { phase: 'running', stopReason: null });
     this.#changed();
+    // Packs installed before this run (an earlier visit, or by the user) may not have reached the other devices.
+    await this.#announce(
+      signal,
+      this.selected.filter((entry) => entry.state === 'in-signal'),
+      false,
+    );
     const available = this.selected.filter((entry) => entry.state === 'available');
     for (const entry of available) this.#plannedInstalls.add(entry);
     if (available.length > 0) {
@@ -467,6 +506,7 @@ export class StickerMigration extends EventTarget {
       try {
         await this.#install(signal, available);
         for (const entry of available) entry.state = 'in-signal';
+        await this.#announce(signal, available, true);
       } catch (error) {
         for (const entry of available) Object.assign(entry, { state: 'failed', error: message(error) });
       }
@@ -490,7 +530,9 @@ export class StickerMigration extends EventTarget {
       const [entry] = queue.splice(index, 1);
       entry.error = null;
       try {
-        if (!(await this.#migrateOne(signal, telegram, entry))) {
+        if (await this.#migrateOne(signal, telegram, entry)) {
+          await this.#announce(signal, [entry], false);
+        } else {
           entry.state = 'claimed-elsewhere';
           recheckAt.set(entry, clock.now() + CLAIM_RECHECK_MS);
           queue.push(entry);
@@ -502,6 +544,8 @@ export class StickerMigration extends EventTarget {
           const waitMs = (error.retryAfterSeconds ?? UPLOAD_INTERVAL_MS / 1000) * 1000;
           if (!this.#limitReached) this.uploadIntervalMs = waitMs;
           this.#limitReached = true;
+          // The packs installed so far reach the phone before the wait.
+          await this.#announce(signal, [], true);
           this.uploadAllowedAt = clock.now() + waitMs;
           this.#changed();
           // While waiting, the next pack is downloaded and converted. If that fails, it is tried again in its turn.
@@ -527,6 +571,7 @@ export class StickerMigration extends EventTarget {
       }
       this.#changed();
     }
+    if (signal.isLinked) await this.#announce(signal, [], true);
     if (!signal.isLinked)
       Object.assign(this, { phase: 'stopped', stopReason: 'Signal was unlinked before the migration finished' });
     else this.phase = 'done';

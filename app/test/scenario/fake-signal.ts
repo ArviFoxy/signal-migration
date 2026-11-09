@@ -117,6 +117,29 @@ export class FakeSignal {
     return deviceId;
   }
 
+  /**
+   * What the account's other devices were told by sync messages: each sticker pack install (pack ID and key in hex)
+   * and how many times they were asked to read the storage service again. Messages from an unlinked device are
+   * refused, as the server refuses them.
+   */
+  readonly toldInstalled = new Map<string, string[]>();
+  readonly toldToFetchStorage = new Map<string, number>();
+  /** The next `count` attempts to message the other devices fail, as a network failure would. */
+  failAnnouncements = 0;
+
+  deliverToOtherDevices(aci: string, fromDevice: number, packs: { packId: Uint8Array; packKey: Uint8Array }[]): void {
+    if (!this.isLinked(aci, fromDevice)) throw new SocketClosedError(DEVICE_REMOVED);
+    if (this.failAnnouncements > 0) {
+      this.failAnnouncements--;
+      throw new Error('the connection to Signal closed');
+    }
+    const hex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
+    const told = this.toldInstalled.get(aci) ?? [];
+    for (const { packId, packKey } of packs) told.push(`${hex(packId)}:${hex(packKey)}`);
+    this.toldInstalled.set(aci, told);
+    this.toldToFetchStorage.set(aci, (this.toldToFetchStorage.get(aci) ?? 0) + 1);
+  }
+
   unlinkDevice(aci: string, deviceId: number): void {
     this.#account(aci).devices.set(deviceId, { linked: false });
   }

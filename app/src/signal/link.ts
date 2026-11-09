@@ -32,6 +32,12 @@ export type LinkedAccount = {
    * they protect.
    */
   storageServiceKey: Uint8Array;
+  /**
+   * What the device needs to send messages to the account's other devices (signal/own-devices.ts): the account's
+   * identity key pair, which every device of the account shares, and this device's registration ID.
+   */
+  identity?: { publicKey: Uint8Array; privateKey: Uint8Array };
+  registrationId?: number;
 };
 
 /**
@@ -136,6 +142,7 @@ export async function linkDevice(
     const storageServiceKey = storageServiceKeyOf(provision);
     const hasPni = provision.pniIdentityKeyPrivate.length > 0 && provision.pni !== '';
     const password = randomHex(16);
+    const registrationId = randomInt(1, 16380);
     const name = encryptDeviceName(deviceName().trim() || DEFAULT_DEVICE_NAME, provision.aciIdentityKeyPublic);
     const encryptedName = toBinary(
       DeviceNameSchema,
@@ -152,7 +159,7 @@ export async function linkDevice(
       accountAttributes: {
         fetchesMessages: true,
         name: base64(encryptedName),
-        registrationId: randomInt(1, 16380),
+        registrationId,
         pniRegistrationId: hasPni ? randomInt(1, 16380) : undefined,
         capabilities: {
           attachmentBackfill: false,
@@ -180,6 +187,11 @@ export async function linkDevice(
       const { deviceId } = JSON.parse(new TextDecoder().decode(response.body)) as { deviceId: number };
       return {
         credentials: { aci: provision.aci, deviceId, password },
+        identity: {
+          publicKey: provision.aciIdentityKeyPublic.slice(),
+          privateKey: provision.aciIdentityKeyPrivate.slice(),
+        },
+        registrationId,
         storageServiceKey,
       };
     } finally {

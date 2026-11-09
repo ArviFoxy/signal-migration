@@ -36,6 +36,11 @@ export interface SignalAccount {
   readonly https: HttpsRequest;
   /** The account's storage service, with fresh credentials. */
   storage(): Promise<StorageClient>;
+  /**
+   * Tells the account's other devices (the phone and other linked devices) to install these packs and to read the
+   * storage service again. Without it, they do not show packs installed through the storage service.
+   */
+  announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void>;
 }
 
 /** Reads a header from chat response headers. */

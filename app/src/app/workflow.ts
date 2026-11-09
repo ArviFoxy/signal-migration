@@ -303,11 +303,13 @@ export class Workflow extends EventTarget {
     }
     if (phase !== 'migrating' || !session || this.#running) return;
     const selected = stickers.selected;
-    if (selected.every((entry) => entry.state === 'in-signal')) {
+    // Done once every pack is in Signal and the other devices were told; the phone shows nothing otherwise.
+    if (selected.every((entry) => entry.state === 'in-signal') && stickers.unannounced === 0) {
       void this.finish();
     } else if (
       !this.#failed.has('run') &&
-      selected.some((entry) => entry.state !== 'in-signal' && entry.state !== 'failed')
+      (selected.some((entry) => entry.state !== 'in-signal' && entry.state !== 'failed') ||
+        (stickers.unannounced > 0 && stickers.announceError === null))
     ) {
       this.#run(stickers, session, device);
     }

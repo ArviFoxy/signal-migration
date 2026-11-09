@@ -240,9 +240,9 @@ export class StickerMigrateStep extends MigrationView {
         </button>`;
     }
     const retry =
-      failed > 0
+      failed > 0 || migration.announceError
         ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
-            Retry failed packs
+            ${failed > 0 ? 'Retry failed packs' : 'Try again'}
           </button>`
         : nothing;
     return html`${jump}<span class="flex gap-3"
@@ -253,6 +253,13 @@ export class StickerMigrateStep extends MigrationView {
   /** One line under the overall progress: the wait for Signal's limit, what is happening, or how it ended. */
   private statusLine(ended: boolean, failed: number, remainingUploads: number) {
     const migration = this.migration!;
+    if (migration.announceError) {
+      const count = migration.unannounced;
+      return html`<span class="text-danger"
+        >Your phone has not been told about ${count} installed pack${count === 1 ? '' : 's'} yet:
+        ${migration.announceError}</span
+      >`;
+    }
     const waitUntil = migration.uploadAllowedAt;
     if (waitUntil) {
       const left = waitUntil - Date.now();

@@ -1,16 +1,27 @@
 // The temporary linked device for one migration: linked by QR code, logged in, unlinked at the end.
-// Its login and the storage service key (`stored`) are kept by the workflow until the migration is done or the
-// user clears it; the account's master key and entropy pool are never kept.
+// Its login, the storage service key and what it needs to message the account's other devices (the account's
+// identity key pair and its registration ID) are kept by the workflow (`stored`) until the device is unlinked; the
+// account's master key and entropy pool are never kept.
 
 import { httpsRequest } from './http-client';
 import { type LinkEvents, linkDevice, type LinkedAccount } from './link';
+import { fetchLatestStorageMessage, installStickerPacksMessage, OwnDevices } from './own-devices';
 import { SignalSession } from './session';
 import { SocketClosedError } from './socket';
 import { StorageClient } from './storage';
 import type { ChatChannel, SignalAccount } from './transport';
 
 /** A linked device's login and storage service key, as kept between visits. */
-export type StoredDevice = { aci: string; deviceId: number; password: string; storageServiceKey: Uint8Array };
+export type StoredDevice = {
+  aci: string;
+  deviceId: number;
+  password: string;
+  storageServiceKey: Uint8Array;
+  /** Absent for devices linked by an earlier version, which cannot message the other devices. */
+  identityPublic?: Uint8Array;
+  identityPrivate?: Uint8Array;
+  registrationId?: number;
+};
 
 /** The server closes a removed device's connection with this code. */
 const DEVICE_REMOVED = 4401;
@@ -35,16 +46,47 @@ export class SignalConnection implements SignalAccount {
 
   /** A device linked during an earlier visit. */
   static restore(stored: StoredDevice): SignalConnection {
-    const { aci, deviceId, password, storageServiceKey } = stored;
+    const { aci, deviceId, password, storageServiceKey, identityPublic, identityPrivate, registrationId } = stored;
     return new SignalConnection({
       credentials: { aci, deviceId, password },
       storageServiceKey: storageServiceKey.slice(),
+      identity:
+        identityPublic && identityPrivate
+          ? { publicKey: identityPublic.slice(), privateKey: identityPrivate.slice() }
+          : undefined,
+      registrationId,
     });
   }
 
   /** What is kept in the browser to use this device again after a reload. */
   get stored(): StoredDevice {
-    return { ...this.#account.credentials, storageServiceKey: this.#account.storageServiceKey.slice() };
+    const account = this.#account;
+    return {
+      ...account.credentials,
+      storageServiceKey: account.storageServiceKey.slice(),
+      identityPublic: account.identity?.publicKey.slice(),
+      identityPrivate: account.identity?.privateKey.slice(),
+      registrationId: account.registrationId,
+    };
+  }
+
+  #ownDevices: OwnDevices | null = null;
+
+  /**
+   * Tells the account's other devices to install these packs, then to read the storage service again, which
+   * holds the packs' order. Two messages: Android acts on only one kind of request per sync message.
+   */
+  async announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void> {
+    const { aci, deviceId } = this.#account.credentials;
+    const { identity, registrationId } = this.#account;
+    if (!identity || registrationId === undefined)
+      throw new Error('this device was linked by an earlier version of the app and cannot message your phone');
+    this.#ownDevices ??= new OwnDevices({ aci, deviceId, registrationId, identity });
+    const devices = this.#ownDevices;
+    await this.withChat(async (chat) => {
+      if (packs.length > 0) await devices.send(chat, installStickerPacksMessage(packs));
+      await devices.send(chat, fetchLatestStorageMessage());
+    });
   }
 
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device, or `cancel`. */
@@ -69,6 +111,7 @@ export class SignalConnection implements SignalAccount {
     if (this.#removed) return;
     this.#removed = true;
     this.#account.storageServiceKey.fill(0);
+    this.#account.identity?.privateKey.fill(0);
     this.#account.credentials.password = '';
     this.onUnlinked();
   }

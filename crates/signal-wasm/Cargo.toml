@@ -27,6 +27,8 @@ signal-crypto = { path = "../../third_party/libsignal/rust/crypto" }
 tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 httparse = "1.10"
 js-sys = "0.3"
+# Runs libsignal's async session functions over its in-memory store, which completes without waiting.
+futures-util = "0.3"
 # The versions libsignal's workspace uses.
 hkdf = "0.13.0"
 sha2 = "0.11"
