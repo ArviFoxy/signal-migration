@@ -44,11 +44,6 @@ export class SignalSession {
     return JSON.parse(new TextDecoder().decode(response.body)) as T;
   }
 
-  async listDeviceIds(): Promise<number[]> {
-    const { devices } = await this.requestJson<{ devices: { id: number }[] }>('GET', '/v1/devices');
-    return devices.map((device) => device.id);
-  }
-
   /** Removes this device from the account. The server then closes the socket with 4401, often before answering. */
   async unlinkSelf(): Promise<void> {
     try {

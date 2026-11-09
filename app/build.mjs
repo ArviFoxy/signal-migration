@@ -11,7 +11,7 @@ import path from 'node:path';
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib';
 
 const tdwebDist = '../third_party/td/example/web/tdweb/dist';
-const entries = ['src/main.ts', 'src/diagnostics.ts', 'src/kinds/stickers/apng-worker.ts'];
+const entries = ['src/main.ts', 'src/kinds/stickers/apng-worker.ts'];
 
 fs.rmSync('dist', { recursive: true, force: true });
 fs.mkdirSync('dist', { recursive: true });

@@ -32,15 +32,6 @@ pub struct Config {
     pub index: index::Index,
     pub relay_targets: relay::RelayTargets,
     pub client: ClientConfig,
-    /// Development only: accept event lines from the diagnostics page and print them.
-    pub diagnostics_log: bool,
-}
-
-/// Prints one event line from the diagnostics page (truncated; the page sends no secrets).
-async fn diagnostics_log(body: axum::body::Bytes) -> axum::http::StatusCode {
-    let line = String::from_utf8_lossy(&body[..body.len().min(500)]).replace(['\r', '\n'], " ");
-    println!("page: {line}");
-    axum::http::StatusCode::NO_CONTENT
 }
 
 async fn client_config(State(config): State<ClientConfig>) -> Json<ClientConfig> {
@@ -54,10 +45,7 @@ pub fn router(config: Config) -> Router {
         .with_state(config.index);
     let relay_routes = Router::new().route("/tunnel/{host}", get(relay::tunnel)).with_state(config.relay_targets);
     let config_routes = Router::new().route("/v1/config", get(client_config)).with_state(config.client);
-    let mut app = Router::new().merge(index_routes).merge(relay_routes).merge(config_routes);
-    if config.diagnostics_log {
-        app = app.route("/v1/diagnostics/log", post(diagnostics_log));
-    }
+    let app = Router::new().merge(index_routes).merge(relay_routes).merge(config_routes);
     // Built files have brotli and gzip copies next to them (app/build.mjs); a browser that accepts one gets it.
     app.fallback_service(ServeDir::new(config.static_dir).precompressed_br().precompressed_gzip())
 }
