@@ -1,0 +1,7 @@
+[submodule "third_party/libsignal"]
+	path = third_party/libsignal
+	url = https://github.com/ArviFoxy/libsignal
+[submodule "third_party/Signal-Desktop"]
+	path = third_party/Signal-Desktop
+	url = https://github.com/signalapp/Signal-Desktop
+	shallow = true

@@ -1,0 +1,21 @@
+{
+  "name": "browser-access",
+  "private": true,
+  "type": "module",
+  "description": "Checks what a browser page can reach on Signal's infrastructure.",
+  "scripts": {
+    "generate": "buf generate",
+    "build": "npm run generate && esbuild src/main.ts --bundle --format=esm --target=es2022 --outfile=public/main.js",
+    "check": "npm run generate && tsc --noEmit",
+    "start": "npm run build && node server.mjs"
+  },
+  "devDependencies": {
+    "@bufbuild/buf": "^1.75.0",
+    "@bufbuild/protoc-gen-es": "^2.17.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "@bufbuild/protobuf": "^2.17.0"
+  }
+}

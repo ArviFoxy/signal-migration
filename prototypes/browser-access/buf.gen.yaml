@@ -1,0 +1,14 @@
+version: v2
+inputs:
+  - directory: ../../third_party/libsignal/rust/net/src/proto
+    paths:
+      - ../../third_party/libsignal/rust/net/src/proto/chat_websocket.proto
+      - ../../third_party/libsignal/rust/net/src/proto/chat_provisioning.proto
+  - directory: ../../third_party/Signal-Desktop/protos
+    paths:
+      - ../../third_party/Signal-Desktop/protos/Stickers.proto
+plugins:
+  - local: protoc-gen-es
+    out: src/gen
+    opt: target=ts
+clean: true
