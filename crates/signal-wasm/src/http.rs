@@ -110,20 +110,21 @@ impl TlsHttpRequest {
             received: Vec::new(),
             response: None,
         };
-        request.pump(false)?;
+        request.pump()?;
         Ok(request)
     }
 
     #[wasm_bindgen(js_name = receiveEncrypted)]
     pub fn receive_encrypted(&mut self, data: &[u8]) -> Result<(), JsError> {
         self.transport.push_received(data);
-        self.pump(false)
+        self.pump()
     }
 
-    /// Call when the tunnel closed; completes a response delimited by the end of the stream.
+    /// Call when the tunnel closed. A response delimited by the end of the stream is complete only if the server
+    /// ended the TLS session with close_notify; otherwise the tunnel may have cut it short.
     #[wasm_bindgen(js_name = streamEnded)]
     pub fn stream_ended(&mut self) -> Result<(), JsError> {
-        self.pump(true)
+        self.pump()
     }
 
     #[wasm_bindgen(js_name = takeEncrypted)]
@@ -155,7 +156,7 @@ impl TlsHttpRequest {
         self.response.as_ref().map(|r| r.body.clone()).unwrap_or_default()
     }
 
-    fn pump(&mut self, ended: bool) -> Result<(), JsError> {
+    fn pump(&mut self) -> Result<(), JsError> {
         loop {
             if self.connection.wants_write() {
                 self.connection.write_tls(&mut self.transport).map_err(js_error)?;
@@ -168,27 +169,37 @@ impl TlsHttpRequest {
             }
             break;
         }
-        let mut buffer = [0u8; 16 * 1024];
-        let mut tls_closed = false;
-        loop {
-            match self.connection.reader().read(&mut buffer) {
-                Ok(0) => {
-                    tls_closed = true;
-                    break;
-                }
-                Ok(n) => self.received.extend_from_slice(&buffer[..n]),
-                Err(error) if error.kind() == ErrorKind::WouldBlock => break,
-                Err(error) if error.kind() == ErrorKind::UnexpectedEof => {
-                    tls_closed = true;
-                    break;
-                }
-                Err(error) => return Err(js_error(error)),
-            }
-        }
+        let end = read_available(&mut self.connection.reader(), &mut self.received).map_err(js_error)?;
         if self.response.is_none() {
-            self.response = parse_response(&self.received, ended || tls_closed).map_err(js_error)?;
+            self.response = parse_response(&self.received, end == ReadEnd::Clean).map_err(js_error)?;
         }
         Ok(())
+    }
+}
+
+/// How reading the TLS session's plaintext stopped.
+#[derive(Debug, PartialEq)]
+enum ReadEnd {
+    /// Nothing more for now.
+    Open,
+    /// The server ended the session with close_notify: rustls then reads 0 bytes.
+    Clean,
+    /// The connection ended without close_notify (rustls reports UnexpectedEof), which whoever relays the bytes can
+    /// cause, so a response delimited by the end of the stream may be incomplete.
+    Dropped,
+}
+
+/// Reads all the plaintext available into `into`.
+fn read_available(reader: &mut impl Read, into: &mut Vec<u8>) -> std::io::Result<ReadEnd> {
+    let mut buffer = [0u8; 16 * 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) => return Ok(ReadEnd::Clean),
+            Ok(n) => into.extend_from_slice(&buffer[..n]),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => return Ok(ReadEnd::Open),
+            Err(error) if error.kind() == ErrorKind::UnexpectedEof => return Ok(ReadEnd::Dropped),
+            Err(error) => return Err(error),
+        }
     }
 }
 
@@ -236,6 +247,51 @@ mod tests {
                 .unwrap()
                 .unwrap()
                 .body,
+            b"partial"
+        );
+    }
+
+    /// A reader that returns `data`, then ends as `end` does.
+    struct Ending {
+        data: Option<Vec<u8>>,
+        end: fn() -> std::io::Result<usize>,
+    }
+
+    impl Read for Ending {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            match self.data.take() {
+                Some(data) => {
+                    buf[..data.len()].copy_from_slice(&data);
+                    Ok(data.len())
+                }
+                None => (self.end)(),
+            }
+        }
+    }
+
+    // Detects: a connection that dropped without close_notify taken for the end of a response delimited by the end
+    // of the stream, so that the relay could cut such a response short unnoticed.
+    #[test]
+    fn completes_an_undelimited_body_only_after_close_notify() {
+        let head = b"HTTP/1.1 200 OK\r\n\r\npartial".to_vec();
+        let mut dropped = Ending {
+            data: Some(head.clone()),
+            end: || Err(ErrorKind::UnexpectedEof.into()),
+        };
+        let mut received = Vec::new();
+        let end = read_available(&mut dropped, &mut received).unwrap();
+        assert_eq!(end, ReadEnd::Dropped);
+        assert_eq!(parse_response(&received, end == ReadEnd::Clean).unwrap(), None);
+
+        let mut closed = Ending {
+            data: Some(head),
+            end: || Ok(0),
+        };
+        let mut received = Vec::new();
+        let end = read_available(&mut closed, &mut received).unwrap();
+        assert_eq!(end, ReadEnd::Clean);
+        assert_eq!(
+            parse_response(&received, end == ReadEnd::Clean).unwrap().unwrap().body,
             b"partial"
         );
     }
