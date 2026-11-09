@@ -37,10 +37,15 @@ const parseJson = <T>(bytes: Uint8Array) => JSON.parse(new TextDecoder().decode(
 /** Waits for the primary device to scan the QR code and returns the decrypted ProvisionMessage. */
 async function receiveProvisionMessage(callbacks: LinkCycleCallbacks) {
   const receiver = new ProvisioningReceiver();
-  const socket = await SignalSocket.open(`wss://${LINK_REFLECTOR}/service/v1/websocket/provisioning/`);
+  const socket = await SignalSocket.open(`wss://${LINK_REFLECTOR}/service/v1/websocket/provisioning/`, '/v1/keepalive/provisioning');
   try {
     const envelope = await new Promise<Uint8Array>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('no scan within 3 minutes')), PROVISIONING_TIMEOUT_MS);
+      socket.onUnexpectedClose = (code) => {
+        clearTimeout(timer);
+        callbacks.showQrCode(null);
+        reject(new Error(`the linking socket was closed (code ${code}) before a scan arrived; press Run again`));
+      };
       socket.onServerRequest = (request) => {
         if (request.path === '/v1/address') {
           const address = fromBinary(ProvisioningAddressSchema, request.body).address;
@@ -97,7 +102,7 @@ export async function runLinkCycle(callbacks: LinkCycleCallbacks): Promise<void>
     pniPqLastResortPreKey: hasPni ? preKey(generateKyberLastResortPreKey, provision.pniIdentityKeyPrivate) : undefined,
   };
 
-  const anonymous = await SignalSocket.open(`wss://${LINK_REFLECTOR}/service/v1/websocket/`);
+  const anonymous = await SignalSocket.open(`wss://${LINK_REFLECTOR}/service/v1/websocket/`, '/v1/keepalive');
   const linkResponse = await anonymous.request('PUT', '/v1/devices/link', {
     headers: ['content-type:application/json', `authorization:Basic ${btoa(`${provision.aci}:${password}`)}`],
     body: jsonBody(linkRequest),
@@ -122,7 +127,7 @@ export async function runLinkCycle(callbacks: LinkCycleCallbacks): Promise<void>
       priming.onopen = priming.onerror = priming.onclose = () => resolve();
     });
 
-    const session = await SignalSocket.open(`wss://${AUTH_REFLECTOR}/service/v1/websocket/`);
+    const session = await SignalSocket.open(`wss://${AUTH_REFLECTOR}/service/v1/websocket/`, '/v1/keepalive');
     try {
       const devices = await session.request('GET', '/v1/devices');
       if (devices.status !== 200) {

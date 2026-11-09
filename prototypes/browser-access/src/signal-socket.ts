@@ -15,22 +15,37 @@ export type ServerRequestHandler = (request: WebSocketRequestMessage) => number;
  * A Signal chat WebSocket: request/response messages in both directions, matched by id.
  * Server-initiated requests (queued messages, "queue empty") go to `onServerRequest`.
  */
+/** How often to send Signal's keepalive request. Signal's clients use about 30 s; idle sockets get dropped. */
+const KEEPALIVE_INTERVAL_MS = 30_000;
+
 export class SignalSocket {
   #socket: WebSocket;
   #nextId = 1n;
-  #pending = new Map<bigint, (response: WebSocketResponseMessage) => void>();
+  #pending = new Map<bigint, { resolve: (response: WebSocketResponseMessage) => void; reject: (error: Error) => void }>();
+  #keepalive: ReturnType<typeof setInterval>;
+  #closedByUs = false;
   onServerRequest: ServerRequestHandler = () => 200;
+  /** Called when the server or a proxy closes the socket; not called after `close()`. */
+  onUnexpectedClose: (code: number) => void = () => undefined;
 
-  private constructor(socket: WebSocket) {
+  private constructor(socket: WebSocket, keepalivePath: string) {
     this.#socket = socket;
     socket.onmessage = (event) => this.#receive(new Uint8Array(event.data as ArrayBuffer));
+    socket.onclose = (event) => {
+      clearInterval(this.#keepalive);
+      for (const { reject } of this.#pending.values()) reject(new Error(`socket closed (code ${event.code})`));
+      this.#pending.clear();
+      if (!this.#closedByUs) this.onUnexpectedClose(event.code);
+    };
+    this.#keepalive = setInterval(() => void this.request('GET', keepalivePath).catch(() => undefined), KEEPALIVE_INTERVAL_MS);
   }
 
-  static open(url: string): Promise<SignalSocket> {
+  /** `keepalivePath` is `/v1/keepalive/provisioning` on a linking socket and `/v1/keepalive` on a chat socket. */
+  static open(url: string, keepalivePath: string): Promise<SignalSocket> {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(url);
       socket.binaryType = 'arraybuffer';
-      socket.onopen = () => resolve(new SignalSocket(socket));
+      socket.onopen = () => resolve(new SignalSocket(socket, keepalivePath));
       socket.onerror = () => reject(new Error('WebSocket failed to open'));
     });
   }
@@ -40,21 +55,21 @@ export class SignalSocket {
     const request = create(WebSocketRequestMessageSchema, { id, verb, path, headers: options.headers ?? [], body: options.body });
     const message = create(WebSocketMessageSchema, { type: WebSocketMessage_Type.REQUEST, request });
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, resolve);
-      this.#socket.onclose = () => reject(new Error(`socket closed before the response to ${verb} ${path}`));
+      this.#pending.set(id, { resolve, reject });
       this.#socket.send(toBinary(WebSocketMessageSchema, message));
     });
   }
 
   close(): void {
-    this.#socket.onclose = null;
+    this.#closedByUs = true;
+    clearInterval(this.#keepalive);
     this.#socket.close();
   }
 
   #receive(bytes: Uint8Array): void {
     const message = fromBinary(WebSocketMessageSchema, bytes);
     if (message.type === WebSocketMessage_Type.RESPONSE && message.response !== undefined) {
-      this.#pending.get(message.response.id)?.(message.response);
+      this.#pending.get(message.response.id)?.resolve(message.response);
       this.#pending.delete(message.response.id);
     } else if (message.type === WebSocketMessage_Type.REQUEST && message.request !== undefined) {
       const status = this.onServerRequest(message.request);
