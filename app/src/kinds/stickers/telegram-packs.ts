@@ -18,8 +18,6 @@ export type TelegramSticker = {
 export type TelegramPack = {
   setId: string;
   title: string;
-  /** The pack's short name, as in t.me/addstickers/<name>. */
-  name: string;
   stickers: TelegramSticker[];
 };
 
@@ -30,7 +28,6 @@ function toPack(set: Td.stickerSet): TelegramPack {
   return {
     setId: set.id,
     title: set.title,
-    name: set.name,
     stickers: set.stickers.map((sticker) => ({
       file: sticker.sticker,
       uniqueId: sticker.sticker.remote.unique_id,

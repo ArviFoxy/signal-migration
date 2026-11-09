@@ -188,7 +188,7 @@ export class StickerMigration extends EventTarget {
     if (!entry.packId) {
       entry.state = 'uploading';
       this.#changed();
-      const content = { title: entry.pack.title, author: `t.me/addstickers/${entry.pack.name}`, stickers: this.#converted.get(entry)! };
+      const content = { title: entry.pack.title, stickers: this.#converted.get(entry)! };
       entry.packId = await signal.withSession((session) =>
         uploadStickerPack(session, content, packKey, (done, total) => {
           entry.progress = { done, total };

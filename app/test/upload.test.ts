@@ -42,13 +42,13 @@ describe('multipartBody', () => {
 });
 
 describe('manifestFor', () => {
-  // Detects: sticker IDs that do not match the upload slots (clients fetch sticker n from /full/n), lost emoji, or a
-  // missing cover.
-  it('numbers the stickers in order and uses the first as the cover', () => {
+  // Detects: sticker IDs that do not match the upload slots (clients fetch sticker n from /full/n), lost emoji, a
+  // missing cover, or an author field, which would let anyone with the pack see where it came from.
+  it('numbers the stickers in order, uses the first as the cover, and sets no author', () => {
     const image = new Uint8Array([1]);
-    const manifest = fromBinary(StickerPackSchema, manifestFor({ title: 'Cats', author: 't.me/addstickers/cats', stickers: [{ image, emoji: '😺' }, { image, emoji: '😾' }] }));
+    const manifest = fromBinary(StickerPackSchema, manifestFor({ title: 'Cats', stickers: [{ image, emoji: '😺' }, { image, emoji: '😾' }] }));
     expect(manifest.title).toBe('Cats');
-    expect(manifest.author).toBe('t.me/addstickers/cats');
+    expect(manifest.author).toBe('');
     expect(manifest.stickers.map((s) => [s.id, s.emoji])).toEqual([
       [0, '😺'],
       [1, '😾'],

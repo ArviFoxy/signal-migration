@@ -82,14 +82,18 @@ export async function requestUploadForm(session: SignalSession, count: number): 
 }
 
 export type StickerFile = { image: Uint8Array; emoji: string };
-export type PackContent = { title: string; author: string; stickers: StickerFile[] };
+/**
+ * What goes into the uploaded pack: the title, and each sticker's image and emoji. The manifest has no author, and
+ * nothing else from Telegram (no pack name or link) goes into it, so the Signal pack does not point back to Telegram.
+ */
+export type PackContent = { title: string; stickers: StickerFile[] };
 
 const hexToBytes = (hex: string) => new Uint8Array(hex.match(/../g)!.map((pair) => parseInt(pair, 16)));
 
 /** The plaintext manifest. The first sticker is the cover. */
 export function manifestFor(content: PackContent): Uint8Array {
   const stickers = content.stickers.map((sticker, id) => create(StickerPack_StickerSchema, { id, emoji: sticker.emoji }));
-  return toBinary(StickerPackSchema, create(StickerPackSchema, { title: content.title, author: content.author, cover: stickers[0], stickers }));
+  return toBinary(StickerPackSchema, create(StickerPackSchema, { title: content.title, cover: stickers[0], stickers }));
 }
 
 /** Uploads the pack under `packKey` and returns its new pack ID. `onProgress` gets (files uploaded, files total). */
