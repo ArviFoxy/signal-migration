@@ -5,14 +5,17 @@
 // three formats:
 // - WebP, static: passed through unchanged when within the size limit, otherwise re-encoded at lower quality.
 // - TGS, a gzipped Lottie animation: drawn frame by frame with lottie-web, then encoded as APNG.
-// - WebM video with transparency: drawn frame by frame from a video element, then encoded as APNG.
-// APNG encoding (upng-js, with a 256-colour palette) runs in a worker. The frame size and frame rate are lowered
-// until the file fits the size limit.
+// - WebM, VP9 video with transparency: decoded frame by frame with FFmpeg and libvpx compiled to WebAssembly
+//   (webm-decoder.c), then encoded as APNG.
+// Decoding video and encoding APNG (upng-js, with a 256-colour palette) run in workers. The frame size and frame
+// rate are lowered until the file fits the size limit.
 
 import lottie from 'lottie-web/build/player/lottie_light_canvas';
 import { withTimeLimit } from '../../core/time-limit';
 import type { StickerFormat } from './telegram-packs';
 import { MAX_STICKER_BYTES } from './upload';
+import type { WebmInfo } from './webm-decoding';
+import type { WebmCall } from './webm-worker';
 
 const MAX_SIZE = 512;
 /** Telegram animations run at up to 60 frames per second. Fewer frames leave more of the size limit for each frame. */
@@ -29,7 +32,7 @@ export class ConversionError extends Error {}
 /** What a conversion produced. For an animation: the square size and frame rate it was encoded at. */
 export type ConvertedSticker = {
   image: Uint8Array;
-  /** sourceFrameRate is null for video, whose frame rate the browser does not report. */
+  /** sourceFrameRate is null when the file does not say. */
   animation: { size: number; frameRate: number; sourceFrameRate: number | null } | null;
   /** A static image that was re-encoded at lower quality to fit the size limit. */
   reencoded: boolean;
@@ -49,33 +52,54 @@ type Animation = {
   close(): void;
 };
 
-let worker: Worker | null = null;
-let nextRequest = 0;
-const pending = new Map<number, { resolve: (png: ArrayBuffer) => void; reject: (error: Error) => void }>();
+/** A worker that answers requests by ID, started on first use. */
+class WorkerChannel {
+  #worker: Worker | null = null;
+  #nextId = 0;
+  readonly #pending = new Map<number, { resolve: (result: never) => void; reject: (error: Error) => void }>();
 
-/** Stops the encoder worker and fails every encoding waiting for it; the next encoding starts a new worker. */
-function stopWorker(error: Error): void {
-  worker?.terminate();
-  worker = null;
-  for (const request of pending.values()) request.reject(error);
-  pending.clear();
+  constructor(
+    private readonly url: string,
+    /** What the worker is, for the error when it fails as a whole. */
+    private readonly name: string,
+  ) {}
+
+  request<T>(message: object, transfer: Transferable[] = []): Promise<T> {
+    if (!this.#worker) {
+      const worker = new Worker(this.url, { type: 'module' });
+      worker.onmessage = (event: MessageEvent<{ id: number; result?: never; error?: string }>) => {
+        const request = this.#pending.get(event.data.id);
+        this.#pending.delete(event.data.id);
+        if (event.data.error !== undefined) request?.reject(new ConversionError(event.data.error));
+        else request?.resolve(event.data.result as never);
+      };
+      worker.onerror = (event) => this.stop(new ConversionError(`${this.name} failed: ${event.message}`));
+      this.#worker = worker;
+    }
+    const id = this.#nextId++;
+    return new Promise<T>((resolve, reject) => {
+      this.#pending.set(id, { resolve: resolve as (result: never) => void, reject });
+      this.#worker!.postMessage({ id, ...message }, transfer);
+    });
+  }
+
+  /** Stops the worker and fails every request waiting for it; the next request starts a new worker. */
+  stop(error: Error): void {
+    this.#worker?.terminate();
+    this.#worker = null;
+    for (const request of this.#pending.values()) request.reject(error);
+    this.#pending.clear();
+  }
 }
 
+const encoder = new WorkerChannel('/apng-worker.js', 'the animation encoder');
+const videoDecoder = new WorkerChannel('/webm-worker.js', 'the video decoder');
+
 function encodeApng(frames: ArrayBuffer[], size: number, frameRate: number): Promise<Uint8Array> {
-  if (!worker) {
-    worker = new Worker('/apng-worker.js', { type: 'module' });
-    worker.onmessage = (event: MessageEvent<{ id: number; png: ArrayBuffer }>) => {
-      pending.get(event.data.id)?.resolve(event.data.png);
-      pending.delete(event.data.id);
-    };
-    worker.onerror = (event) => stopWorker(new ConversionError(`the animation encoder failed: ${event.message}`));
-  }
-  const id = nextRequest++;
   const delays = frames.map(() => Math.round(1000 / frameRate));
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve: (png) => resolve(new Uint8Array(png)), reject });
-    worker!.postMessage({ id, frames, width: size, height: size, delays, colours: PALETTE_COLOURS }, frames);
-  });
+  return encoder
+    .request<ArrayBuffer>({ frames, width: size, height: size, delays, colours: PALETTE_COLOURS }, frames)
+    .then((png) => new Uint8Array(png));
 }
 
 /**
@@ -165,66 +189,25 @@ async function lottieAnimation(tgs: Uint8Array, step: Step): Promise<Animation> 
   };
 }
 
-function waitFor(video: HTMLVideoElement, event: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const done = () => {
-      video.removeEventListener(event, done);
-      video.removeEventListener('error', failed);
-      resolve();
-    };
-    const failed = () => {
-      video.removeEventListener(event, done);
-      video.removeEventListener('error', failed);
-      reject(new ConversionError('this browser cannot decode the video sticker'));
-    };
-    video.addEventListener(event, done);
-    video.addEventListener('error', failed);
-  });
-}
-
-async function videoAnimation(webm: Uint8Array, step: Step): Promise<Animation> {
-  const url = URL.createObjectURL(new Blob([webm as Uint8Array<ArrayBuffer>], { type: 'video/webm' }));
-  const video = document.createElement('video');
-  video.muted = true;
-  video.playsInline = true;
-  video.preload = 'auto';
-  step.now = 'waiting for the video to load';
-  const loaded = waitFor(video, 'loadeddata');
-  video.src = url;
-  await loaded;
-  const seek = async (time: number) => {
-    if (Math.abs(video.currentTime - time) < 1e-6) return;
-    step.now = `seeking the video to ${time === 1e9 ? 'its end, to learn its length' : `${time.toFixed(2)} s`}`;
-    const seeked = waitFor(video, 'seeked');
-    video.currentTime = time;
-    await seeked;
-  };
-  // A WebM file without a duration in its header reports Infinity until the end has been read.
-  if (!Number.isFinite(video.duration)) await seek(1e9);
-  const duration = video.duration;
+/** A video sticker, decoded in the worker (webm-worker.ts). The file is copied to the worker, not moved. */
+async function webmAnimation(webm: Uint8Array, step: Step): Promise<Animation> {
+  step.now = 'reading the video';
+  const info = await videoDecoder.request<WebmInfo>({ kind: 'probe', file: webm } satisfies WebmCall);
   return {
-    duration,
-    sourceFrameRate: null,
+    duration: info.duration,
+    sourceFrameRate: info.frameRate,
     async render(size, frameRate) {
-      const { context } = newCanvas(size);
-      const scale = size / Math.max(video.videoWidth, video.videoHeight);
-      const width = video.videoWidth * scale;
-      const height = video.videoHeight * scale;
-      const frames: ArrayBuffer[] = [];
-      const count = Math.max(1, Math.round(duration * frameRate));
-      for (let k = 0; k < count; k++) {
-        await seek(Math.min(k / frameRate, Math.max(0, duration - 0.001)));
-        context.clearRect(0, 0, size, size);
-        context.drawImage(video, (size - width) / 2, (size - height) / 2, width, height);
-        frames.push(context.getImageData(0, 0, size, size).data.buffer);
-      }
-      return frames;
+      const count = Math.max(1, Math.round(info.duration * frameRate));
+      step.now = `decoding ${count} frames at ${size} px`;
+      return videoDecoder.request<ArrayBuffer[]>({
+        kind: 'render',
+        file: webm,
+        size,
+        frameRate,
+        count,
+      } satisfies WebmCall);
     },
-    close() {
-      video.removeAttribute('src');
-      video.load();
-      URL.revokeObjectURL(url);
-    },
+    close() {},
   };
 }
 
@@ -248,7 +231,8 @@ export const convertSticker: ConvertSticker = (file, format) => {
     const error = new ConversionError(
       `converting took longer than ${CONVERSION_TIME_LIMIT_MS / 1000} seconds, at: ${step.now}`,
     );
-    stopWorker(error);
+    encoder.stop(error);
+    videoDecoder.stop(error);
     return error;
   });
 };
@@ -259,7 +243,7 @@ async function convert(file: Uint8Array, format: StickerFormat, step: Step): Pro
       ? { image: file, animation: null, reencoded: false }
       : { image: await reencodeWebp(file), animation: null, reencoded: true };
   }
-  const animation = format === 'tgs' ? await lottieAnimation(file, step) : await videoAnimation(file, step);
+  const animation = format === 'tgs' ? await lottieAnimation(file, step) : await webmAnimation(file, step);
   try {
     return await encodeToFit(animation, step);
   } finally {

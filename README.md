@@ -11,6 +11,7 @@ serves the app, passes encrypted traffic on to Signal, and keeps a shared list o
 | `crates/signal-wasm/` | libsignal and rustls compiled to WebAssembly: device linking, prekeys, sessions, account keys, sticker and storage encryption, and the TLS connection to Signal. |
 | `crates/server/` | The server, in Rust: static files, the relay to Signal, the sticker pack index. |
 | `third_party/td` | TDLib, Telegram's library, compiled to WebAssembly by `scripts/build-tdweb.sh`, with one patch (`scripts/tdweb/`). |
+| `app/src/kinds/stickers/webm-decoder.c` | The decoder for video stickers: FFmpeg's WebM reader and libvpx's VP9 decoder, compiled to WebAssembly by `scripts/build-webm-decoder.sh`. |
 
 ## Connections
 
@@ -67,6 +68,9 @@ the pack key and checks that the pack's manifest on Signal's CDN decrypts with i
 
 Stickers are converted to what Signal accepts: static WebP stays WebP; Lottie (TGS) and WebM animations become
 animated PNG, at a lower size and frame rate where needed to fit 300 KiB (`app/src/kinds/stickers/convert.ts`).
+A WebM sticker keeps its transparency as a second VP9 stream beside the video, which libvpx's decoder reads and
+FFmpeg's own does not; the decoder is built with only FFmpeg's Matroska reader, libvpx's VP9 decoder and swscale.
+That build of FFmpeg is under the LGPL 2.1, libvpx under a BSD licence; the script names the exact versions.
 
 ## What the browser stores
 
@@ -86,7 +90,8 @@ You need Node.js, Rust (rustup picks the version from `rust-toolchain.toml`) and
 ```sh
 git clone --recurse-submodules https://github.com/ArviFoxy/signal-migration
 cd signal-migration
-scripts/build-tdweb.sh   # TDLib; slow, needed once. Installs Emscripten 3.1.1 under build/ unless EMSDK is set
+scripts/build-tdweb.sh          # TDLib; slow, needed once. Installs Emscripten 3.1.1 under build/ unless EMSDK is set
+scripts/build-webm-decoder.sh   # the WebM decoder; a few minutes, needed once. Installs Emscripten 4.0.23 under build/
 cd app && npm install && npm run build
 cd ../crates/server && cargo build --release
 ```

@@ -15,5 +15,5 @@ type EncodeRequest = {
 self.onmessage = (event: MessageEvent<EncodeRequest>) => {
   const { id, frames, width, height, delays, colours } = event.data;
   const png = UPNG.encode(frames, width, height, colours, delays);
-  (self as unknown as Worker).postMessage({ id, png }, [png]);
+  (self as unknown as Worker).postMessage({ id, result: png }, [png]);
 };
