@@ -1,5 +1,5 @@
 // Step 2: logging in to Telegram, by scanning a QR code with Telegram on the phone, or with the phone number, the
-// code Telegram sends and the cloud password if the account has one. Each screen follows TDLib's authorization state.
+// code Telegram sends and the Two-Step Verification password if the account has one. Each screen follows TDLib's authorization state.
 
 import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -149,8 +149,14 @@ export class TelegramStep extends LightElement {
           }),
         );
       case 'authorizationStateWaitPassword':
-        return html`${this.form('Telegram cloud password', 'password', 'current-password', (password) => ({ _: 'checkAuthenticationPassword', password }))}
-        ${authState.password_hint ? html`<p class="text-sm text-muted">Hint: ${authState.password_hint}</p>` : nothing}`;
+        return html`${this.form('Two-Step Verification password', 'password', 'current-password', (password) => ({
+            _: 'checkAuthenticationPassword',
+            password,
+          }))}
+          <p class="text-sm text-muted">
+            The extra password set in Telegram under Settings › Privacy and Security › Two-Step Verification.
+          </p>
+          ${authState.password_hint ? html`<p class="text-sm text-muted">Hint: ${authState.password_hint}</p>` : nothing}`;
       case 'authorizationStateReady':
         return html`<p class="flex items-center gap-2 font-semibold text-accent">
           ${icons.check(18)} Signed in to Telegram
