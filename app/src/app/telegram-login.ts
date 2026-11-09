@@ -79,6 +79,8 @@ export class TelegramLogin extends EventTarget {
   #client: TelegramSession | null = null;
   #app: TelegramApp | null = null;
   #qrRequested = false;
+  /** The current client continues a kept instance and has not reported its state yet. */
+  #resumed = false;
   /** TDLib is ending the session by itself (ended elsewhere, or a kept instance's logout); it must not be stopped. */
   #endingByItself = false;
   /** The current client's last authorization state, and a promise kept once it has reported one. */
@@ -139,6 +141,7 @@ export class TelegramLogin extends EventTarget {
   /** Starts TDLib on `instance` and makes it the current client. */
   #open(app: TelegramApp, instance: string): void {
     this.#qrRequested = false;
+    this.#resumed = false;
     this.#endingByItself = false;
     this.#auth = null;
     this.#reported = new Promise((resolve) => (this.#markReported = resolve));
@@ -173,15 +176,35 @@ export class TelegramLogin extends EventTarget {
     return this.#enqueue(async () => {
       if (this.state.kind !== 'off') return;
       this.#open(await this.#appIdentity(), instance);
+      this.#resumed = true;
     });
+  }
+
+  /** Replaces the current client with a new instance, for a fresh login. */
+  async #startFresh(client: TelegramSession): Promise<void> {
+    if (client !== this.#client) return;
+    this.#client = null;
+    this.#set({ kind: 'stopping' });
+    await this.#dispose(client);
+    const instance = this.services.newInstance();
+    await this.keep(instance);
+    this.#open(await this.#appIdentity(), instance);
   }
 
   #onUpdate(client: TelegramSession, auth: Td.AuthorizationState): void {
     if (client !== this.#client) return;
     this.#auth = auth;
     if (auth._ !== 'authorizationStateWaitTdlibParameters') this.#markReported();
+    const resumed = this.#resumed && auth._ !== 'authorizationStateWaitTdlibParameters';
+    if (resumed) this.#resumed = false;
     if (LOGIN_STATES.has(auth._)) {
       if (this.state.kind === 'stopping') return;
+      // A kept login that never completed: TDLib restores its QR code, whose token may have expired meanwhile
+      // (AuthManager::load_state in third_party/td). Continuing it gains nothing, so a new one starts.
+      if (resumed) {
+        void this.#enqueue(() => this.#startFresh(client));
+        return;
+      }
       this.#set({ kind: 'login', auth });
       if (auth._ === 'authorizationStateWaitPhoneNumber' && this.method === 'qr' && !this.#qrRequested) {
         this.#qrRequested = true;
@@ -239,12 +262,7 @@ export class TelegramLogin extends EventTarget {
       if (method === 'qr') {
         await this.#requestQrCode(client);
       } else if (this.state.auth._ === 'authorizationStateWaitOtherDeviceConfirmation') {
-        this.#client = null;
-        this.#set({ kind: 'stopping' });
-        await this.#dispose(client);
-        const instance = this.services.newInstance();
-        await this.keep(instance);
-        this.#open(await this.#appIdentity(), instance);
+        await this.#startFresh(client);
       }
     });
   }

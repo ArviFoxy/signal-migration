@@ -121,6 +121,28 @@ describe('the workflow', () => {
     expect(second.server.active.size).toBe(1);
   });
 
+  // Detects: a reload continuing a login that never completed, whose QR code TDLib restores with its token, which may
+  // have expired (Telegram then answers AUTH_TOKEN_EXPIRED to the scan).
+  it('starts a new login after a reload during one that never completed', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    first.workflow.goTo('packs');
+    await until(() => first.workflow.telegram.state.kind === 'login', 'the login');
+    const unfinished = first.workflow.telegram.instance;
+    await settle(first);
+    browser.closePage();
+
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.telegram.state.kind === 'login', 'a login');
+    await settle(second);
+    expect(second.workflow.telegram.instance).not.toBe(unfinished);
+    expect(browser.instances.has(unfinished!)).toBe(false);
+    await until(() => second.scanTelegramCode(), 'a Telegram QR code to scan');
+    await until(() => second.workflow.step === 'signal', 'the Signal step');
+  });
+
   // Detects: a deselected pack coming back selected after a reload, and being migrated against the user's choice.
   it('keeps the selection across a reload', async () => {
     const world = new StickerWorld();
