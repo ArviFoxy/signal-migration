@@ -1,6 +1,6 @@
 import { createHash, hkdfSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { encodePackSource, type PackSource, packIdentity } from '../src/kinds/stickers/identity';
+import { encodePackSource, type PackSource, packIdentity } from '../../../src/kinds/stickers/identity';
 
 /** The encoding written out independently with Buffer: domain label, then length-prefixed fields. */
 function referenceEncoding(source: PackSource): Buffer {
@@ -12,10 +12,21 @@ function referenceEncoding(source: PackSource): Buffer {
   };
   const count = Buffer.alloc(4);
   count.writeUInt32BE(source.stickers.length);
-  return Buffer.concat([Buffer.from('signal-migration sticker pack v1'), field(source.title), count, ...source.stickers.flatMap((s) => [field(s.uniqueId), field(s.emoji)])]);
+  return Buffer.concat([
+    Buffer.from('signal-migration sticker pack v1'),
+    field(source.title),
+    count,
+    ...source.stickers.flatMap((s) => [field(s.uniqueId), field(s.emoji)]),
+  ]);
 }
 
-const source: PackSource = { title: 'Cats 🐱', stickers: [{ uniqueId: 'AgADBAADc', emoji: '😺' }, { uniqueId: 'AgADBQADd', emoji: '😾' }] };
+const source: PackSource = {
+  title: 'Cats 🐱',
+  stickers: [
+    { uniqueId: 'AgADBAADc', emoji: '😺' },
+    { uniqueId: 'AgADBQADd', emoji: '😾' },
+  ],
+};
 
 describe('packIdentity', () => {
   // Detects: a change to the encoding or the derivation labels, which would give every pack a new identity and make
@@ -41,6 +52,8 @@ describe('packIdentity', () => {
   // Detects: the identity ignoring sticker order, which the Signal pack reproduces.
   it('gives a reordered pack a different identity', async () => {
     const reordered = { title: source.title, stickers: [...source.stickers].reverse() };
-    expect(Buffer.from((await packIdentity(reordered)).lookupKey)).not.toEqual(Buffer.from((await packIdentity(source)).lookupKey));
+    expect(Buffer.from((await packIdentity(reordered)).lookupKey)).not.toEqual(
+      Buffer.from((await packIdentity(source)).lookupKey),
+    );
   });
 });

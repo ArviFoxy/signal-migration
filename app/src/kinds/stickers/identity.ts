@@ -48,11 +48,17 @@ export function encodePackSource(source: PackSource): Uint8Array {
 
 async function hkdf(inputKey: Uint8Array, label: string): Promise<Uint8Array> {
   const key = await crypto.subtle.importKey('raw', inputKey as Uint8Array<ArrayBuffer>, 'HKDF', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: encoder.encode(label) }, key, 256);
+  const bits = await crypto.subtle.deriveBits(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(0), info: encoder.encode(label) },
+    key,
+    256,
+  );
   return new Uint8Array(bits);
 }
 
 export async function packIdentity(source: PackSource): Promise<PackIdentity> {
-  const sourceId = new Uint8Array(await crypto.subtle.digest('SHA-256', encodePackSource(source) as Uint8Array<ArrayBuffer>));
+  const sourceId = new Uint8Array(
+    await crypto.subtle.digest('SHA-256', encodePackSource(source) as Uint8Array<ArrayBuffer>),
+  );
   return { sourceId, packKey: await hkdf(sourceId, PACK_KEY_LABEL), lookupKey: await hkdf(sourceId, LOOKUP_KEY_LABEL) };
 }

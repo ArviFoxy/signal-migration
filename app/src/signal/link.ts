@@ -7,12 +7,18 @@ import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { ProvisioningAddressSchema } from '../gen/chat_provisioning_pb';
 import { type ProvisionMessage, ProvisionMessageSchema } from '../gen/DeviceMessages_pb';
 import { DeviceNameSchema } from '../gen/DeviceName_pb';
-import { encryptDeviceName, generateKyberLastResortPreKey, generateSignedPreKey, ProvisioningReceiver } from '../wasm/signal_migration_wasm';
+import {
+  encryptDeviceName,
+  generateKyberLastResortPreKey,
+  generateSignedPreKey,
+  ProvisioningReceiver,
+} from '../wasm/signal_migration_wasm';
 import { basicAuthorization, type DeviceCredentials } from './session';
 import { connectChat } from './socket';
 import { loadSignalWasm } from './wasm';
 
-export const DEVICE_NAME = 'Sticker migration';
+/** The linked device's name, as the user sees it in Signal's list of linked devices, unless they choose another. */
+export const DEFAULT_DEVICE_NAME = 'Sticker migration';
 const SCAN_TIMEOUT_MS = 180_000;
 
 /** What the migration keeps from linking, in memory only, until it unlinks. */
@@ -23,21 +29,28 @@ export type LinkedAccount = {
 };
 
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-const randomHex = (byteCount: number) => Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), (b) => b.toString(16).padStart(2, '0')).join('');
+const randomHex = (byteCount: number) =>
+  Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), (b) => b.toString(16).padStart(2, '0')).join('');
 const randomInt = (min: number, max: number) => min + (crypto.getRandomValues(new Uint32Array(1))[0] % (max - min + 1));
 
 /** Reports progress events that contain no secrets (request paths, close codes). */
 export type LinkEvents = (event: string) => void;
 
 /** Waits for the phone to scan the QR code (passed to `showQrCode` as a `sgnl://linkdevice` URL). */
-async function receiveProvisionMessage(showQrCode: (url: string) => void, onEvent: LinkEvents): Promise<ProvisionMessage> {
+async function receiveProvisionMessage(
+  showQrCode: (url: string) => void,
+  onEvent: LinkEvents,
+): Promise<ProvisionMessage> {
   await loadSignalWasm();
   const receiver = new ProvisioningReceiver();
   const socket = await connectChat('/v1/websocket/provisioning/', '/v1/keepalive/provisioning');
   onEvent('linking socket open');
   try {
     const envelope = await new Promise<Uint8Array>((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('the QR code was not scanned within 3 minutes')), SCAN_TIMEOUT_MS);
+      const timer = setTimeout(
+        () => reject(new Error('the QR code was not scanned within 3 minutes')),
+        SCAN_TIMEOUT_MS,
+      );
       socket.onUnexpectedClose = (code) => {
         clearTimeout(timer);
         onEvent(`linking socket closed, code ${code}`);
@@ -48,7 +61,11 @@ async function receiveProvisionMessage(showQrCode: (url: string) => void, onEven
         if (request.path === '/v1/address') {
           const address = fromBinary(ProvisioningAddressSchema, request.body).address;
           const url = new URL('sgnl://linkdevice');
-          url.search = new URLSearchParams({ uuid: address, pub_key: base64(receiver.publicKey()), capabilities: 'nopni,nopni2' }).toString();
+          url.search = new URLSearchParams({
+            uuid: address,
+            pub_key: base64(receiver.publicKey()),
+            capabilities: 'nopni,nopni2',
+          }).toString();
           showQrCode(url.toString());
         } else if (request.path === '/v1/message') {
           clearTimeout(timer);
@@ -72,29 +89,48 @@ function signedKey(generate: typeof generateSignedPreKey, identityPrivate: Uint8
 }
 
 /** Links the device and returns its login and the keys the migration needs. */
-export async function linkDevice(showQrCode: (url: string) => void, onEvent: LinkEvents = () => undefined): Promise<LinkedAccount> {
+/** `deviceName` is read when the phone has scanned the code, so the user can still change it while the code shows. */
+export async function linkDevice(
+  showQrCode: (url: string) => void,
+  onEvent: LinkEvents = () => undefined,
+  deviceName: () => string = () => DEFAULT_DEVICE_NAME,
+): Promise<LinkedAccount> {
   const provision = await receiveProvisionMessage(showQrCode, onEvent);
   onEvent('linking message decrypted');
   try {
     const hasPni = provision.pniIdentityKeyPrivate.length > 0 && provision.pni !== '';
     const password = randomHex(16);
-    const name = encryptDeviceName(DEVICE_NAME, provision.aciIdentityKeyPublic);
-    const deviceName = toBinary(DeviceNameSchema, create(DeviceNameSchema, { ephemeralPublic: name.ephemeralPublic, syntheticIv: name.syntheticIv, ciphertext: name.ciphertext }));
+    const name = encryptDeviceName(deviceName().trim() || DEFAULT_DEVICE_NAME, provision.aciIdentityKeyPublic);
+    const encryptedName = toBinary(
+      DeviceNameSchema,
+      create(DeviceNameSchema, {
+        ephemeralPublic: name.ephemeralPublic,
+        syntheticIv: name.syntheticIv,
+        ciphertext: name.ciphertext,
+      }),
+    );
     name.free();
 
     const linkRequest = {
       verificationCode: provision.provisioningCode,
       accountAttributes: {
         fetchesMessages: true,
-        name: base64(deviceName),
+        name: base64(encryptedName),
         registrationId: randomInt(1, 16380),
         pniRegistrationId: hasPni ? randomInt(1, 16380) : undefined,
-        capabilities: { attachmentBackfill: false, spqr: true, usernameChangeSyncMessage: true, optionalPhoneNumber: !hasPni },
+        capabilities: {
+          attachmentBackfill: false,
+          spqr: true,
+          usernameChangeSyncMessage: true,
+          optionalPhoneNumber: !hasPni,
+        },
       },
       aciSignedPreKey: signedKey(generateSignedPreKey, provision.aciIdentityKeyPrivate),
       aciPqLastResortPreKey: signedKey(generateKyberLastResortPreKey, provision.aciIdentityKeyPrivate),
       pniSignedPreKey: hasPni ? signedKey(generateSignedPreKey, provision.pniIdentityKeyPrivate) : undefined,
-      pniPqLastResortPreKey: hasPni ? signedKey(generateKyberLastResortPreKey, provision.pniIdentityKeyPrivate) : undefined,
+      pniPqLastResortPreKey: hasPni
+        ? signedKey(generateKyberLastResortPreKey, provision.pniIdentityKeyPrivate)
+        : undefined,
     };
 
     const socket = await connectChat('/v1/websocket/', '/v1/keepalive');
@@ -110,7 +146,14 @@ export async function linkDevice(showQrCode: (url: string) => void, onEvent: Lin
       socket.close();
     }
   } finally {
-    for (const secret of [provision.aciIdentityKeyPrivate, provision.pniIdentityKeyPrivate, provision.masterKey, provision.profileKey, provision.mediaRootBackupKey, provision.ephemeralBackupKey]) {
+    for (const secret of [
+      provision.aciIdentityKeyPrivate,
+      provision.pniIdentityKeyPrivate,
+      provision.masterKey,
+      provision.profileKey,
+      provision.mediaRootBackupKey,
+      provision.ephemeralBackupKey,
+    ]) {
       secret.fill(0);
     }
   }

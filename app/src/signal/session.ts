@@ -4,13 +4,15 @@
 // session to Signal, so neither the relay nor the browser ever handles it.
 
 import { connectChat, SignalSocket, SocketClosedError } from './socket';
+import type { ChatChannel } from './transport';
 
 /** The temporary device's login. Held in memory only, for as long as the migration runs. */
 export type DeviceCredentials = { aci: string; deviceId: number; password: string };
 
-export const basicAuthorization = (username: string, password: string) => `Authorization: Basic ${btoa(`${username}:${password}`)}`;
+export const basicAuthorization = (username: string, password: string) =>
+  `Authorization: Basic ${btoa(`${username}:${password}`)}`;
 
-export class SignalSession {
+export class SignalSession implements ChatChannel {
   #socket: SignalSocket;
   readonly deviceId: number;
 
@@ -33,15 +35,6 @@ export class SignalSession {
 
   request(verb: string, path: string, options: { body?: Uint8Array; headers?: string[] } = {}) {
     return this.#socket.request(verb, path, options);
-  }
-
-  async requestJson<T>(verb: string, path: string, body?: unknown): Promise<T> {
-    const response = await this.request(verb, path, {
-      headers: body === undefined ? [] : ['content-type:application/json'],
-      body: body === undefined ? undefined : new TextEncoder().encode(JSON.stringify(body)),
-    });
-    if (response.status < 200 || response.status >= 300) throw new Error(`${verb} ${path} answered ${response.status} ${response.message}`);
-    return JSON.parse(new TextDecoder().decode(response.body)) as T;
   }
 
   /** Removes this device from the account. The server then closes the socket with 4401, often before answering. */

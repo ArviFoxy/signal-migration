@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { assignPositions, insertPacks } from '../src/kinds/stickers/order';
+import { assignPositions, insertPacks } from '../../../src/kinds/stickers/order';
 
 /** A seeded generator (mulberry32), so every failure reproduces. */
 function random(seed: number) {
@@ -46,7 +46,10 @@ function instance(next: () => number, rankedCount: number, unrankedCount: number
   const ranks = Array.from({ length: rankedCount }, (_, i) => i);
   const existingRanked = ranks.filter(() => next() < 0.5);
   const added = ranks.filter((rank) => !existingRanked.includes(rank)).map((rank) => ({ name: `new${rank}`, rank }));
-  const existing: Pack[] = [...existingRanked.map((rank) => ({ name: `old${rank}`, rank })), ...Array.from({ length: unrankedCount }, (_, i) => ({ name: `other${i}`, rank: null }))];
+  const existing: Pack[] = [
+    ...existingRanked.map((rank) => ({ name: `old${rank}`, rank })),
+    ...Array.from({ length: unrankedCount }, (_, i) => ({ name: `other${i}`, rank: null })),
+  ];
   for (let i = existing.length - 1; i > 0; i--) {
     const j = Math.floor(next() * (i + 1));
     [existing[i], existing[j]] = [existing[j], existing[i]];
@@ -65,7 +68,9 @@ describe('insertPacks', () => {
     for (let trial = 0; trial < 300; trial++) {
       const { existing, added } = instance(next, 1 + Math.floor(next() * 6), Math.floor(next() * 3));
       const order = insertPacks(asExisting(existing), asNew(added));
-      expect(inversions(order), JSON.stringify({ existing, added })).toBe(fewestInversionsByBruteForce(existing, added));
+      expect(inversions(order), JSON.stringify({ existing, added })).toBe(
+        fewestInversionsByBruteForce(existing, added),
+      );
     }
   });
 
@@ -113,7 +118,10 @@ describe('insertPacks placement among unrelated packs', () => {
 describe('assignPositions', () => {
   /** Signal's display order: by position, then by pack ID (here the pack's index stands in for a random ID). */
   const signalOrder = (positions: number[], packIds: number[]) =>
-    positions.map((position, i) => ({ position, packId: packIds[i], i })).sort((a, b) => a.position - b.position || a.packId - b.packId).map((pack) => pack.i);
+    positions
+      .map((position, i) => ({ position, packId: packIds[i], i }))
+      .sort((a, b) => a.position - b.position || a.packId - b.packId)
+      .map((pack) => pack.i);
 
   // Detects: positions under which Signal would show the packs in another order than the intended one, whatever
   // pack IDs the new packs get.

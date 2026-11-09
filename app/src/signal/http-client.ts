@@ -2,13 +2,18 @@
 // our relay.
 
 import { TlsHttpRequest } from '../wasm/signal_migration_wasm';
+import type { HttpResponse } from './transport';
 import { RelayLink } from './tunnel';
 import { loadSignalWasm } from './wasm';
 
-export type HttpResponse = { status: number; header: (name: string) => string | undefined; body: Uint8Array };
-
 /** Sends one request (with `Connection: close`). `headers` are "Name: value". */
-export async function httpsRequest(host: string, method: string, path: string, headers: string[] = [], body: Uint8Array = new Uint8Array(0)): Promise<HttpResponse> {
+export async function httpsRequest(
+  host: string,
+  method: string,
+  path: string,
+  headers: string[] = [],
+  body: Uint8Array = new Uint8Array(0),
+): Promise<HttpResponse> {
   await loadSignalWasm();
   const request = new TlsHttpRequest(host, method, path, headers, body);
   return new Promise((resolve, reject) => {
@@ -16,7 +21,11 @@ export async function httpsRequest(host: string, method: string, path: string, h
     const settle = () => {
       if (settled || !request.isComplete) return false;
       settled = true;
-      const response: HttpResponse = { status: request.status, header: (name) => request.header(name), body: request.body() };
+      const response: HttpResponse = {
+        status: request.status,
+        header: (name) => request.header(name),
+        body: request.body(),
+      };
       request.free();
       resolve(response);
       return true;

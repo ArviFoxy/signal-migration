@@ -35,7 +35,10 @@ export class RelayLink {
         this.flush();
         onReceive();
       } catch (error) {
-        this.#shutdown(`connection to ${host} failed: ${error instanceof Error ? error.message : String(error)}`, onClose);
+        this.#shutdown(
+          `connection to ${host} failed: ${error instanceof Error ? error.message : String(error)}`,
+          onClose,
+        );
       }
     };
     this.#socket.onclose = () => this.#shutdown(`relay to ${host} closed`, onClose);

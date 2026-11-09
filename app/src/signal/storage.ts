@@ -18,20 +18,34 @@ import {
   StorageRecordSchema,
   WriteOperationSchema,
 } from '../gen/SignalStorage_pb';
-import { decryptStorageBlob, encryptStorageBlob, storageManifestKey, storageRecordKey, storageServiceKeyFromMasterKey } from '../wasm/signal_migration_wasm';
+import {
+  decryptStorageBlob,
+  encryptStorageBlob,
+  storageManifestKey,
+  storageRecordKey,
+  storageServiceKeyFromMasterKey,
+} from '../wasm/signal_migration_wasm';
 import { httpsRequest } from './http-client';
-import { basicAuthorization, type SignalSession } from './session';
+import { basicAuthorization } from './session';
+import type { ChatChannel, HttpsRequest } from './transport';
 import { loadSignalWasm } from './wasm';
 
 const STORAGE_HOST = 'storage.signal.org';
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 
-
 /** An installed sticker pack as recorded in the storage service. */
 export type StoredStickerPack = { recordId: Uint8Array; packId: Uint8Array; packKey: Uint8Array; position: number };
 
-/** The manifest and installed sticker packs at one manifest version; the basis of a write. */
-export type StickerPackSnapshot = { version: bigint; manifest: ManifestRecord; packs: StoredStickerPack[] };
+/** A record left by uninstalling a pack: the pack ID with a deletion time. */
+export type RemovedStickerPack = { recordId: Uint8Array; packId: Uint8Array };
+
+/** The manifest and sticker pack records at one manifest version; the basis of a write. */
+export type StickerPackSnapshot = {
+  version: bigint;
+  manifest: ManifestRecord;
+  packs: StoredStickerPack[];
+  removed: RemovedStickerPack[];
+};
 
 /** A sticker pack to (re)write with a position; `replaces` is the record it supersedes, if any. */
 export type StickerPackWrite = { packId: Uint8Array; packKey: Uint8Array; position: number; replaces?: Uint8Array };
@@ -40,50 +54,78 @@ export class StorageClient {
   #authorization: string;
   #storageServiceKey: Uint8Array;
   #deviceId: number;
+  #https: HttpsRequest;
 
-  private constructor(authorization: string, storageServiceKey: Uint8Array, deviceId: number) {
+  private constructor(authorization: string, storageServiceKey: Uint8Array, deviceId: number, https: HttpsRequest) {
     this.#authorization = authorization;
     this.#storageServiceKey = storageServiceKey;
     this.#deviceId = deviceId;
+    this.#https = https;
   }
 
-  /** Gets storage service credentials through the logged-in session. */
-  static async open(session: SignalSession, masterKey: Uint8Array): Promise<StorageClient> {
-    const { username, password } = await session.requestJson<{ username: string; password: string }>('GET', '/v1/storage/auth');
+  /** Gets storage service credentials over the logged-in chat connection of device `deviceId`. */
+  static async open(
+    chat: ChatChannel,
+    masterKey: Uint8Array,
+    deviceId: number,
+    https: HttpsRequest = httpsRequest,
+  ): Promise<StorageClient> {
+    const response = await chat.request('GET', '/v1/storage/auth');
+    if (response.status !== 200)
+      throw new Error(`GET /v1/storage/auth answered ${response.status} ${response.message}`);
+    const { username, password } = JSON.parse(new TextDecoder().decode(response.body)) as {
+      username: string;
+      password: string;
+    };
     await loadSignalWasm();
-    return new StorageClient(basicAuthorization(username, password), storageServiceKeyFromMasterKey(masterKey), session.deviceId);
+    return new StorageClient(
+      basicAuthorization(username, password),
+      storageServiceKeyFromMasterKey(masterKey),
+      deviceId,
+      https,
+    );
   }
 
   async #request(method: string, path: string, body?: Uint8Array) {
-    return httpsRequest(STORAGE_HOST, method, path, [this.#authorization, 'Content-Type: application/x-protobuf'], body);
+    return this.#https(STORAGE_HOST, method, path, [this.#authorization, 'Content-Type: application/x-protobuf'], body);
   }
 
   async #readManifest(): Promise<{ version: bigint; manifest: ManifestRecord }> {
     const response = await this.#request('GET', '/v1/storage/manifest');
     if (response.status !== 200) throw new Error(`reading the storage manifest answered ${response.status}`);
     const stored = fromBinary(StorageManifestSchema, response.body);
-    const manifest = fromBinary(ManifestRecordSchema, decryptStorageBlob(storageManifestKey(this.#storageServiceKey, stored.version), stored.value));
+    const manifest = fromBinary(
+      ManifestRecordSchema,
+      decryptStorageBlob(storageManifestKey(this.#storageServiceKey, stored.version), stored.value),
+    );
     return { version: stored.version, manifest };
   }
 
-  /** Reads the manifest and every installed sticker pack record it lists. */
+  /** Reads the manifest and every sticker pack record it lists. */
   async readStickerPacks(): Promise<StickerPackSnapshot> {
     const { version, manifest } = await this.#readManifest();
-    const ids = manifest.identifiers.filter((id) => id.type === ManifestRecord_Identifier_Type.STICKER_PACK).map((id) => id.raw);
+    const ids = manifest.identifiers
+      .filter((id) => id.type === ManifestRecord_Identifier_Type.STICKER_PACK)
+      .map((id) => id.raw);
     const packs: StoredStickerPack[] = [];
+    const removed: RemovedStickerPack[] = [];
     if (ids.length > 0) {
-      const response = await this.#request('PUT', '/v1/storage/read', toBinary(ReadOperationSchema, create(ReadOperationSchema, { readKey: ids })));
+      const response = await this.#request(
+        'PUT',
+        '/v1/storage/read',
+        toBinary(ReadOperationSchema, create(ReadOperationSchema, { readKey: ids })),
+      );
       if (response.status !== 200) throw new Error(`reading storage records answered ${response.status}`);
       for (const item of fromBinary(StorageItemsSchema, response.body).items) {
         const key = storageRecordKey(this.#storageServiceKey, manifest.recordIkm, item.key);
         const record = fromBinary(StorageRecordSchema, decryptStorageBlob(key, item.value));
         if (record.record.case !== 'installedStickerPack') continue;
         const pack: InstalledStickerPackRecord = record.record.value;
-        if (pack.deletedAtTimestamp !== 0n) continue;
-        packs.push({ recordId: item.key, packId: pack.packId, packKey: pack.packKey, position: pack.position });
+        if (pack.deletedAtTimestamp !== 0n) removed.push({ recordId: item.key, packId: pack.packId });
+        else packs.push({ recordId: item.key, packId: pack.packId, packKey: pack.packKey, position: pack.position });
       }
     }
-    return { version, manifest, packs };
+    return { version, manifest, packs, removed };
   }
 
   /**
@@ -99,14 +141,36 @@ export class StorageClient {
     for (const write of writes) {
       const recordId = crypto.getRandomValues(new Uint8Array(16));
       const record = create(StorageRecordSchema, {
-        record: { case: 'installedStickerPack', value: create(InstalledStickerPackRecordSchema, { packId: write.packId, packKey: write.packKey, position: write.position }) },
+        record: {
+          case: 'installedStickerPack',
+          value: create(InstalledStickerPackRecordSchema, {
+            packId: write.packId,
+            packKey: write.packKey,
+            position: write.position,
+          }),
+        },
       });
       const key = storageRecordKey(this.#storageServiceKey, snapshot.manifest.recordIkm, recordId);
-      insertItem.push(create(StorageItemSchema, { key: recordId, value: encryptStorageBlob(key, toBinary(StorageRecordSchema, record)) }));
-      identifiers.push(create(ManifestRecord_IdentifierSchema, { raw: recordId, type: ManifestRecord_Identifier_Type.STICKER_PACK }));
+      insertItem.push(
+        create(StorageItemSchema, {
+          key: recordId,
+          value: encryptStorageBlob(key, toBinary(StorageRecordSchema, record)),
+        }),
+      );
+      identifiers.push(
+        create(ManifestRecord_IdentifierSchema, { raw: recordId, type: ManifestRecord_Identifier_Type.STICKER_PACK }),
+      );
     }
-    const manifest = create(ManifestRecordSchema, { version: newVersion, sourceDevice: this.#deviceId, identifiers, recordIkm: snapshot.manifest.recordIkm });
-    const encryptedManifest = encryptStorageBlob(storageManifestKey(this.#storageServiceKey, newVersion), toBinary(ManifestRecordSchema, manifest));
+    const manifest = create(ManifestRecordSchema, {
+      version: newVersion,
+      sourceDevice: this.#deviceId,
+      identifiers,
+      recordIkm: snapshot.manifest.recordIkm,
+    });
+    const encryptedManifest = encryptStorageBlob(
+      storageManifestKey(this.#storageServiceKey, newVersion),
+      toBinary(ManifestRecordSchema, manifest),
+    );
     const operation = create(WriteOperationSchema, {
       manifest: create(StorageManifestSchema, { version: newVersion, value: encryptedManifest }),
       insertItem,

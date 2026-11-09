@@ -3,7 +3,14 @@
 
 import UPNG from 'upng-js';
 
-type EncodeRequest = { id: number; frames: ArrayBuffer[]; width: number; height: number; delays: number[]; colours: number };
+type EncodeRequest = {
+  id: number;
+  frames: ArrayBuffer[];
+  width: number;
+  height: number;
+  delays: number[];
+  colours: number;
+};
 
 self.onmessage = (event: MessageEvent<EncodeRequest>) => {
   const { id, frames, width, height, delays, colours } = event.data;

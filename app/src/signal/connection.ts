@@ -1,10 +1,12 @@
 // The temporary linked device for one migration: linked by QR code, logged in, unlinked at the end.
 // Its login and the account's master key live in this object only; nothing is written to the browser's storage.
 
+import { httpsRequest } from './http-client';
 import { type LinkEvents, linkDevice, type LinkedAccount } from './link';
 import { SignalSession } from './session';
 import { SocketClosedError } from './socket';
 import { StorageClient } from './storage';
+import type { ChatChannel, SignalAccount } from './transport';
 
 /** The server closes a removed device's connection with this code. */
 const DEVICE_REMOVED = 4401;
@@ -15,7 +17,8 @@ export class DeviceRemovedError extends Error {
   }
 }
 
-export class SignalConnection {
+export class SignalConnection implements SignalAccount {
+  readonly https = httpsRequest;
   #account: LinkedAccount;
   #session: Promise<SignalSession> | null = null;
   #removed = false;
@@ -27,8 +30,12 @@ export class SignalConnection {
   }
 
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device. */
-  static async link(showQrCode: (url: string) => void, onEvent?: LinkEvents): Promise<SignalConnection> {
-    return new SignalConnection(await linkDevice(showQrCode, onEvent));
+  static async link(
+    showQrCode: (url: string) => void,
+    deviceName: () => string,
+    onEvent?: LinkEvents,
+  ): Promise<SignalConnection> {
+    return new SignalConnection(await linkDevice(showQrCode, onEvent, deviceName));
   }
 
   get deviceId(): number {
@@ -65,7 +72,7 @@ export class SignalConnection {
   }
 
   /** Runs `action` with the session, opening it again once if the connection dropped meanwhile. */
-  async withSession<T>(action: (session: SignalSession) => Promise<T>): Promise<T> {
+  async withChat<T>(action: (chat: ChatChannel) => Promise<T>): Promise<T> {
     try {
       return await action(await this.session());
     } catch (error) {
@@ -75,7 +82,7 @@ export class SignalConnection {
   }
 
   async storage(): Promise<StorageClient> {
-    return this.withSession((session) => StorageClient.open(session, this.#account.masterKey));
+    return this.withChat((chat) => StorageClient.open(chat, this.#account.masterKey, this.deviceId, this.https));
   }
 
   /** Removes this device from the account and forgets its login. */

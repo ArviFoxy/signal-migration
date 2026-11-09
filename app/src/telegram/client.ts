@@ -27,7 +27,9 @@ const DATABASES = [INSTANCE_NAME, `/${INSTANCE_NAME}/dbfs`];
 function renameTypeField(value: unknown, from: string, to: string): unknown {
   if (Array.isArray(value)) return value.map((item) => renameTypeField(item, from, to));
   if (value === null || typeof value !== 'object' || Object.getPrototypeOf(value) !== Object.prototype) return value;
-  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key === from ? to : key, renameTypeField(item, from, to)]));
+  return Object.fromEntries(
+    Object.entries(value).map(([key, item]) => [key === from ? to : key, renameTypeField(item, from, to)]),
+  );
 }
 
 const toTdweb = (query: object) => renameTypeField(query, '_', '@type') as TdObject;
@@ -85,7 +87,10 @@ export class TelegramClient {
    * Starts TDLib after deleting anything an earlier visit left behind. `onAuthorizationState` is called with each
    * login state, and with the closing states after `logOut`.
    */
-  static async start(app: TelegramApp, onAuthorizationState: (state: Td.AuthorizationState) => void): Promise<TelegramClient> {
+  static async start(
+    app: TelegramApp,
+    onAuthorizationState: (state: Td.AuthorizationState) => void,
+  ): Promise<TelegramClient> {
     await eraseTelegramData();
     return new TelegramClient(app, onAuthorizationState);
   }
@@ -122,12 +127,16 @@ export class TelegramClient {
   };
 
   /** Downloads a file and returns its bytes, then deletes the downloaded copy. */
-  async readFile(file: Td.file): Promise<Uint8Array> {
-    await this.invoke({ _: 'downloadFile', file_id: file.id, priority: 1, offset: 0, limit: 0, synchronous: true });
-    const part = (await this.#client.send({ '@type': 'readFile', file_id: file.id })) as TdObject & { data?: Blob; message?: unknown };
-    if (part['@type'] !== 'filePart' || !(part.data instanceof Blob)) throw new Error(`reading a downloaded Telegram file failed: ${String(part.message)}`);
+  async readFile(fileId: number): Promise<Uint8Array> {
+    await this.invoke({ _: 'downloadFile', file_id: fileId, priority: 1, offset: 0, limit: 0, synchronous: true });
+    const part = (await this.#client.send({ '@type': 'readFile', file_id: fileId })) as TdObject & {
+      data?: Blob;
+      message?: unknown;
+    };
+    if (part['@type'] !== 'filePart' || !(part.data instanceof Blob))
+      throw new Error(`reading a downloaded Telegram file failed: ${String(part.message)}`);
     const bytes = new Uint8Array(await part.data.arrayBuffer());
-    await this.#client.send({ '@type': 'deleteFile', file_id: file.id });
+    await this.#client.send({ '@type': 'deleteFile', file_id: fileId });
     return bytes;
   }
 

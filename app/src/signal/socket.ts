@@ -87,7 +87,10 @@ export type ServerRequestHandler = (request: WebSocketRequestMessage) => number;
 export class SignalSocket {
   #channel: MessageChannel;
   #nextId = 1n;
-  #pending = new Map<bigint, { resolve: (response: WebSocketResponseMessage) => void; reject: (error: Error) => void }>();
+  #pending = new Map<
+    bigint,
+    { resolve: (response: WebSocketResponseMessage) => void; reject: (error: Error) => void }
+  >();
   #keepalive: ReturnType<typeof setInterval>;
   #closedByUs = false;
   onServerRequest: ServerRequestHandler = () => 200;
@@ -103,12 +106,25 @@ export class SignalSocket {
       this.#pending.clear();
       if (!this.#closedByUs) this.onUnexpectedClose(code);
     };
-    this.#keepalive = setInterval(() => void this.request('GET', keepalivePath).catch(() => undefined), KEEPALIVE_INTERVAL_MS);
+    this.#keepalive = setInterval(
+      () => void this.request('GET', keepalivePath).catch(() => undefined),
+      KEEPALIVE_INTERVAL_MS,
+    );
   }
 
-  request(verb: string, path: string, options: { body?: Uint8Array; headers?: string[] } = {}): Promise<WebSocketResponseMessage> {
+  request(
+    verb: string,
+    path: string,
+    options: { body?: Uint8Array; headers?: string[] } = {},
+  ): Promise<WebSocketResponseMessage> {
     const id = this.#nextId++;
-    const request = create(WebSocketRequestMessageSchema, { id, verb, path, headers: options.headers ?? [], body: options.body });
+    const request = create(WebSocketRequestMessageSchema, {
+      id,
+      verb,
+      path,
+      headers: options.headers ?? [],
+      body: options.body,
+    });
     const message = create(WebSocketMessageSchema, { type: WebSocketMessage_Type.REQUEST, request });
     return new Promise((resolve, reject) => {
       this.#pending.set(id, { resolve, reject });
@@ -129,8 +145,17 @@ export class SignalSocket {
       this.#pending.delete(message.response.id);
     } else if (message.type === WebSocketMessage_Type.REQUEST && message.request !== undefined) {
       const status = this.onServerRequest(message.request);
-      const response = create(WebSocketResponseMessageSchema, { id: message.request.id, status, message: status === 200 ? 'OK' : 'Error' });
-      this.#channel.send(toBinary(WebSocketMessageSchema, create(WebSocketMessageSchema, { type: WebSocketMessage_Type.RESPONSE, response })));
+      const response = create(WebSocketResponseMessageSchema, {
+        id: message.request.id,
+        status,
+        message: status === 200 ? 'OK' : 'Error',
+      });
+      this.#channel.send(
+        toBinary(
+          WebSocketMessageSchema,
+          create(WebSocketMessageSchema, { type: WebSocketMessage_Type.RESPONSE, response }),
+        ),
+      );
     }
   }
 }

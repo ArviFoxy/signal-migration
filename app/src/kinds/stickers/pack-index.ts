@@ -21,21 +21,56 @@ const PUBLIC_CDN = 'https://cdn-ca.signal.org';
 
 export const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
-/** The server asked the page to slow down; try again later. */
-export class IndexBusyError extends Error {
-  constructor(action: string) {
-    super(`the sticker pack index is limiting ${action} from this address; try again in a minute`);
-  }
+/** The server's answers, as in crates/server/src/index.rs. "busy" is its per-address rate limit. */
+export type ClaimResult = 'granted' | 'held-by-someone-else' | 'busy';
+export type AddResult = 'added' | 'busy';
+
+/** The index server's three operations. */
+export interface IndexBackend {
+  /** Entries from number `from` on, concatenated; at most the server's page size. */
+  read(from: number): Promise<Uint8Array>;
+  claim(lookupKey: Uint8Array, claimant: Uint8Array): Promise<ClaimResult>;
+  add(entry: Uint8Array): Promise<AddResult>;
 }
 
-/** Whether `packId` on Signal's CDN is a sticker pack encrypted with `packKey`. */
-export async function verifyPack(packId: Uint8Array, packKey: Uint8Array): Promise<boolean> {
+/** Reads a pack's encrypted manifest from Signal's CDN; null when the CDN has no such pack. */
+export type ManifestSource = (packId: Uint8Array) => Promise<Uint8Array | null>;
+
+/** The index on the server that served this page. */
+export const httpIndexBackend: IndexBackend = {
+  async read(from) {
+    const response = await fetch(`/v1/sticker-packs/index?from=${from}`);
+    if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
+    return new Uint8Array(await response.arrayBuffer());
+  },
+  async claim(lookupKey, claimant) {
+    const body = new Uint8Array([...lookupKey, ...claimant]);
+    const response = await fetch('/v1/sticker-packs/claims', { method: 'POST', body });
+    if (response.status === 201) return 'granted';
+    if (response.status === 409) return 'held-by-someone-else';
+    if (response.status === 429) return 'busy';
+    throw new Error(`claiming a sticker pack answered ${response.status}`);
+  },
+  async add(entry) {
+    const response = await fetch('/v1/sticker-packs/index', { method: 'POST', body: entry as Uint8Array<ArrayBuffer> });
+    if (response.status === 201 || response.status === 200) return 'added';
+    if (response.status === 429) return 'busy';
+    throw new Error(`adding to the sticker pack index answered ${response.status}`);
+  },
+};
+
+export const manifestFromPublicCdn: ManifestSource = async (packId) => {
   const response = await fetch(`${PUBLIC_CDN}/stickers/${toHex(packId)}/manifest.proto`);
-  if (response.status === 403 || response.status === 404) return false;
+  if (response.status === 403 || response.status === 404) return null;
   if (!response.ok) throw new Error(`Signal's CDN answered ${response.status} for a sticker pack manifest`);
+  return new Uint8Array(await response.arrayBuffer());
+};
+
+/** Whether the manifest decrypts and parses with `packKey` (the decryption checks its MAC). */
+async function manifestOpens(manifest: Uint8Array, packKey: Uint8Array): Promise<boolean> {
   await loadSignalWasm();
   try {
-    fromBinary(StickerPackSchema, decryptStickerFile(new Uint8Array(await response.arrayBuffer()), packKey));
+    fromBinary(StickerPackSchema, decryptStickerFile(manifest, packKey));
     return true;
   } catch {
     return false;
@@ -43,16 +78,29 @@ export async function verifyPack(packId: Uint8Array, packKey: Uint8Array): Promi
 }
 
 export class PackIndex {
+  #backend: IndexBackend;
+  #manifests: ManifestSource;
+  #pageSize: number;
+  /** A random token for this page's claims, so that it can renew them; it identifies nothing beyond this visit. */
+  readonly #claimant = crypto.getRandomValues(new Uint8Array(32));
   #packIds = new Map<string, Uint8Array[]>();
   #entryCount = 0;
-  #verified = new Map<string, Uint8Array | null>();
+  #verified = new Map<string, Uint8Array>();
+
+  constructor(
+    backend: IndexBackend = httpIndexBackend,
+    manifests: ManifestSource = manifestFromPublicCdn,
+    pageSize = MAX_ENTRIES_PER_READ,
+  ) {
+    this.#backend = backend;
+    this.#manifests = manifests;
+    this.#pageSize = pageSize;
+  }
 
   /** Reads the entries added since the last read. */
   async refresh(): Promise<void> {
     for (;;) {
-      const response = await fetch(`/v1/sticker-packs/index?from=${this.#entryCount}`);
-      if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
-      const body = new Uint8Array(await response.arrayBuffer());
+      const body = await this.#backend.read(this.#entryCount);
       const count = Math.floor(body.length / ENTRY_LENGTH);
       for (let i = 0; i < count; i++) {
         const entry = body.subarray(i * ENTRY_LENGTH, (i + 1) * ENTRY_LENGTH);
@@ -60,17 +108,18 @@ export class PackIndex {
         this.#packIds.set(key, [...(this.#packIds.get(key) ?? []), entry.slice(LOOKUP_KEY_LENGTH)]);
       }
       this.#entryCount += count;
-      if (count < MAX_ENTRIES_PER_READ) return;
+      if (count < this.#pageSize) return;
     }
   }
 
-  /** The pack ID of the first entry for `lookupKey` that verifies with `packKey`, or null. */
+  /** The pack ID of the first entry for `lookupKey` whose manifest opens with `packKey`, or null. */
   async find(lookupKey: Uint8Array, packKey: Uint8Array): Promise<Uint8Array | null> {
     const key = toHex(lookupKey);
     const known = this.#verified.get(key);
     if (known) return known;
     for (const packId of this.#packIds.get(key) ?? []) {
-      if (await verifyPack(packId, packKey)) {
+      const manifest = await this.#manifests(packId);
+      if (manifest && (await manifestOpens(manifest, packKey))) {
         this.#verified.set(key, packId);
         return packId;
       }
@@ -78,33 +127,18 @@ export class PackIndex {
     return null;
   }
 
-  /** Whether any entry exists for `lookupKey`, verified or not. */
-  has(lookupKey: Uint8Array): boolean {
-    return this.#packIds.has(toHex(lookupKey));
-  }
-
-  /**
-   * Claims the pack for upload for 15 minutes, so that nobody else uploads it meanwhile. Returns false when someone
-   * else holds the claim.
-   */
-  async claim(lookupKey: Uint8Array): Promise<boolean> {
-    const response = await fetch('/v1/sticker-packs/claims', { method: 'POST', body: lookupKey as Uint8Array<ArrayBuffer> });
-    if (response.status === 201) return true;
-    if (response.status === 409) return false;
-    if (response.status === 429) throw new IndexBusyError('claims');
-    throw new Error(`claiming a sticker pack answered ${response.status}`);
+  /** Claims the pack for upload for 15 minutes, or renews this page's own claim. */
+  claim(lookupKey: Uint8Array): Promise<ClaimResult> {
+    return this.#backend.claim(lookupKey, this.#claimant);
   }
 
   /** Adds an uploaded pack, which also ends its claim. */
-  async add(lookupKey: Uint8Array, packId: Uint8Array): Promise<void> {
+  async add(lookupKey: Uint8Array, packId: Uint8Array): Promise<AddResult> {
     const entry = new Uint8Array(ENTRY_LENGTH);
     entry.set(lookupKey, 0);
     entry.set(packId, LOOKUP_KEY_LENGTH);
-    const response = await fetch('/v1/sticker-packs/index', { method: 'POST', body: entry });
-    if (response.status === 429) throw new IndexBusyError('additions');
-    if (response.status !== 201 && response.status !== 200) throw new Error(`adding to the sticker pack index answered ${response.status}`);
-    const key = toHex(lookupKey);
-    this.#packIds.set(key, [...(this.#packIds.get(key) ?? []), packId]);
-    this.#verified.set(key, packId);
+    const result = await this.#backend.add(entry);
+    if (result === 'added') this.#verified.set(toHex(lookupKey), packId);
+    return result;
   }
 }

@@ -4,7 +4,13 @@
 import './wasm';
 import { createCipheriv, createDecipheriv, createHmac, hkdfSync } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { decryptStorageBlob, encryptStorageBlob, storageManifestKey, storageRecordKey, storageServiceKeyFromMasterKey } from '../src/wasm/signal_migration_wasm';
+import {
+  decryptStorageBlob,
+  encryptStorageBlob,
+  storageManifestKey,
+  storageRecordKey,
+  storageServiceKeyFromMasterKey,
+} from '../src/wasm/signal_migration_wasm';
 
 const masterKey = new Uint8Array(32).map((_, i) => i);
 const recordId = new Uint8Array(16).map((_, i) => 200 - i);
@@ -20,7 +26,9 @@ describe('storage service keys (Signal Desktop and Android derivations)', () => 
   // Detects: formatting the version wrongly in the manifest key label.
   it('derives the manifest key from the decimal version', () => {
     const storageKey = storageServiceKeyFromMasterKey(masterKey);
-    expect(hex(storageManifestKey(storageKey, 42n))).toBe(createHmac('sha256', storageKey).update('Manifest_42').digest('hex'));
+    expect(hex(storageManifestKey(storageKey, 42n))).toBe(
+      createHmac('sha256', storageKey).update('Manifest_42').digest('hex'),
+    );
   });
 
   // Detects: a wrong HKDF salt or info layout when the manifest carries a recordIkm.
@@ -35,7 +43,9 @@ describe('storage service keys (Signal Desktop and Android derivations)', () => 
   // Detects: the legacy derivation using unpadded or URL-safe base64, which Signal does not use.
   it('derives record keys from "Item_<padded base64 id>" without a recordIkm', () => {
     const storageKey = storageServiceKeyFromMasterKey(masterKey);
-    const expected = createHmac('sha256', storageKey).update(`Item_${Buffer.from(recordId).toString('base64')}`).digest('hex');
+    const expected = createHmac('sha256', storageKey)
+      .update(`Item_${Buffer.from(recordId).toString('base64')}`)
+      .digest('hex');
     expect(hex(storageRecordKey(storageKey, new Uint8Array(0), recordId))).toBe(expected);
   });
 });
@@ -49,7 +59,9 @@ describe('storage blob encryption (12-byte nonce || AES-256-GCM ciphertext || ta
     const blob = Buffer.from(encryptStorageBlob(key, plaintext));
     const decipher = createDecipheriv('aes-256-gcm', key, blob.subarray(0, 12));
     decipher.setAuthTag(blob.subarray(blob.length - 16));
-    expect(Buffer.concat([decipher.update(blob.subarray(12, blob.length - 16)), decipher.final()]).toString()).toBe('installed sticker pack record');
+    expect(Buffer.concat([decipher.update(blob.subarray(12, blob.length - 16)), decipher.final()]).toString()).toBe(
+      'installed sticker pack record',
+    );
   });
 
   // Detects: failing to read records written by other clients, or accepting altered ones.

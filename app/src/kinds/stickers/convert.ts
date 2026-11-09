@@ -25,10 +25,22 @@ const PREDICTION_MARGIN = 0.9;
 
 export class ConversionError extends Error {}
 
+/** What a conversion produced. For an animation: the square size and frame rate it was encoded at. */
+export type ConvertedSticker = {
+  image: Uint8Array;
+  /** sourceFrameRate is null for video, whose frame rate the browser does not report. */
+  animation: { size: number; frameRate: number; sourceFrameRate: number | null } | null;
+  /** A static image that was re-encoded at lower quality to fit the size limit. */
+  reencoded: boolean;
+};
+
+/** Converts one Telegram sticker file; the app uses convertSticker, tests a simulated conversion. */
+export type ConvertSticker = (file: Uint8Array, format: StickerFormat) => Promise<ConvertedSticker>;
+
 /** An animation that can be drawn at a given square size and frame rate, as RGBA frames. */
 type Animation = {
   duration: number;
-  sourceFrameRate: number;
+  sourceFrameRate: number | null;
   render(size: number, frameRate: number): Promise<ArrayBuffer[]>;
   close(): void;
 };
@@ -57,21 +69,35 @@ function encodeApng(frames: ArrayBuffer[], size: number, frameRate: number): Pro
  * Encodes at the largest size and frame rate that fits. The file size is predicted as proportional to the number
  * of pixels over all frames; each attempt that comes out too large corrects the factor.
  */
-async function encodeToFit(animation: Animation): Promise<Uint8Array> {
-  const sourceRate = Math.min(animation.sourceFrameRate, MAX_FRAME_RATE);
+async function encodeToFit(animation: Animation): Promise<ConvertedSticker> {
+  const sourceRate = Math.min(animation.sourceFrameRate ?? MAX_FRAME_RATE, MAX_FRAME_RATE);
   const frameCount = (rate: number) => Math.max(1, Math.round(animation.duration * rate));
   const lowerRates = FRAME_RATES.filter((rate) => rate <= sourceRate);
   const rates = lowerRates.length > 0 ? lowerRates : [sourceRate];
-  const candidates = SIZES.flatMap((size) => rates.map((rate) => ({ size, rate, pixels: size * size * frameCount(rate) }))).sort((a, b) => b.pixels - a.pixels);
+  const candidates = SIZES.flatMap((size) =>
+    rates.map((rate) => ({ size, rate, pixels: size * size * frameCount(rate) })),
+  ).sort((a, b) => b.pixels - a.pixels);
   let bytesPerPixel = 0;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const candidate = candidates.find((c) => c.pixels * bytesPerPixel <= MAX_STICKER_BYTES * PREDICTION_MARGIN);
     if (!candidate) break;
-    const png = await encodeApng(await animation.render(candidate.size, candidate.rate), candidate.size, candidate.rate);
-    if (png.length <= MAX_STICKER_BYTES) return png;
+    const png = await encodeApng(
+      await animation.render(candidate.size, candidate.rate),
+      candidate.size,
+      candidate.rate,
+    );
+    if (png.length <= MAX_STICKER_BYTES) {
+      return {
+        image: png,
+        animation: { size: candidate.size, frameRate: candidate.rate, sourceFrameRate: animation.sourceFrameRate },
+        reencoded: false,
+      };
+    }
     bytesPerPixel = Math.max(bytesPerPixel, png.length / candidate.pixels);
   }
-  throw new ConversionError(`the animation does not fit in ${MAX_STICKER_BYTES / 1024} KiB even at small size and frame rate`);
+  throw new ConversionError(
+    `the animation does not fit in ${MAX_STICKER_BYTES / 1024} KiB even at small size and frame rate`,
+  );
 }
 
 function newCanvas(size: number): { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D } {
@@ -84,7 +110,9 @@ function newCanvas(size: number): { canvas: HTMLCanvasElement; context: CanvasRe
 }
 
 async function lottieAnimation(tgs: Uint8Array): Promise<Animation> {
-  const json = await new Response(new Blob([tgs as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream('gzip'))).text();
+  const json = await new Response(
+    new Blob([tgs as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream('gzip')),
+  ).text();
   const data = JSON.parse(json) as { fr: number; ip: number; op: number };
   const totalFrames = data.op - data.ip;
   return {
@@ -101,7 +129,8 @@ async function lottieAnimation(tgs: Uint8Array): Promise<Animation> {
         animationData: structuredClone(data),
         rendererSettings: { context, clearCanvas: true },
       });
-      if (!animation.isLoaded) await new Promise<void>((resolve) => animation.addEventListener('DOMLoaded', () => resolve()));
+      if (!animation.isLoaded)
+        await new Promise<void>((resolve) => animation.addEventListener('DOMLoaded', () => resolve()));
       const frames: ArrayBuffer[] = [];
       const count = Math.max(1, Math.round((totalFrames / data.fr) * frameRate));
       for (let k = 0; k < count; k++) {
@@ -152,7 +181,7 @@ async function videoAnimation(webm: Uint8Array): Promise<Animation> {
   const duration = video.duration;
   return {
     duration,
-    sourceFrameRate: MAX_FRAME_RATE,
+    sourceFrameRate: null,
     async render(size, frameRate) {
       const { context } = newCanvas(size);
       const scale = size / Math.max(video.videoWidth, video.videoHeight);
@@ -190,12 +219,16 @@ async function reencodeWebp(webp: Uint8Array): Promise<Uint8Array> {
 }
 
 /** The file to upload to Signal for one Telegram sticker file. */
-export async function convertSticker(file: Uint8Array, format: StickerFormat): Promise<Uint8Array> {
-  if (format === 'webp') return file.length <= MAX_STICKER_BYTES ? file : reencodeWebp(file);
+export const convertSticker: ConvertSticker = async (file, format) => {
+  if (format === 'webp') {
+    return file.length <= MAX_STICKER_BYTES
+      ? { image: file, animation: null, reencoded: false }
+      : { image: await reencodeWebp(file), animation: null, reencoded: true };
+  }
   const animation = format === 'tgs' ? await lottieAnimation(file) : await videoAnimation(file);
   try {
     return await encodeToFit(animation);
   } finally {
     animation.close();
   }
-}
+};
