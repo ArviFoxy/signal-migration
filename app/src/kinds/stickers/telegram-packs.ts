@@ -2,7 +2,7 @@
 // their stickers.
 
 import type * as Td from 'tdlib-types';
-import { type TelegramClient, TelegramRestartedError } from '../../telegram/client';
+import { type TelegramClient, untilNotRestarted } from '../../telegram/client';
 
 export type StickerFormat = 'webp' | 'tgs' | 'webm';
 
@@ -63,17 +63,6 @@ function toPack(set: Td.stickerSet, issue: (file: Td.file) => number): TelegramP
       };
     }),
   };
-}
-
-/** Runs `operation` again for as long as TDLib's restarts cut it off (telegram/client.ts). */
-async function untilNotRestarted<T>(operation: () => Promise<T>): Promise<T> {
-  for (;;) {
-    try {
-      return await operation();
-    } catch (error) {
-      if (!(error instanceof TelegramRestartedError)) throw error;
-    }
-  }
 }
 
 /**

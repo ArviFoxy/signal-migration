@@ -5,6 +5,7 @@
 import { createStore, del, get, set } from 'idb-keyval';
 import type * as Td from 'tdlib-types';
 import { systemClock } from '../core/clock';
+import { fetchWithTimeLimit, SERVER_TIME_LIMIT_S } from '../core/time-limit';
 import { convertSticker } from '../kinds/stickers/convert';
 import type { MigrationServices } from '../kinds/stickers/migration';
 import { PackIndex } from '../kinds/stickers/pack-index';
@@ -97,7 +98,7 @@ function indexedDbSnapshots(): SnapshotStore {
 export const realServices: AppServices = {
   telegram: {
     async app() {
-      const response = await fetch('/v1/config');
+      const response = await fetchWithTimeLimit('The migration server', SERVER_TIME_LIMIT_S, '/v1/config');
       if (!response.ok) throw new Error(`reading the migration server's configuration answered ${response.status}`);
       return ((await response.json()) as { telegram: TelegramApp | null }).telegram;
     },

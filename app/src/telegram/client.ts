@@ -20,6 +20,7 @@
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
+import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
 import { downloadWithStallLimit } from './download';
 
 const TdClient = tdweb.default;
@@ -196,6 +197,20 @@ export class TelegramRestartedError extends Error {
 /** The parts of tdweb's client that it does not declare: its worker and the file reader's database connection. */
 type TdwebInternals = { worker?: Worker; fileManager?: { idb?: Promise<IDBDatabase> } };
 
+/** How many times an operation is sent again after TDLib's restarts cut it off, before it fails. */
+const ATTEMPTS_ACROSS_RESTARTS = 3;
+
+/** Runs `operation` again when a restart of TDLib cut it off, at most ATTEMPTS_ACROSS_RESTARTS times in all. */
+export async function untilNotRestarted<T>(operation: () => Promise<T>): Promise<T> {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!(error instanceof TelegramRestartedError) || attempt >= ATTEMPTS_ACROSS_RESTARTS) throw error;
+    }
+  }
+}
+
 /** How long each restart after an internal error waits; a restart that fails again before signing in waits longer. */
 const RESTART_DELAYS_MS = [0, 1_000, 5_000, 30_000];
 
@@ -339,11 +354,23 @@ export class TelegramClient {
   }
 
   /**
-   * Sends one request to TDLib's current run, once it takes requests. Fails at once if the client has stopped, and
-   * with TelegramRestartedError if TDLib stops before answering. tdweb rejects a failed request with TDLib's error
-   * object, which is turned into a TelegramError here.
+   * Sends one request to TDLib's current run, once it takes requests. Fails at once if the client has stopped, with
+   * TelegramRestartedError if TDLib stops before answering, and with a NoAnswerError when there is no answer within
+   * the request time limit, waiting for a restart included. A download has no such limit: it may take long while it
+   * makes progress, and download.ts limits how long it may make none. tdweb rejects a failed request with TDLib's
+   * error object, which is turned into a TelegramError here.
    */
-  async #send(query: TdObject): Promise<TdObject> {
+  #send(query: TdObject): Promise<TdObject> {
+    const answer = this.#sendOnce(query);
+    if (query['@type'] === 'downloadFile') return answer;
+    return withTimeLimit(
+      answer,
+      REQUEST_TIME_LIMIT_S * 1000,
+      () => new NoAnswerError('Telegram', REQUEST_TIME_LIMIT_S),
+    );
+  }
+
+  async #sendOnce(query: TdObject): Promise<TdObject> {
     let usable: Promise<void>;
     do {
       usable = this.#usable;
@@ -401,15 +428,8 @@ export class TelegramClient {
    * destroyed its keys (AuthManager::on_log_out_result in third_party/td). A logout that a restart cut off is sent
    * again.
    */
-  async logOut(): Promise<void> {
-    for (;;) {
-      try {
-        await this.invoke({ _: 'logOut' });
-        return;
-      } catch (error) {
-        if (!(error instanceof TelegramRestartedError)) throw error;
-      }
-    }
+  logOut(): Promise<void> {
+    return untilNotRestarted(async () => void (await this.invoke({ _: 'logOut' })));
   }
 
   /** Stops TDLib's worker now and deletes the instance's databases. Requests still waiting fail. */

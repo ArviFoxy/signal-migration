@@ -6,6 +6,7 @@
 // An entry is trusted only after the pack's manifest, fetched from Signal's CDN, decrypts with the pack key that
 // the user derived from the Telegram pack: a wrong or forged entry fails that check and is ignored.
 
+import { fetchWithTimeLimit, REQUEST_TIME_LIMIT_S, SERVER_TIME_LIMIT_S } from '../../core/time-limit';
 import { fromBinary } from '@bufbuild/protobuf';
 import { type StickerPack, StickerPackSchema } from '../../gen/Stickers_pb';
 import { loadSignalWasm } from '../../signal/wasm';
@@ -36,23 +37,29 @@ export interface IndexBackend {
 /** Reads a pack's encrypted manifest from Signal's CDN; null when the CDN has no such pack. */
 export type ManifestSource = (packId: Uint8Array) => Promise<Uint8Array | null>;
 
+const fetchServer = (url: string, init?: RequestInit) =>
+  fetchWithTimeLimit('The migration server', SERVER_TIME_LIMIT_S, url, init);
+
 /** The index on the server that served this page. */
 export const httpIndexBackend: IndexBackend = {
   async read(from) {
-    const response = await fetch(`/v1/sticker-packs/index?from=${from}`);
+    const response = await fetchServer(`/v1/sticker-packs/index?from=${from}`);
     if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
     return new Uint8Array(await response.arrayBuffer());
   },
   async claim(lookupKey, claimant) {
     const body = new Uint8Array([...lookupKey, ...claimant]);
-    const response = await fetch('/v1/sticker-packs/claims', { method: 'POST', body });
+    const response = await fetchServer('/v1/sticker-packs/claims', { method: 'POST', body });
     if (response.status === 201) return 'granted';
     if (response.status === 409) return 'held-by-someone-else';
     if (response.status === 429) return 'busy';
     throw new Error(`claiming a sticker pack answered ${response.status}`);
   },
   async add(entry) {
-    const response = await fetch('/v1/sticker-packs/index', { method: 'POST', body: entry as Uint8Array<ArrayBuffer> });
+    const response = await fetchServer('/v1/sticker-packs/index', {
+      method: 'POST',
+      body: entry as Uint8Array<ArrayBuffer>,
+    });
     if (response.status === 201 || response.status === 200) return 'added';
     if (response.status === 429) return 'busy';
     throw new Error(`adding to the sticker pack index answered ${response.status}`);
@@ -60,7 +67,11 @@ export const httpIndexBackend: IndexBackend = {
 };
 
 export const manifestFromPublicCdn: ManifestSource = async (packId) => {
-  const response = await fetch(`${PUBLIC_CDN}/stickers/${toHex(packId)}/manifest.proto`);
+  const response = await fetchWithTimeLimit(
+    'Signal',
+    REQUEST_TIME_LIMIT_S,
+    `${PUBLIC_CDN}/stickers/${toHex(packId)}/manifest.proto`,
+  );
   if (response.status === 403 || response.status === 404) return null;
   if (!response.ok) throw new Error(`Signal's CDN answered ${response.status} for a sticker pack manifest`);
   return new Uint8Array(await response.arrayBuffer());

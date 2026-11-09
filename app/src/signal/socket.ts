@@ -10,6 +10,7 @@ import {
   WebSocketRequestMessageSchema,
   WebSocketResponseMessageSchema,
 } from '../gen/chat_websocket_pb';
+import { NoAnswerError, REQUEST_TIME_LIMIT_S } from '../core/time-limit';
 import { TlsWebSocket } from '../wasm/signal_migration_wasm';
 import { RelayLink } from './tunnel';
 import { loadSignalWasm } from './wasm';
@@ -35,13 +36,23 @@ export class HandshakeRefusedError extends Error {
   }
 }
 
-/** Opens a WebSocket to `host`'s `path` with extra handshake `headers` ("Name: value"), through the relay. */
+/**
+ * Opens a WebSocket to `host`'s `path` with extra handshake `headers` ("Name: value"), through the relay. Gives up
+ * with a NoAnswerError when it has not opened within the request time limit.
+ */
 export async function openTunnelWebSocket(host: string, path: string, headers: string[]): Promise<MessageChannel> {
   await loadSignalWasm();
   const socket = new TlsWebSocket(host, path, headers);
   return new Promise((resolve, reject) => {
     let opened = false;
     let closed = false;
+    const openTimer = setTimeout(() => {
+      if (opened || closed) return;
+      closed = true;
+      link.close();
+      socket.free();
+      reject(new NoAnswerError('Signal', REQUEST_TIME_LIMIT_S));
+    }, REQUEST_TIME_LIMIT_S * 1000);
     const channel: MessageChannel = {
       send: (bytes) => {
         socket.send(bytes);
@@ -60,6 +71,7 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
     const finish = (code: number, reason: string) => {
       if (closed) return;
       closed = true;
+      clearTimeout(openTimer);
       const refusedStatus = socket.refusedStatus;
       link.close();
       socket.free();
@@ -73,6 +85,7 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
       () => {
         if (!opened && socket.isOpen) {
           opened = true;
+          clearTimeout(openTimer);
           resolve(channel);
         }
         for (const message of socket.takeMessages() as Uint8Array[]) channel.onMessage(message);
@@ -125,6 +138,7 @@ export class SignalSocket {
     );
   }
 
+  /** Sends a request; fails with a NoAnswerError when Signal does not answer within the request time limit. */
   request(
     verb: string,
     path: string,
@@ -140,7 +154,20 @@ export class SignalSocket {
     });
     const message = create(WebSocketMessageSchema, { type: WebSocketMessage_Type.REQUEST, request });
     return new Promise((resolve, reject) => {
-      this.#pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.#pending.delete(id);
+        reject(new NoAnswerError('Signal', REQUEST_TIME_LIMIT_S));
+      }, REQUEST_TIME_LIMIT_S * 1000);
+      this.#pending.set(id, {
+        resolve: (response) => {
+          clearTimeout(timer);
+          resolve(response);
+        },
+        reject: (error) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      });
       this.#channel.send(toBinary(WebSocketMessageSchema, message));
     });
   }

@@ -241,3 +241,68 @@ it('waits longer before each restart that follows a failed one', async () => {
   await vi.advanceTimersByTimeAsync(1_100);
   expect(SimulatedTdlib.runs.length).toBe(4);
 });
+
+// Detects: a TDLib request that is never answered (reading packs, signing out) keeping the app waiting forever.
+it('fails a Telegram request that gets no answer within 60 seconds', async () => {
+  const { client } = await signedInClient();
+  vi.useFakeTimers();
+  const request = client.invoke({ _: 'requestQrCodeAuthentication', other_user_ids: [] });
+  let failure: string | null = null;
+  request.catch((error: Error) => (failure = error.message));
+  await vi.advanceTimersByTimeAsync(59_000);
+  expect(failure).toBeNull();
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(failure).toBe('Telegram did not answer within 60 seconds.');
+});
+
+// Detects: the request time limit cutting off a download that is slow but still receiving bytes.
+it('lets a download run past the request time limit while it makes progress', async () => {
+  const { client } = await signedInClient();
+  const source = telegramSource(client);
+  const [pack] = await source.readPacks(() => undefined);
+  vi.useFakeTimers();
+  const run = currentRun();
+  let received = 0;
+  let finish: () => void = () => undefined;
+  const send = run.send.bind(run);
+  run.send = (query) => {
+    if (query['@type'] === 'downloadFile') return new Promise((resolve) => (finish = () => resolve({ '@type': 'ok' })));
+    if (query['@type'] === 'getFile')
+      return Promise.resolve({
+        '@type': 'file',
+        id: query.file_id,
+        size: 1 << 20,
+        expected_size: 1 << 20,
+        local: { downloaded_size: (received += 1024) },
+        remote: { unique_id: 'u1' },
+      });
+    return send(query);
+  };
+  let result: Uint8Array | null = null;
+  void source.readFile(pack.stickers[0].fileId).then((bytes) => (result = bytes));
+  await vi.advanceTimersByTimeAsync(90_000);
+  expect(result).toBeNull();
+  finish();
+  await vi.advanceTimersByTimeAsync(10);
+  expect(result).toEqual(bytesOf('u1'));
+});
+
+// Detects: a download sent again forever while TDLib stops at every run, leaving its pack "Downloading" for good.
+it('stops sending a download again after TDLib stopped three times', async () => {
+  const { client } = await signedInClient();
+  const source = telegramSource(client);
+  const [pack] = await source.readPacks(() => undefined);
+  vi.useFakeTimers();
+  SimulatedTdlib.onCreate = (run) => {
+    run.holdDownloads = true;
+  };
+  currentRun().holdDownloads = true;
+  let failure: string | null = null;
+  source.readFile(pack.stickers[0].fileId).catch((error: Error) => (failure = error.message));
+  for (let i = 0; i < 3; i++) {
+    await vi.waitFor(() => expect(currentRun().sent).toContain('downloadFile'));
+    currentRun().crash();
+    await vi.advanceTimersByTimeAsync(40_000);
+  }
+  expect(failure).toBe('the Telegram connection was closed');
+});
