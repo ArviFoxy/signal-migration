@@ -93,10 +93,10 @@ export const icons = {
       size,
       '#1B1B1F',
     ),
-  lock: (colour = '#3F3CBB') =>
+  lock: (colour = '#3F3CBB', size = 16) =>
     icon(
       svg`<rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path>`,
-      16,
+      size,
       colour,
     ),
   eye: () =>
@@ -121,35 +121,45 @@ export const icons = {
 /** A part of a connection diagram: one end or relay, or the link between two of them. */
 export type DiagramPart = { symbol: TemplateResult; name: string } | { link: string };
 
-/** A small diagram of a connection, from end to end, for the connections cards. */
-export function connectionDiagram(parts: DiagramPart[]): TemplateResult {
-  return html`<div class="flex items-start rounded-lg bg-panel px-2 py-2.5" aria-hidden="true">
-    ${parts.map((part) =>
-      'link' in part
-        ? html`<div class="flex min-w-0 flex-1 flex-col items-center gap-1 px-1 pt-2">
-            <span class="text-[10px] leading-none whitespace-nowrap text-muted">${part.link}</span>
-            <svg
-              width="100%"
-              height="8"
-              viewBox="0 0 100 8"
-              preserveAspectRatio="none"
-              fill="none"
-              stroke="#3F3CBB"
-              stroke-width="1.5"
-              stroke-linecap="round"
-            >
-              <path d="M1 4h98"></path>
-              <path d="M5 1L1 4l4 3"></path>
-              <path d="M95 1l4 3-4 3"></path>
-            </svg>
-          </div>`
-        : html`<div class="flex w-[76px] flex-none flex-col items-center gap-1 text-center">
-            <span class="flex size-8 items-center justify-center rounded-lg bg-white ring-1 ring-line ring-inset"
-              >${part.symbol}</span
-            >
-            <span class="text-[11px] leading-tight font-semibold">${part.name}</span>
-          </div>`,
-    )}
+/**
+ * A small diagram of a connection, for the connections cards: the ends and what lies between them, and under them a
+ * bracket from one end to the other that says how the connection is encrypted.
+ */
+export function connectionDiagram(parts: DiagramPart[], encryption: string): TemplateResult {
+  return html`<div class="flex flex-col border-t border-line pt-4 pb-2" aria-hidden="true">
+    <div class="flex items-start">
+      ${parts.map((part) =>
+        'link' in part
+          ? html`<div class="flex min-w-0 flex-1 flex-col items-center gap-1 px-1 pt-2">
+              <span class="text-[10px] leading-none whitespace-nowrap text-muted">${part.link}</span>
+              <svg
+                width="100%"
+                height="8"
+                viewBox="0 0 100 8"
+                preserveAspectRatio="none"
+                fill="none"
+                stroke="#3F3CBB"
+                stroke-width="1.5"
+                stroke-linecap="round"
+              >
+                <path d="M1 4h98"></path>
+                <path d="M5 1L1 4l4 3"></path>
+                <path d="M95 1l4 3-4 3"></path>
+              </svg>
+            </div>`
+          : html`<div class="flex w-[76px] flex-none flex-col items-center gap-1 text-center">
+              <span class="flex size-8 items-center justify-center rounded-full bg-accent-soft">${part.symbol}</span>
+              <span class="text-[11px] leading-tight font-semibold">${part.name}</span>
+            </div>`,
+      )}
+    </div>
+    <!-- From the centre of the first end to the centre of the last. -->
+    <div class="relative mx-[38px] mt-2 h-3 rounded-b-md border-x-[1.5px] border-b-[1.5px] border-accent">
+      <span
+        class="absolute top-full left-1/2 flex -translate-x-1/2 -translate-y-1/2 items-center gap-1 bg-white px-2 text-[10px] font-semibold whitespace-nowrap text-accent"
+        >${icons.lock('#3F3CBB', 11)} ${encryption}</span
+      >
+    </div>
   </div>`;
 }
 
