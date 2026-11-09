@@ -7,6 +7,8 @@
 <style>
   body { margin: 0; padding: 24px 16px; font: 15px/1.5 system-ui, sans-serif; color: #1b1b1f; background: #f4f4f1; }
   main { max-width: 760px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+  #open-signal { align-self: flex-start; display: inline-flex; align-items: center; min-height: 44px; padding: 0 20px; border-radius: 8px; background: #1b1b1f; color: #fff; font-weight: 600; text-decoration: none; }
+  #open-signal[hidden] { display: none; }
   button { align-self: flex-start; min-height: 40px; padding: 0 18px; border: 0; border-radius: 8px; background: #3f3cbb; color: #fff; font: inherit; font-weight: 600; cursor: pointer; }
   pre { margin: 0; padding: 12px; background: #fff; border-radius: 8px; white-space: pre-wrap; min-height: 1.5em; }
 </style>
@@ -16,6 +18,7 @@
   <h1>Connection diagnostics</h1>
   <button id="run" type="button">Check the connection to Signal</button>
   <button id="run-link" type="button">Link a device, log in with it, unlink it</button>
+  <a id="open-signal" hidden>Open in Signal</a>
   <img id="qr" alt="QR code for linking a device" width="280" height="280" hidden>
   <pre id="out"></pre>
 </main>

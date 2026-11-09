@@ -5,3 +5,6 @@
 	path = third_party/Signal-Desktop
 	url = https://github.com/signalapp/Signal-Desktop
 	shallow = true
+[submodule "third_party/td"]
+	path = third_party/td
+	url = https://github.com/tdlib/td

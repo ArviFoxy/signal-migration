@@ -38,14 +38,19 @@ async function checkProvisioningSocket(): Promise<void> {
 
 async function checkLinkCycle(): Promise<void> {
   const qr = document.getElementById('qr') as HTMLImageElement;
+  const openInSignal = document.getElementById('open-signal') as HTMLAnchorElement;
   const account = await linkDevice((url) => {
+    // On a phone with Signal installed, tapping the link opens Signal's own "link this device" flow.
+    openInSignal.href = url;
+    openInSignal.hidden = false;
     void QRCode.toDataURL(url, { margin: 2, width: 280 }).then((dataUrl) => {
       qr.src = dataUrl;
       qr.hidden = false;
     });
-    report('link: QR code shown; scan it in Signal under Settings › Linked devices');
+    report('link: tap "Open in Signal" on this phone, or scan the QR code in Signal under Settings › Linked devices');
   });
   qr.hidden = true;
+  openInSignal.hidden = true;
   report(`link: OK, linked as device ${account.credentials.deviceId}`);
   const session = await SignalSession.open(account.credentials);
   try {
