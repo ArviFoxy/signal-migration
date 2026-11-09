@@ -1,0 +1,5 @@
+[toolchain]
+# The same version as crates/signal-wasm, so that both crates are formatted by the same rustfmt.
+channel = "1.98.1"
+components = ["rustfmt"]
+profile = "minimal"

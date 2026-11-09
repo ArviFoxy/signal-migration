@@ -26,13 +26,27 @@ async fn start(relay_targets: RelayTargets) -> TestServer {
 async fn start_with_client_config(relay_targets: RelayTargets, client: ClientConfig) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let index_path = dir.path().join("index.bin");
-    let config = Config { static_dir: dir.path().to_path_buf(), index: Index::open(index_path.clone()).await.unwrap(), relay_targets, client };
+    let config = Config {
+        static_dir: dir.path().to_path_buf(),
+        index: Index::open(index_path.clone()).await.unwrap(),
+        relay_targets,
+        client,
+    };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
-        axum::serve(listener, router(config).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap();
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
     });
-    TestServer { base: format!("127.0.0.1:{}", address.port()), index_path, _dir: dir }
+    TestServer {
+        base: format!("127.0.0.1:{}", address.port()),
+        index_path,
+        _dir: dir,
+    }
 }
 
 /// A TCP server that sends back whatever it receives, standing in for a Signal host.
@@ -61,9 +75,14 @@ fn entry(seed: u8) -> Vec<u8> {
 #[tokio::test]
 async fn relay_carries_bytes_both_ways_to_an_allowed_host() {
     let echo = echo_server().await;
-    let targets = RelayTargets(Arc::new(HashMap::from([("chat.signal.org".to_string(), echo.to_string())])));
+    let targets = RelayTargets(Arc::new(HashMap::from([(
+        "chat.signal.org".to_string(),
+        echo.to_string(),
+    )])));
     let server = start(targets).await;
-    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/tunnel/chat.signal.org", server.base)).await.unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(format!("ws://{}/tunnel/chat.signal.org", server.base))
+        .await
+        .unwrap();
     let payload: Vec<u8> = (0..=255).collect();
     socket.send(Message::Binary(payload.clone().into())).await.unwrap();
     let mut received = Vec::new();
@@ -92,20 +111,52 @@ async fn relay_refuses_a_host_outside_the_allow_list() {
 async fn appended_entry_is_read_back_and_persists_across_restart() {
     let server = start(RelayTargets::signal()).await;
     let client = reqwest::Client::new();
-    let status = client.post(format!("http://{}/v1/sticker-packs/index", server.base)).body(entry(7)).send().await.unwrap().status();
+    let status = client
+        .post(format!("http://{}/v1/sticker-packs/index", server.base))
+        .body(entry(7))
+        .send()
+        .await
+        .unwrap()
+        .status();
     assert_eq!(status, 201);
-    let body = client.get(format!("http://{}/v1/sticker-packs/index", server.base)).send().await.unwrap().bytes().await.unwrap();
+    let body = client
+        .get(format!("http://{}/v1/sticker-packs/index", server.base))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     assert_eq!(body.as_ref(), entry(7).as_slice());
 
     let reopened = Index::open(server.index_path.clone()).await.unwrap();
     let restarted = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let config = Config { static_dir: std::env::temp_dir(), index: reopened, relay_targets: RelayTargets::signal(), client: ClientConfig { telegram: None } };
-        tokio::spawn(async move { axum::serve(listener, router(config).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
+        let config = Config {
+            static_dir: std::env::temp_dir(),
+            index: reopened,
+            relay_targets: RelayTargets::signal(),
+            client: ClientConfig { telegram: None },
+        };
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                router(config).into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .await
+            .unwrap()
+        });
         address
     };
-    let body = client.get(format!("http://{restarted}/v1/sticker-packs/index")).send().await.unwrap().bytes().await.unwrap();
+    let body = client
+        .get(format!("http://{restarted}/v1/sticker-packs/index"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     assert_eq!(body.as_ref(), entry(7).as_slice());
 }
 
@@ -113,7 +164,13 @@ async fn appended_entry_is_read_back_and_persists_across_restart() {
 #[tokio::test]
 async fn entry_of_wrong_length_is_rejected() {
     let server = start(RelayTargets::signal()).await;
-    let status = reqwest::Client::new().post(format!("http://{}/v1/sticker-packs/index", server.base)).body(vec![1u8; ENTRY_LEN - 1]).send().await.unwrap().status();
+    let status = reqwest::Client::new()
+        .post(format!("http://{}/v1/sticker-packs/index", server.base))
+        .body(vec![1u8; ENTRY_LEN - 1])
+        .send()
+        .await
+        .unwrap()
+        .status();
     assert_eq!(status, 400);
 }
 
@@ -138,19 +195,72 @@ async fn read_from_offset_returns_only_later_entries() {
     for seed in 1..=3 {
         client.post(&url).body(entry(seed)).send().await.unwrap();
     }
-    let body = client.get(format!("{url}?from=2")).send().await.unwrap().bytes().await.unwrap();
+    let body = client
+        .get(format!("{url}?from=2"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     assert_eq!(body.as_ref(), entry(3).as_slice());
+}
+
+fn claim_body(lookup_key: u8, claimant: u8) -> Vec<u8> {
+    [vec![lookup_key; 32], vec![claimant; 32]].concat()
 }
 
 /// Detects: two uploaders both being allowed to upload the same pack at once.
 #[tokio::test]
-async fn second_claim_for_the_same_pack_is_refused_while_the_first_holds() {
+async fn claim_by_someone_else_is_refused_while_the_first_holds() {
     let server = start(RelayTargets::signal()).await;
     let client = reqwest::Client::new();
     let url = format!("http://{}/v1/sticker-packs/claims", server.base);
-    assert_eq!(client.post(&url).body(vec![9u8; 32]).send().await.unwrap().status(), 201);
-    assert_eq!(client.post(&url).body(vec![9u8; 32]).send().await.unwrap().status(), 409);
-    assert_eq!(client.post(&url).body(vec![8u8; 32]).send().await.unwrap().status(), 201);
+    assert_eq!(
+        client.post(&url).body(claim_body(9, 1)).send().await.unwrap().status(),
+        201
+    );
+    assert_eq!(
+        client.post(&url).body(claim_body(9, 2)).send().await.unwrap().status(),
+        409
+    );
+    assert_eq!(
+        client.post(&url).body(claim_body(8, 2)).send().await.unwrap().status(),
+        201
+    );
+}
+
+/// Detects: an uploader being locked out of its own pack for the claim's lifetime after a failed upload.
+#[tokio::test]
+async fn holder_can_renew_its_claim() {
+    let server = start(RelayTargets::signal()).await;
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/v1/sticker-packs/claims", server.base);
+    assert_eq!(
+        client.post(&url).body(claim_body(9, 1)).send().await.unwrap().status(),
+        201
+    );
+    assert_eq!(
+        client.post(&url).body(claim_body(9, 1)).send().await.unwrap().status(),
+        201
+    );
+}
+
+/// Detects: a claim without a claimant token (the earlier format) being accepted and then held by nobody.
+#[tokio::test]
+async fn claim_without_claimant_is_rejected() {
+    let server = start(RelayTargets::signal()).await;
+    let url = format!("http://{}/v1/sticker-packs/claims", server.base);
+    assert_eq!(
+        reqwest::Client::new()
+            .post(&url)
+            .body(vec![9u8; 32])
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
 }
 
 /// Detects: the per-address limit never refusing, or never letting a client back in after waiting.
@@ -169,9 +279,21 @@ fn address_limiter_refuses_when_empty_and_refills_over_time() {
 /// Detects: the page not receiving the Telegram app identity it needs to start TDLib, or receiving it under other names.
 #[tokio::test]
 async fn config_carries_the_telegram_app_identity() {
-    let client = ClientConfig { telegram: Some(TelegramApp { api_id: 12345, api_hash: "0123456789abcdef".into() }) };
+    let client = ClientConfig {
+        telegram: Some(TelegramApp {
+            api_id: 12345,
+            api_hash: "0123456789abcdef".into(),
+        }),
+    };
     let server = start_with_client_config(RelayTargets::signal(), client).await;
-    let body = reqwest::Client::new().get(format!("http://{}/v1/config", server.base)).send().await.unwrap().text().await.unwrap();
+    let body = reqwest::Client::new()
+        .get(format!("http://{}/v1/config", server.base))
+        .send()
+        .await
+        .unwrap()
+        .text()
+        .await
+        .unwrap();
     assert_eq!(body, r#"{"telegram":{"apiId":12345,"apiHash":"0123456789abcdef"}}"#);
 }
 
@@ -185,7 +307,12 @@ async fn compressed_copy_is_sent_to_a_browser_that_accepts_it() {
     std::fs::write(static_dir.join("module.wasm.br"), b"brotli").unwrap();
     let client = reqwest::Client::new();
     let url = format!("http://{}/module.wasm", server.base);
-    let response = client.get(&url).header("Accept-Encoding", "br, gzip").send().await.unwrap();
+    let response = client
+        .get(&url)
+        .header("Accept-Encoding", "br, gzip")
+        .send()
+        .await
+        .unwrap();
     assert_eq!(response.headers()["content-encoding"], "br");
     assert_eq!(response.headers()["content-type"], "application/wasm");
     assert_eq!(response.bytes().await.unwrap().as_ref(), b"brotli");

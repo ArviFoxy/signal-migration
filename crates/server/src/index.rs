@@ -2,7 +2,8 @@
 //!
 //! Lookup keys are derived from a Telegram pack's content, so only someone who has the pack can compute one.
 //! Clients download the whole list and match it locally; the server never learns which packs a user has.
-//! Short-lived upload claims stop two people from uploading the same pack at once.
+//! Short-lived upload claims stop two people from uploading the same pack at once. A claim carries a random token
+//! that the claiming page chose, so that the page can renew its own claim, for example to retry a failed upload.
 //! The server keeps no accounts and logs no client addresses; per-address limits live in memory only.
 
 use std::collections::{HashMap, HashSet};
@@ -20,6 +21,7 @@ use tokio::sync::Mutex;
 
 pub const ENTRY_LEN: usize = 48;
 pub const LOOKUP_KEY_LEN: usize = 32;
+pub const CLAIMANT_LEN: usize = 32;
 /// How long an upload claim holds a pack for one uploader.
 pub const CLAIM_DURATION: Duration = Duration::from_secs(15 * 60);
 /// At most this many entries per read; a client reads again from where the last read ended.
@@ -34,7 +36,11 @@ pub struct AddressLimiter {
 
 impl AddressLimiter {
     pub fn new(capacity: u32, refill_every: Duration) -> Self {
-        Self { capacity: capacity.into(), refill_per_second: 1.0 / refill_every.as_secs_f64(), buckets: HashMap::new() }
+        Self {
+            capacity: capacity.into(),
+            refill_per_second: 1.0 / refill_every.as_secs_f64(),
+            buckets: HashMap::new(),
+        }
     }
 
     /// Takes one token for `address`; false when its bucket is empty.
@@ -55,7 +61,8 @@ pub struct IndexState {
     path: PathBuf,
     entries: Vec<[u8; ENTRY_LEN]>,
     known: HashSet<[u8; ENTRY_LEN]>,
-    claims: HashMap<[u8; LOOKUP_KEY_LEN], Instant>,
+    /// Who holds each claim, and until when.
+    claims: HashMap<[u8; LOOKUP_KEY_LEN], ([u8; CLAIMANT_LEN], Instant)>,
     append_limiter: AddressLimiter,
     claim_limiter: AddressLimiter,
 }
@@ -71,7 +78,10 @@ impl Index {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
             Err(error) => return Err(error),
         };
-        let entries: Vec<[u8; ENTRY_LEN]> = bytes.chunks_exact(ENTRY_LEN).map(|c| c.try_into().expect("exact chunk")).collect();
+        let entries: Vec<[u8; ENTRY_LEN]> = bytes
+            .chunks_exact(ENTRY_LEN)
+            .map(|c| c.try_into().expect("exact chunk"))
+            .collect();
         let known = entries.iter().copied().collect();
         Ok(Self(Arc::new(Mutex::new(IndexState {
             path,
@@ -93,11 +103,22 @@ pub async fn read(State(index): State<Index>, Query(query): Query<HashMap<String
     let start = from.min(state.entries.len());
     let end = (start + MAX_ENTRIES_PER_READ).min(state.entries.len());
     let body: Vec<u8> = state.entries[start..end].iter().flatten().copied().collect();
-    ([(header::CONTENT_TYPE, "application/octet-stream"), (header::CACHE_CONTROL, "no-store")], body).into_response()
+    (
+        [
+            (header::CONTENT_TYPE, "application/octet-stream"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        body,
+    )
+        .into_response()
 }
 
 /// `POST /v1/sticker-packs/index` with one 48-byte entry: 201 when added, 200 when already present.
-pub async fn append(State(index): State<Index>, ConnectInfo(client): ConnectInfo<std::net::SocketAddr>, body: Bytes) -> Response {
+pub async fn append(
+    State(index): State<Index>,
+    ConnectInfo(client): ConnectInfo<std::net::SocketAddr>,
+    body: Bytes,
+) -> Response {
     let Ok(entry) = <[u8; ENTRY_LEN]>::try_from(body.as_ref()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -108,7 +129,12 @@ pub async fn append(State(index): State<Index>, ConnectInfo(client): ConnectInfo
     if !state.append_limiter.allow(client.ip(), Instant::now()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    let mut file = match tokio::fs::OpenOptions::new().create(true).append(true).open(&state.path).await {
+    let mut file = match tokio::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&state.path)
+        .await
+    {
         Ok(file) => file,
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
@@ -117,25 +143,37 @@ pub async fn append(State(index): State<Index>, ConnectInfo(client): ConnectInfo
     }
     state.entries.push(entry);
     state.known.insert(entry);
-    state.claims.remove(&<[u8; LOOKUP_KEY_LEN]>::try_from(&entry[..LOOKUP_KEY_LEN]).expect("prefix"));
+    state
+        .claims
+        .remove(&<[u8; LOOKUP_KEY_LEN]>::try_from(&entry[..LOOKUP_KEY_LEN]).expect("prefix"));
     StatusCode::CREATED.into_response()
 }
 
-/// `POST /v1/sticker-packs/claims` with a 32-byte lookup key: 201 when this caller may upload the pack now,
-/// 409 when someone else holds an unexpired claim.
-pub async fn claim(State(index): State<Index>, ConnectInfo(client): ConnectInfo<std::net::SocketAddr>, body: Bytes) -> Response {
-    let Ok(lookup_key) = <[u8; LOOKUP_KEY_LEN]>::try_from(body.as_ref()) else {
+/// `POST /v1/sticker-packs/claims` with a 32-byte lookup key and a 32-byte claimant token: 201 when this caller
+/// may upload the pack now (a new claim, or a renewal of its own), 409 when someone else holds an unexpired claim.
+pub async fn claim(
+    State(index): State<Index>,
+    ConnectInfo(client): ConnectInfo<std::net::SocketAddr>,
+    body: Bytes,
+) -> Response {
+    if body.len() != LOOKUP_KEY_LEN + CLAIMANT_LEN {
         return StatusCode::BAD_REQUEST.into_response();
-    };
+    }
+    let lookup_key: [u8; LOOKUP_KEY_LEN] = body[..LOOKUP_KEY_LEN].try_into().expect("length checked");
+    let claimant: [u8; CLAIMANT_LEN] = body[LOOKUP_KEY_LEN..].try_into().expect("length checked");
     let now = Instant::now();
     let mut state = index.0.lock().await;
-    state.claims.retain(|_, expires| *expires > now);
-    if state.claims.contains_key(&lookup_key) {
+    state.claims.retain(|_, (_, expires)| *expires > now);
+    if state
+        .claims
+        .get(&lookup_key)
+        .is_some_and(|(holder, _)| *holder != claimant)
+    {
         return StatusCode::CONFLICT.into_response();
     }
     if !state.claim_limiter.allow(client.ip(), now) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
-    state.claims.insert(lookup_key, now + CLAIM_DURATION);
+    state.claims.insert(lookup_key, (claimant, now + CLAIM_DURATION));
     StatusCode::CREATED.into_response()
 }

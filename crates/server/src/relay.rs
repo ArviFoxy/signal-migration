@@ -21,12 +21,24 @@ pub struct RelayTargets(pub Arc<HashMap<String, String>>);
 impl RelayTargets {
     /// The Signal hosts the migration app needs, each reached on port 443.
     pub fn signal() -> Self {
-        let hosts = ["chat.signal.org", "storage.signal.org", "cdn.signal.org", "cdn2.signal.org", "cdn3.signal.org"];
-        Self(Arc::new(hosts.iter().map(|h| (h.to_string(), format!("{h}:443"))).collect()))
+        let hosts = [
+            "chat.signal.org",
+            "storage.signal.org",
+            "cdn.signal.org",
+            "cdn2.signal.org",
+            "cdn3.signal.org",
+        ];
+        Self(Arc::new(
+            hosts.iter().map(|h| (h.to_string(), format!("{h}:443"))).collect(),
+        ))
     }
 }
 
-pub async fn tunnel(State(targets): State<RelayTargets>, Path(host): Path<String>, upgrade: WebSocketUpgrade) -> Response {
+pub async fn tunnel(
+    State(targets): State<RelayTargets>,
+    Path(host): Path<String>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
     let Some(upstream) = targets.0.get(&host).cloned() else {
         return StatusCode::FORBIDDEN.into_response();
     };
@@ -62,7 +74,11 @@ async fn relay(socket: WebSocket, upstream: String) {
             match tcp_read.read(&mut buffer).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {
-                    if ws_send.send(Message::Binary(bytes::Bytes::copy_from_slice(&buffer[..n]))).await.is_err() {
+                    if ws_send
+                        .send(Message::Binary(bytes::Bytes::copy_from_slice(&buffer[..n])))
+                        .await
+                        .is_err()
+                    {
                         break;
                     }
                 }

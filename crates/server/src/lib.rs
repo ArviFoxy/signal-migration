@@ -43,9 +43,16 @@ pub fn router(config: Config) -> Router {
         .route("/v1/sticker-packs/index", get(index::read).post(index::append))
         .route("/v1/sticker-packs/claims", post(index::claim))
         .with_state(config.index);
-    let relay_routes = Router::new().route("/tunnel/{host}", get(relay::tunnel)).with_state(config.relay_targets);
-    let config_routes = Router::new().route("/v1/config", get(client_config)).with_state(config.client);
-    let app = Router::new().merge(index_routes).merge(relay_routes).merge(config_routes);
+    let relay_routes = Router::new()
+        .route("/tunnel/{host}", get(relay::tunnel))
+        .with_state(config.relay_targets);
+    let config_routes = Router::new()
+        .route("/v1/config", get(client_config))
+        .with_state(config.client);
+    let app = Router::new()
+        .merge(index_routes)
+        .merge(relay_routes)
+        .merge(config_routes);
     // Built files have brotli and gzip copies next to them (app/build.mjs); a browser that accepts one gets it.
     app.fallback_service(ServeDir::new(config.static_dir).precompressed_br().precompressed_gzip())
 }
