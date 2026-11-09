@@ -180,6 +180,30 @@ describe('the workflow', () => {
     expect(browser.snapshot).toBeNull();
   });
 
+  // Detects: a "Disconnect and clear" that could not unlink the device being forgotten: the next visit resumes the
+  // device instead of finishing the clear, and its keys stay in the browser.
+  it('finishes a "Disconnect and clear" that failed, at the next visit', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+    const deviceId = deviceIdOf(first);
+    world.signal.failUnlinks = 1;
+    await first.workflow.clear();
+    await settle(first);
+    expect(world.signal.isLinked(alice.aci, deviceId)).toBe(true);
+    browser.closePage();
+
+    const second = await openPage(alice, browser);
+    await until(() => !world.signal.isLinked(alice.aci, deviceId), 'the unlink');
+    await settle(second);
+    expect(second.workflow.step).toBe('start');
+    expect(second.server.active.size).toBe(0);
+    expect(browser.snapshot).toBeNull();
+  });
+
   // Detects: a page closed while signing out leaving the Telegram session active, or the next visit waiting
   // forever for a login ("waiting for sign-in").
   it('finishes a sign-out that a closed page left unfinished', async () => {

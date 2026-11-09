@@ -222,6 +222,10 @@ export function appServices(
       storage: () => account.storage(),
       announceStickerPacks: (packs) => account.announceStickerPacks(packs),
       async unlink() {
+        if (world.signal.failUnlinks > 0) {
+          world.signal.failUnlinks--;
+          throw new Error('the connection to Signal closed');
+        }
         user.phone.unlink(account.deviceId);
         device.onUnlinked();
       },

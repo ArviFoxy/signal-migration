@@ -162,6 +162,8 @@ export class Workflow extends EventTarget {
   #saving: Promise<void> = Promise.resolve();
   #reconcileQueued = false;
   #continuing: Promise<void> = Promise.resolve();
+  /** The last clear left a login it could not end. */
+  #clearUnfinished = false;
 
   constructor(readonly services: AppServices) {
     super();
@@ -246,8 +248,13 @@ export class Workflow extends EventTarget {
     if (nothingKept && phase.kind === 'setup' && phase.step === 'start') return null;
     return {
       version: 2,
-      // A finished migration that left a login behind (the unlink or sign-out failed) ends it at the next visit.
-      phase: phase.kind === 'finished' ? 'finishing' : phase.kind,
+      // A finish or clear that left a login behind (an unlink or sign-out failed) ends it at the next visit.
+      phase:
+        phase.kind === 'finished'
+          ? 'finishing'
+          : phase.kind === 'setup' && this.#clearUnfinished
+            ? 'clearing'
+            : phase.kind,
       step: phase.kind === 'setup' ? phase.step : 'review',
       telegram,
       signal,
@@ -384,7 +391,10 @@ export class Workflow extends EventTarget {
   /** Start, Continue, Back and the address bar: asks for a step. False when not in setup. */
   goTo(step: Step): boolean {
     if (step === 'migrate') return this.phase.kind === 'migrating';
-    return this.#dispatch({ type: 'go-to', step });
+    const moved = this.#dispatch({ type: 'go-to', step });
+    // Going on after a clear that left a login behind keeps that login.
+    if (moved) this.#clearUnfinished = false;
+    return moved;
   }
 
   setSelected(entries: PackEntry[], selected: boolean): void {
@@ -439,6 +449,8 @@ export class Workflow extends EventTarget {
     this.error = null;
     await this.#endAccounts('by-user');
     await this.#deleteLeftovers();
+    // A login that could not be ended stays, with its error shown; the next visit finishes the clear.
+    this.#clearUnfinished = this.#keptTelegram !== null || this.#keptSignal !== null;
     this.#dispatch({ type: 'cleared' });
   }
 

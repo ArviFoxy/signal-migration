@@ -126,6 +126,8 @@ export class FakeSignal {
   readonly toldToFetchStorage = new Map<string, number>();
   /** The next `count` attempts to message the other devices fail, as a network failure would. */
   failAnnouncements = 0;
+  /** The next `count` attempts to unlink a device fail, as a network failure would. */
+  failUnlinks = 0;
 
   deliverToOtherDevices(aci: string, fromDevice: number, packs: { packId: Uint8Array; packKey: Uint8Array }[]): void {
     if (!this.isLinked(aci, fromDevice)) throw new SocketClosedError(DEVICE_REMOVED);
