@@ -43,6 +43,24 @@ The renderer never holds a Telegram session or Signal keys. It runs with
 `contextIsolation`, `sandbox` and no Node integration, and talks to the main
 process through a small typed IPC surface. (proposed)
 
+## Wizard
+
+Steps: what to move, connect Telegram, the kind's selection (sticker packs),
+connect Signal, review, migrate, done. Following the sketch:
+
+- A connections panel at the bottom of the sidebar shows each service's
+  current state (Telegram, Signal, pack index), with a sign-out or unlink
+  button while one is connected. (decided)
+- The Telegram and Signal steps show the connection as it is: this computer
+  talks directly to that service's servers, with no server in between.
+  (decided)
+- The pack index is explained where it is used: the app downloads the list
+  and matches it locally, so lookups send nothing about the user's packs.
+  After an upload it sends that pack's content hash and Signal pack ID.
+  (decided)
+- Telegram is signed out when the downloads finish. Signal is unlinked
+  automatically at Done. (decided)
+
 ## Repository layout
 
 npm workspaces for TypeScript and a Cargo workspace for Rust, in one repo.
@@ -123,7 +141,10 @@ bridge. Signal-Desktop is the reference implementation for each flow.
 4. Message queue: a linked device receives every incoming message. The app must
    fetch and acknowledge its queue so messages do not pile up on the server. It
    never stores message contents.
-5. Unlink at the end, from the app or from the phone.
+5. The device exists only for the migration. When the last job finishes, the
+   app unlinks itself automatically (it deletes its own device from the
+   account) and erases its keys. The user can also unlink earlier from the
+   connections panel or from the phone; queued uploads then stop. (decided)
 
 This module has the most protocol work and the most risk. It is the first spike.
 
