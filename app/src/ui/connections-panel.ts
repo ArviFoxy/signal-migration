@@ -40,7 +40,7 @@ const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: stri
   index: {
     title: 'Sticker pack index',
     plain:
-      'The migration server keeps a list of the packs already on Signal. When you upload a pack, the migration server receives only its hash and its Signal pack ID. It never sees your stickers.',
+      'The migration server keeps a list of the packs already on Signal. When you upload a pack, the migration server receives only its hash and its Signal pack ID. It cannot access your stickers.',
     technical: html`Your browser downloads the whole list over HTTPS and looks up your packs on your computer.`,
   },
 };
