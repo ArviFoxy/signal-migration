@@ -112,12 +112,17 @@ export class PackIndex {
     }
   }
 
+  /** The pack IDs of the entries for `lookupKey`, not yet checked against any key. */
+  candidates(lookupKey: Uint8Array): Uint8Array[] {
+    return this.#packIds.get(toHex(lookupKey)) ?? [];
+  }
+
   /** The pack ID of the first entry for `lookupKey` whose manifest opens with `packKey`, or null. */
   async find(lookupKey: Uint8Array, packKey: Uint8Array): Promise<Uint8Array | null> {
-    const key = toHex(lookupKey);
+    const key = `${toHex(lookupKey)}:${toHex(packKey)}`;
     const known = this.#verified.get(key);
     if (known) return known;
-    for (const packId of this.#packIds.get(key) ?? []) {
+    for (const packId of this.candidates(lookupKey)) {
       const manifest = await this.#manifests(packId);
       if (manifest && (await manifestOpens(manifest, packKey))) {
         this.#verified.set(key, packId);

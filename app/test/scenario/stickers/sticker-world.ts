@@ -9,7 +9,7 @@ import { create, fromBinary } from '@bufbuild/protobuf';
 import { InstalledStickerPackRecordSchema, ManifestRecord_Identifier_Type } from '../../../src/gen/SignalStorage_pb';
 import { StickerPackSchema } from '../../../src/gen/Stickers_pb';
 import { ConversionError, type ConvertSticker } from '../../../src/kinds/stickers/convert';
-import { packIdentity } from '../../../src/kinds/stickers/identity';
+import { contentPackKey, packIdentity } from '../../../src/kinds/stickers/identity';
 import { StickerMigration } from '../../../src/kinds/stickers/migration';
 import { PackIndex } from '../../../src/kinds/stickers/pack-index';
 import type { StickerFormat, TelegramPack, TelegramSource } from '../../../src/kinds/stickers/telegram-packs';
@@ -288,9 +288,13 @@ export class StickerWorld extends World {
     return { packId, packKey };
   }
 
-  /** Another user migrating a Telegram pack: uploads it under its derived key and adds it to the index. */
-  async migrateElsewhere(spec: PackSpec): Promise<Uint8Array> {
+  /**
+   * Another user migrating a Telegram pack: uploads it under the key derived from its content and adds it to the
+   * index. With `firstVersion`, as the first version of the app did: under the key derived from its identity.
+   */
+  async migrateElsewhere(spec: PackSpec, options: { firstVersion?: boolean } = {}): Promise<Uint8Array> {
     const identity = await packIdentity(spec);
+    const packKey = options.firstVersion ? identity.legacyPackKey : await packKeyOf(spec);
     const stickers = await Promise.all(
       spec.stickers.map(async (sticker) => ({
         image: (await simulatedConvert(sticker.bytes, sticker.format)).image,
@@ -300,11 +304,19 @@ export class StickerWorld extends World {
     const packId = await uploadStickerPack(
       this.#publisherChat(),
       { title: spec.title, stickers },
-      identity.packKey,
+      packKey,
       undefined,
       this.signal.https,
     );
     await this.index.backend.add(new Uint8Array([...identity.lookupKey, ...packId]));
     return packId;
   }
+}
+
+/** A pack's Signal pack key, from its content: the stickers' Telegram files, as the migration downloads them. */
+export function packKeyOf(spec: PackSpec): Promise<Uint8Array> {
+  return contentPackKey({
+    title: spec.title,
+    stickers: spec.stickers.map((sticker) => ({ file: sticker.bytes, emoji: sticker.emoji })),
+  });
 }

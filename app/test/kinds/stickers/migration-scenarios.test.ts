@@ -4,7 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { ManifestRecord_Identifier_Type } from '../../../src/gen/SignalStorage_pb';
 import { packIdentity } from '../../../src/kinds/stickers/identity';
-import { StickerWorld } from '../../scenario/stickers/sticker-world';
+import { packKeyOf, StickerWorld } from '../../scenario/stickers/sticker-world';
 
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
@@ -65,8 +65,9 @@ describe('a first migration', () => {
 });
 
 describe('sharing uploads between users', () => {
-  // Detects: a pack being uploaded again although someone already uploaded it, or its files downloaded for nothing.
-  it('installs packs someone else uploaded without uploading or downloading them', async () => {
+  // Detects: a pack being uploaded again although someone already uploaded it. Its stickers are downloaded: the
+  // pack key is computed from them.
+  it('installs packs someone else uploaded without uploading them', async () => {
     const world = new StickerWorld();
     const [a, b, c] = [world.pack('A'), world.pack('B'), world.pack('C')];
     await world.user([a, b]).visit();
@@ -74,8 +75,45 @@ describe('sharing uploads between users', () => {
     await bob.visit();
     expect(await bob.installedTitles()).toEqual(['B', 'C', 'A']);
     expect(world.signal.packsUploaded.get(bob.aci)).toBe(1);
+  });
+
+  // Detects: an upload under a key that can be computed without the pack's stickers (from its name or Telegram's
+  // file identifiers), so that knowing which pack it is would be enough to decrypt it.
+  it('uploads under the key computed from the stickers', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const alice = world.user([a]);
+    await alice.visit();
+    const [installed] = await alice.installedPacks();
+    expect(Buffer.from(installed.packKey)).toEqual(Buffer.from(await packKeyOf(a)));
+    expect(world.readStickers(installed.packId, installed.packKey)).toHaveLength(a.stickers.length);
+  });
+
+  // Detects: packs uploaded by the first version of the app (under the key derived from the pack's identity)
+  // uploaded again under the content key, or downloaded for nothing: their key needs no stickers.
+  it('installs a pack the first version uploaded without downloading or uploading it', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    await world.migrateElsewhere(a, { firstVersion: true });
+    const bob = world.user([a]);
+    await bob.visit();
+    expect(await bob.installedTitles()).toEqual(['A']);
+    expect(world.signal.packsUploaded.get(bob.aci) ?? 0).toBe(0);
     expect(bob.stickers.stickerReads('A')).toBe(0);
-    expect(bob.stickers.stickerReads('B')).toBe(0);
+  });
+
+  // Detects: a pack the user already has installed, from an upload the index lists, downloaded or uploaded again:
+  // its key is in the user's account, so the stickers are not needed.
+  it('recognizes an installed pack from the index without downloading it', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const packId = await world.migrateElsewhere(a);
+    const bob = world.user([a]);
+    await bob.installOnPhone({ packId, packKey: await packKeyOf(a) });
+    await bob.visit();
+    expect(await bob.installedTitles()).toEqual(['A']);
+    expect(world.signal.packsUploaded.get(bob.aci) ?? 0).toBe(0);
+    expect(bob.stickers.stickerReads('A')).toBe(0);
   });
 
   // Detects: lookups that read only the first page of the index.
@@ -177,7 +215,7 @@ describe("the user's existing Signal packs", () => {
     const a = world.pack('A');
     const packId = await world.migrateElsewhere(a);
     const alice = world.user([a]);
-    await alice.installOnPhone({ packId, packKey: (await packIdentity(a)).packKey });
+    await alice.installOnPhone({ packId, packKey: await packKeyOf(a) });
     await alice.uninstallOnPhone(packId);
     await alice.visit();
     const snapshot = await (await alice.phone.storage()).readStickerPacks();
