@@ -26,19 +26,25 @@ const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const randomHex = (byteCount: number) => Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), (b) => b.toString(16).padStart(2, '0')).join('');
 const randomInt = (min: number, max: number) => min + (crypto.getRandomValues(new Uint32Array(1))[0] % (max - min + 1));
 
+/** Reports progress events that contain no secrets (request paths, close codes). */
+export type LinkEvents = (event: string) => void;
+
 /** Waits for the phone to scan the QR code (passed to `showQrCode` as a `sgnl://linkdevice` URL). */
-async function receiveProvisionMessage(showQrCode: (url: string) => void): Promise<ProvisionMessage> {
+async function receiveProvisionMessage(showQrCode: (url: string) => void, onEvent: LinkEvents): Promise<ProvisionMessage> {
   await loadSignalWasm();
   const receiver = new ProvisioningReceiver();
   const socket = await connectChat('/v1/websocket/provisioning/', '/v1/keepalive/provisioning');
+  onEvent('linking socket open');
   try {
     const envelope = await new Promise<Uint8Array>((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('the QR code was not scanned within 3 minutes')), SCAN_TIMEOUT_MS);
       socket.onUnexpectedClose = (code) => {
         clearTimeout(timer);
+        onEvent(`linking socket closed, code ${code}`);
         reject(new Error(`the connection to Signal closed (code ${code}) before the QR code was scanned`));
       };
       socket.onServerRequest = (request) => {
+        onEvent(`linking socket: Signal sent ${request.verb} ${request.path}`);
         if (request.path === '/v1/address') {
           const address = fromBinary(ProvisioningAddressSchema, request.body).address;
           const url = new URL('sgnl://linkdevice');
@@ -66,8 +72,9 @@ function signedKey(generate: typeof generateSignedPreKey, identityPrivate: Uint8
 }
 
 /** Links the device and returns its login and the keys the migration needs. */
-export async function linkDevice(showQrCode: (url: string) => void): Promise<LinkedAccount> {
-  const provision = await receiveProvisionMessage(showQrCode);
+export async function linkDevice(showQrCode: (url: string) => void, onEvent: LinkEvents = () => undefined): Promise<LinkedAccount> {
+  const provision = await receiveProvisionMessage(showQrCode, onEvent);
+  onEvent('linking message decrypted');
   try {
     const hasPni = provision.pniIdentityKeyPrivate.length > 0 && provision.pni !== '';
     const password = randomHex(16);

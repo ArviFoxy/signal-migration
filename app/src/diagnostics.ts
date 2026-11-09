@@ -10,9 +10,17 @@ import { SignalSession } from './signal/session';
 import { connectChat } from './signal/socket';
 
 const output = document.getElementById('out') as HTMLPreElement;
+const started = performance.now();
+/** Shows a line and sends it to the server's development log (accepted only when the server runs in diagnostics mode). */
 const report = (line: string) => {
   output.textContent += line + '\n';
+  const stamped = `${((performance.now() - started) / 1000).toFixed(1)}s ${line}`;
+  void fetch('/v1/diagnostics/log', { method: 'POST', body: stamped, keepalive: true }).catch(() => undefined);
 };
+document.addEventListener('visibilitychange', () => report(`page ${document.visibilityState}`));
+window.addEventListener('pagehide', () => report('page hidden (pagehide)'));
+window.addEventListener('pageshow', (event) => report(`page shown (pageshow, restored from cache: ${(event as PageTransitionEvent).persisted})`));
+report(`page loaded: ${navigator.userAgent}`);
 
 async function checkProvisioningSocket(): Promise<void> {
   const started = performance.now();
@@ -38,19 +46,16 @@ async function checkProvisioningSocket(): Promise<void> {
 
 async function checkLinkCycle(): Promise<void> {
   const qr = document.getElementById('qr') as HTMLImageElement;
-  const openInSignal = document.getElementById('open-signal') as HTMLAnchorElement;
+  // Signal links devices only from a camera scan of the QR code: Android's sgnl://linkdevice handler just opens the
+  // Linked devices screen and drops the link (DeviceProvisioningActivity), and iOS reads it only from its scanners.
   const account = await linkDevice((url) => {
-    // On a phone with Signal installed, tapping the link opens Signal's own "link this device" flow.
-    openInSignal.href = url;
-    openInSignal.hidden = false;
     void QRCode.toDataURL(url, { margin: 2, width: 280 }).then((dataUrl) => {
       qr.src = dataUrl;
       qr.hidden = false;
     });
-    report('link: tap "Open in Signal" on this phone, or scan the QR code in Signal under Settings › Linked devices');
-  });
+    report('link: scan the QR code in Signal under Settings › Linked devices › Link new device');
+  }, (event) => report(`event: ${event}`));
   qr.hidden = true;
-  openInSignal.hidden = true;
   report(`link: OK, linked as device ${account.credentials.deviceId}`);
   const session = await SignalSession.open(account.credentials);
   try {

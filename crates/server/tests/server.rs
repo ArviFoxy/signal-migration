@@ -22,7 +22,7 @@ struct TestServer {
 async fn start(relay_targets: RelayTargets) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let index_path = dir.path().join("index.bin");
-    let config = Config { static_dir: dir.path().to_path_buf(), index: Index::open(index_path.clone()).await.unwrap(), relay_targets };
+    let config = Config { static_dir: dir.path().to_path_buf(), index: Index::open(index_path.clone()).await.unwrap(), relay_targets, diagnostics_log: false };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -97,7 +97,7 @@ async fn appended_entry_is_read_back_and_persists_across_restart() {
     let restarted = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let config = Config { static_dir: std::env::temp_dir(), index: reopened, relay_targets: RelayTargets::signal() };
+        let config = Config { static_dir: std::env::temp_dir(), index: reopened, relay_targets: RelayTargets::signal(), diagnostics_log: false };
         tokio::spawn(async move { axum::serve(listener, router(config).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
         address
     };
