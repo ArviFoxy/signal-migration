@@ -17,6 +17,11 @@ const files = execFileSync('git', ['ls-files', '--cached', '--others', '--exclud
 
 /** The fixed GUID of the WebSocket handshake (RFC 6455), which is not anyone's identifier. */
 const WEBSOCKET_GUID = '258EAFA5-E914-47DA-95CA-C5AB0DC85B11';
+/**
+ * Phone numbers reserved for fiction, which are nobody's: 555-0100 to 555-0199 in the United States (NANPA) and
+ * 07700 900000 to 07700 900999 in the United Kingdom (Ofcom).
+ */
+const FICTIONAL_PHONE_NUMBERS = [/^\+1\d{3}55501\d{2}$/, /^\+447700900\d{3}$/];
 const PATTERNS: [string, RegExp][] = [
   ['UUID, such as a Signal account ID', /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi],
   ['phone number in international format', /\+[1-9]\d{9,14}\b/g],
@@ -34,7 +39,9 @@ describe('the repository', () => {
       const text = content.toString('utf8');
       for (const [kind, pattern] of PATTERNS) {
         for (const match of text.matchAll(pattern)) {
-          if (match[0].toUpperCase() !== WEBSOCKET_GUID) found.push(`${file}: ${kind}: ${match[0]}`);
+          if (match[0].toUpperCase() === WEBSOCKET_GUID) continue;
+          if (FICTIONAL_PHONE_NUMBERS.some((fiction) => fiction.test(match[0]))) continue;
+          found.push(`${file}: ${kind}: ${match[0]}`);
         }
       }
     }

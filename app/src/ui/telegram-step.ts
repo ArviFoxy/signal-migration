@@ -19,12 +19,16 @@ import {
   stepHeader,
   stickyFooter,
 } from './layout';
+import './phone-input';
+
 @customElement('telegram-step')
 export class TelegramStep extends LightElement {
   @property({ attribute: false }) login!: TelegramView;
   /** The QR code image, drawn from the link it shows. */
   @state() private qrImage: { link: string; url: string } | null = null;
   @state() private showPassword = false;
+  /** The phone number entered, in international form, or null while it cannot be one. */
+  @state() private phone: string | null = null;
   #onChange = () => this.requestUpdate();
 
   protected willUpdate(changed: PropertyValues<this>): void {
@@ -60,6 +64,28 @@ export class TelegramStep extends LightElement {
     event.preventDefault();
     const input = (event.target as HTMLFormElement).querySelector('input')!;
     this.login.submit(build(input.value.trim()));
+  }
+
+  /** The phone number form: the number goes to TDLib in international form, once it can be one. */
+  private phoneForm() {
+    const sending = this.login.sending;
+    return html`<form
+      class="flex max-w-lg flex-wrap items-end gap-3"
+      @submit=${(event: SubmitEvent) => {
+        event.preventDefault();
+        if (this.phone) this.login.submit({ _: 'setAuthenticationPhoneNumber', phone_number: this.phone });
+      }}
+    >
+      <div class="flex min-w-[260px] flex-1 flex-col gap-2">
+        <label for="telegram-phone" class="text-sm font-semibold">Phone number</label>
+        <phone-input
+          fieldId="telegram-phone"
+          ?disabled=${sending}
+          @phone=${(event: CustomEvent<string | null>) => (this.phone = event.detail)}
+        ></phone-input>
+      </div>
+      <button type="submit" class=${primaryButton} ?disabled=${sending || !this.phone}>Continue</button>
+    </form>`;
   }
 
   private form(label: string, type: string, autocomplete: string, build: (value: string) => LoginQuery) {
@@ -171,10 +197,7 @@ export class TelegramStep extends LightElement {
         return html`<p class="text-muted">Connecting to Telegram…</p>`;
       case 'authorizationStateWaitPhoneNumber':
         return this.formCard(
-          this.form('Phone number, in international format', 'tel', 'tel', (phone_number) => ({
-            _: 'setAuthenticationPhoneNumber',
-            phone_number,
-          })),
+          this.phoneForm(),
           html`<p>
             After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
             has one.
