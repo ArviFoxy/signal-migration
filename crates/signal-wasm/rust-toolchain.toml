@@ -1,0 +1,5 @@
+[toolchain]
+# The version libsignal pins in third_party/libsignal/rust-toolchain.
+channel = "1.98.1"
+targets = ["wasm32-unknown-unknown"]
+profile = "minimal"

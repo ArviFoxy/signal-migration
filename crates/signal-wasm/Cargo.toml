@@ -1,0 +1,28 @@
+[package]
+name = "signal-migration-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "WebAssembly bindings to the parts of libsignal that the browser page needs."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+libsignal-protocol = { path = "../../third_party/libsignal/rust/protocol" }
+libsignal-provisioning = { path = "../../third_party/libsignal/rust/provisioning" }
+wasm-bindgen = "0.2"
+rand = "0.9.4"
+# getrandom has no default randomness source on wasm32-unknown-unknown; "wasm_js" uses the browser's crypto.getRandomValues.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# crypto-common (under libsignal's ciphers) uses getrandom 0.4, which needs the same feature.
+getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+hmac = "0.13.0"
+sha2 = "0.11"
+aes = "0.9.1"
+ctr = "0.10.1"
+
+[profile.release]
+opt-level = 3
+lto = true
