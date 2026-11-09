@@ -12,10 +12,12 @@ use rand::TryRngCore;
 use sha2::Sha256;
 use wasm_bindgen::prelude::*;
 
+mod tls;
+
 type HmacSha256 = Hmac<Sha256>;
 type Aes256Ctr = ctr::Ctr128BE<aes::Aes256>;
 
-fn js_error(error: impl std::fmt::Display) -> JsError {
+pub(crate) fn js_error(error: impl std::fmt::Display) -> JsError {
     JsError::new(&error.to_string())
 }
 
