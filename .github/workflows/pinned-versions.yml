@@ -1,0 +1,42 @@
+# Once a week, compares the versions pinned in scripts/build-webm-decoder.sh with the newest releases
+# (scripts/check-pinned-versions.sh). When one is behind, it opens an issue, or updates the one already open.
+name: Pinned versions
+
+on:
+  schedule:
+    - cron: '23 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Compare with the newest releases
+        id: compare
+        run: |
+          behind=$(scripts/check-pinned-versions.sh)
+          echo "$behind" > behind.txt
+          echo "behind=$([ -n "$behind" ] && echo yes || echo no)" >> "$GITHUB_OUTPUT"
+          echo "${behind:-All pinned versions are the newest.}" >> "$GITHUB_STEP_SUMMARY"
+      - name: Open or update the issue
+        if: steps.compare.outputs.behind == 'yes'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          title='Newer versions for the WebM decoder build'
+          {
+            echo 'scripts/build-webm-decoder.sh pins older versions than the newest releases:'
+            echo
+            sed 's/^/- /' behind.txt
+          } > body.md
+          number=$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            gh issue edit "$number" --body-file body.md
+          else
+            gh issue create --title "$title" --body-file body.md
+          fi

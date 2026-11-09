@@ -1,0 +1,29 @@
+# Pull requests for newer versions of the app's dependencies, once a week, one per ecosystem; security fixes come
+# as soon as GitHub knows of them. The versions pinned in scripts/build-webm-decoder.sh (FFmpeg, libvpx, Emscripten)
+# are not packages Dependabot knows; .github/workflows/pinned-versions.yml checks those.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /app
+    schedule:
+      interval: weekly
+    groups:
+      npm:
+        patterns: ['*']
+  - package-ecosystem: cargo
+    directories:
+      - /crates/server
+      - /crates/signal-wasm
+    schedule:
+      interval: weekly
+    groups:
+      cargo:
+        patterns: ['*']
+  - package-ecosystem: gitsubmodule
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

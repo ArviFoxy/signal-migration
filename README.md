@@ -96,6 +96,10 @@ cd app && npm install && npm run build
 cd ../crates/server && cargo build --release
 ```
 
+Dependabot (`.github/dependabot.yml`) proposes newer npm and Cargo packages, submodules and GitHub Actions each
+week. The versions pinned in `scripts/build-webm-decoder.sh` are checked by a weekly workflow
+(`scripts/check-pinned-versions.sh`), which opens an issue when one is behind.
+
 ## Run
 
 ```sh
