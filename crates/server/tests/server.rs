@@ -174,3 +174,22 @@ async fn config_carries_the_telegram_app_identity() {
     let body = reqwest::Client::new().get(format!("http://{}/v1/config", server.base)).send().await.unwrap().text().await.unwrap();
     assert_eq!(body, r#"{"telegram":{"apiId":12345,"apiHash":"0123456789abcdef"}}"#);
 }
+
+/// Detects: browsers downloading the uncompressed WebAssembly (15 MB for TDLib) although a compressed copy exists, or
+/// the compressed copy arriving with a type under which the browser cannot start WebAssembly.
+#[tokio::test]
+async fn compressed_copy_is_sent_to_a_browser_that_accepts_it() {
+    let server = start(RelayTargets::signal()).await;
+    let static_dir = server.index_path.parent().unwrap();
+    std::fs::write(static_dir.join("module.wasm"), b"plain").unwrap();
+    std::fs::write(static_dir.join("module.wasm.br"), b"brotli").unwrap();
+    let client = reqwest::Client::new();
+    let url = format!("http://{}/module.wasm", server.base);
+    let response = client.get(&url).header("Accept-Encoding", "br, gzip").send().await.unwrap();
+    assert_eq!(response.headers()["content-encoding"], "br");
+    assert_eq!(response.headers()["content-type"], "application/wasm");
+    assert_eq!(response.bytes().await.unwrap().as_ref(), b"brotli");
+    let plain = client.get(&url).send().await.unwrap();
+    assert!(plain.headers().get("content-encoding").is_none());
+    assert_eq!(plain.bytes().await.unwrap().as_ref(), b"plain");
+}

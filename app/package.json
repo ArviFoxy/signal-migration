@@ -5,7 +5,7 @@
   "description": "Moves a user's data from Telegram into Signal, in the browser.",
   "scripts": {
     "generate": "buf generate && tdl-install-types -o src/gen/tdlib-types.d.ts ../third_party/td/td/generate/scheme/td_api.tl",
-    "build:wasm": "cd ../crates/signal-wasm && cargo build --release && wasm-bindgen --target web --out-dir ../../app/src/wasm target/wasm32-unknown-unknown/release/signal_migration_wasm.wasm",
+    "build:wasm": "cd ../crates/signal-wasm && cargo build --release && wasm-bindgen --target web --out-dir ../../app/src/wasm target/wasm32-unknown-unknown/release/signal_migration_wasm.wasm && cd ../../app && wasm-opt -Oz --strip-debug --strip-producers src/wasm/signal_migration_wasm_bg.wasm -o src/wasm/signal_migration_wasm_bg.wasm",
     "build": "npm run generate && npm run build:wasm && node build.mjs",
     "check": "npm run generate && npm run build:wasm && tsc --noEmit",
     "test": "npm run generate && vitest run"
@@ -21,6 +21,7 @@
     "@bufbuild/buf": "^1.75.0",
     "@bufbuild/protoc-gen-es": "^2.17.0",
     "@types/qrcode": "^1.5.5",
+    "binaryen": "^132.0.0",
     "esbuild": "^0.25.0",
     "lit": "^3.3.3",
     "tdl-install-types": "^0.3.1",
