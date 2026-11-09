@@ -7,7 +7,7 @@
 // the user derived from the Telegram pack: a wrong or forged entry fails that check and is ignored.
 
 import { fromBinary } from '@bufbuild/protobuf';
-import { StickerPackSchema } from '../../gen/Stickers_pb';
+import { type StickerPack, StickerPackSchema } from '../../gen/Stickers_pb';
 import { loadSignalWasm } from '../../signal/wasm';
 import { decryptStickerFile } from '../../wasm/signal_migration_wasm';
 
@@ -109,6 +109,18 @@ export class PackIndex {
       }
       this.#entryCount += count;
       if (count < this.#pageSize) return;
+    }
+  }
+
+  /** A pack's manifest from Signal's CDN, decrypted with `packKey`; null when it is missing or does not decrypt. */
+  async manifest(packId: Uint8Array, packKey: Uint8Array): Promise<StickerPack | null> {
+    const encrypted = await this.#manifests(packId);
+    if (!encrypted) return null;
+    await loadSignalWasm();
+    try {
+      return fromBinary(StickerPackSchema, decryptStickerFile(encrypted, packKey));
+    } catch {
+      return null;
     }
   }
 

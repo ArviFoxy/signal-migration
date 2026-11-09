@@ -290,16 +290,29 @@ export class StickerMigration extends EventTarget {
     this.#previewsStopped = true;
   }
 
-  /** Marks the packs the Signal account already has installed. */
+  /**
+   * Marks the packs the Signal account already has installed: an installed pack that the index lists for a Telegram
+   * pack, and whose manifest, decrypted with the key in the account, has that pack's title and its stickers' emoji
+   * in order. Anyone can add an index entry, so the entry alone does not show that the installed pack is this one.
+   */
   async readSignal(signal: SignalAccount): Promise<void> {
     const { packs } = await (await signal.storage()).readStickerPacks();
-    for (const entry of this.entries) {
-      // Installed as one of the uploads the index lists for this pack.
-      const candidates = new Set(this.#services.index.candidates(entry.identity.lookupKey).map(toHex));
-      const installed = packs.find((stored) => candidates.has(toHex(stored.packId)));
-      if (installed)
-        Object.assign(entry, { state: 'in-signal', packId: installed.packId, packKey: installed.packKey, error: null });
-    }
+    const { index } = this.#services;
+    await forEachConcurrently(this.entries, CONCURRENT_VERIFICATIONS, async (entry) => {
+      const candidates = new Set(index.candidates(entry.identity.lookupKey).map(toHex));
+      for (const stored of packs.filter((pack) => candidates.has(toHex(pack.packId)))) {
+        const manifest = await index.manifest(stored.packId, stored.packKey);
+        const stickers = entry.pack.stickers;
+        if (
+          manifest?.title === entry.pack.title &&
+          manifest.stickers.length === stickers.length &&
+          manifest.stickers.every((sticker, i) => sticker.emoji === stickers[i].emoji)
+        ) {
+          Object.assign(entry, { state: 'in-signal', packId: stored.packId, packKey: stored.packKey, error: null });
+          return;
+        }
+      }
+    });
     this.signalReadFrom = signal;
     this.#changed();
   }

@@ -89,6 +89,20 @@ describe('sharing uploads between users', () => {
     expect(world.readStickers(installed.packId, installed.packKey)).toHaveLength(a.stickers.length);
   });
 
+  // Detects: an index entry that anyone added, pointing a Telegram pack at another pack the user has installed, which
+  // makes the migration skip the Telegram pack as if it were installed.
+  it('does not take another installed pack for this one because of an index entry', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const other = await world.publishSignalPack('Other');
+    await world.index.backend.add(new Uint8Array([...(await packIdentity(a)).lookupKey, ...other.packId]));
+    const bob = world.user([a]);
+    await bob.installOnPhone(other);
+    await bob.visit();
+    expect((await bob.installedTitles()).sort()).toEqual(['A', 'Other']);
+    expect(world.signal.packsUploaded.get(bob.aci)).toBe(1);
+  });
+
   // Detects: a pack the user already has installed, from an upload the index lists, downloaded or uploaded again:
   // its key is in the user's account, so the stickers are not needed.
   it('recognizes an installed pack from the index without downloading it', async () => {
