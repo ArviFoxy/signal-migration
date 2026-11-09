@@ -36,8 +36,8 @@ export const isOnSignal = (state: PackState) => state === 'in-signal' || state =
 
 const CHIP = 'self-start rounded-full px-2.5 py-1 text-xs font-semibold';
 export const chips = {
-  onSignal: html`<span class="${CHIP} bg-accent-chip text-accent-chip-text">On Signal</span>`,
-  upload: html`<span class="${CHIP} bg-upload-chip text-upload-text">Upload</span>`,
+  onSignal: html`<span class="${CHIP} bg-accent-chip text-accent-chip-text">On Signal · no upload</span>`,
+  upload: html`<span class="${CHIP} bg-upload-chip text-upload-text">Not on Signal · upload</span>`,
   failed: html`<span class="${CHIP} bg-[#FBE4E1] text-danger">Failed</span>`,
   checking: html`<span class="${CHIP} bg-segment text-muted">Checking</span>`,
 };

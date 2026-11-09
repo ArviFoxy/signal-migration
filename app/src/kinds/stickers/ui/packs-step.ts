@@ -56,14 +56,17 @@ export class StickerPacksStep extends MigrationView {
                 : html`<span class="block aspect-square rounded-md bg-segment"></span>`,
             )}
           </span>
-          <input
-            type="checkbox"
-            class="size-[18px] accent-accent"
-            aria-label=${`Move ${entry.pack.title}`}
-            .checked=${entry.selected}
-            ?disabled=${tooLarge}
-            @change=${(event: Event) => this.migration.setSelected(entry, (event.target as HTMLInputElement).checked)}
-          />
+          <span class="flex items-center gap-1.5 text-xs font-medium text-muted">
+            Add to Signal
+            <input
+              type="checkbox"
+              class="size-[18px] accent-accent"
+              aria-label=${`Add ${entry.pack.title} to your Signal`}
+              .checked=${entry.selected}
+              ?disabled=${tooLarge}
+              @change=${(event: Event) => this.migration.setSelected(entry, (event.target as HTMLInputElement).checked)}
+            />
+          </span>
         </span>
         <span class="text-[15px] font-semibold [overflow-wrap:anywhere]">${entry.pack.title}</span>
         <span class="text-[13px] text-muted">${packDescription(entry)}</span>
@@ -81,10 +84,11 @@ export class StickerPacksStep extends MigrationView {
     const failed = entries.filter((entry) => entry.state === 'failed').length;
     const onSignal = entries.filter((entry) => isOnSignal(entry.state)).length;
     const selected = entries.filter((entry) => entry.selected).length;
+    const toUpload = entries.filter((entry) => entry.selected && !isOnSignal(entry.state)).length;
     const tabs: { id: Filter; label: string }[] = [
       { id: 'all', label: `All · ${entries.length}` },
       { id: 'signal', label: `On Signal · ${onSignal}` },
-      { id: 'upload', label: `To upload · ${entries.length - onSignal}` },
+      { id: 'upload', label: `Not on Signal · ${entries.length - onSignal}` },
     ];
     const visible = this.visible();
     return html`${stepHeader(3, 'Sticker packs', reading ? 'Reading your packs from Telegram…' : `${entries.length} packs found in Telegram.`)}
@@ -162,7 +166,7 @@ export class StickerPacksStep extends MigrationView {
                       class="size-[18px] accent-accent"
                       .checked=${visible.length > 0 && visible.every((entry) => entry.selected || entry.pack.stickers.length > MAX_STICKERS)}
                       @change=${(event: Event) => this.selectAll((event.target as HTMLInputElement).checked)}
-                    />Select all
+                    />Add all
                   </label>
                   <label
                     class="inline-flex min-h-10 items-center gap-2 rounded-[10px] px-3 ring-1 ring-line-strong ring-inset"
@@ -184,7 +188,10 @@ export class StickerPacksStep extends MigrationView {
               </ul>`
       }
       <div class="mt-auto flex flex-wrap items-center justify-between gap-3 border-t border-line pt-2">
-        <span class="text-sm text-muted">${selected} of ${entries.length} selected</span>
+        <span class="text-sm text-muted"
+          >${selected} of ${entries.length} packs to add to your
+          Signal${toUpload > 0 ? `, ${toUpload} of them to upload` : ''}</span
+        >
         <div class="flex gap-3">
           <button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
           <button
