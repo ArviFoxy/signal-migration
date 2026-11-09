@@ -120,13 +120,19 @@ export class OwnDevices {
     if (response.status === 404) return;
     if (response.status !== 200) throw new Error(`reading the keys of your other devices answered ${response.status}`);
     const bundle = parse<PreKeyResponse>(response.body);
+    // Every device of the account shares the account's identity key. A bundle with another key would start a
+    // session with someone else, who could then read the packs' keys in the messages.
+    const identityKey = fromBase64(bundle.identityKey);
+    const own = this.sender.identity.publicKey;
+    if (identityKey.length !== own.length || identityKey.some((byte, i) => byte !== own[i]))
+      throw new Error("Signal answered with an identity key that is not this account's for your other devices");
     for (const device of bundle.devices) {
       if (device.deviceId === this.sender.deviceId) continue;
       const { signedPreKey, pqPreKey, preKey } = device;
       this.#sessions.startSession(
         device.deviceId,
         device.registrationId,
-        fromBase64(bundle.identityKey),
+        identityKey,
         signedPreKey.keyId,
         fromBase64(signedPreKey.publicKey),
         fromBase64(signedPreKey.signature),

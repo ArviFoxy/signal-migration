@@ -142,6 +142,18 @@ describe('messages to the account’s other devices', () => {
   });
 });
 
+describe('the identity of the account’s other devices', () => {
+  // Detects: a session started with whatever identity key the server names, so that a server that swaps the key
+  // receives the sync messages (with the packs' keys) instead of the user's devices.
+  it('sends nothing when the bundles carry an identity key other than the account’s', async () => {
+    const data = await account([1, 2]);
+    // The server answers with bundles of its own, consistently signed with its own identity key.
+    const { chat, sent } = server(await account([1, 2]), []);
+    await expect(sender(data).send(chat, new Uint8Array([1]))).rejects.toThrow(/identity key/);
+    expect(sent()).toHaveLength(0);
+  });
+});
+
 describe('sync messages', () => {
   // Detects: the install operations and "fetch latest" sent in one message: Android handles only the first kind it
   // finds in a sync message (SyncMessageProcessor.kt), so the storage, with the packs' order, would not be read.
