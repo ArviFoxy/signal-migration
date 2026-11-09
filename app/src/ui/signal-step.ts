@@ -105,8 +105,8 @@ export class SignalStep extends LightElement {
         </div>
         <figcaption class="flex flex-col gap-1.5 text-sm">
           <span>
-            The connection to Signal is end-to-end encrypted. The migration server, which this website comes from, only
-            passes the encrypted bytes through the tunnel and cannot read them.
+            The connection to Signal is end-to-end encrypted. The migration server only passes the encrypted bytes
+            through the tunnel and cannot read them.
           </span>
           <span class="text-muted">
             The tunnel is needed because browsers cannot connect to Signal's servers directly. Signal uses certificates
