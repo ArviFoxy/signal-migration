@@ -32,7 +32,7 @@ const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: stri
   signal: {
     title: 'Signal',
     plain:
-      'Your browser talks to Signal through the migration server, which this website comes from. The connection is encrypted end to end, so the migration server passes it on but cannot read it.',
+      'Your browser talks to Signal through a tunnel on our server. The connection is end-to-end encrypted between your browser and Signal, so our server cannot read it.',
     technical: html`Signal uses their own certificate authority which is not trusted by the browser. To work around this
     the browser opens a WebSocket to the migration server, and runs its own TLS connection to ${code('*.signal.org')}
     inside it, checked against Signal's root certificate.`,
@@ -40,7 +40,7 @@ const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: stri
   index: {
     title: 'Sticker pack index',
     plain:
-      'The migration server keeps a list of the packs already on Signal. When you upload a pack, the migration server receives only its hash and its Signal pack ID. It cannot access your stickers.',
+      'The migration server keeps a list of packs already uploaded to Signal. The migration server receives only a hash and the Signal pack ID, but cannot access content.',
     technical: html`Your browser downloads the whole list over HTTPS and looks up your packs on your computer. Packs
     uploaded by this migration are encrypted with a key derived from their content.`,
   },
