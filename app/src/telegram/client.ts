@@ -11,6 +11,7 @@
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
+import { downloadWithStallLimit } from './download';
 
 const TdClient = tdweb.default;
 
@@ -151,9 +152,12 @@ export class TelegramClient {
     return result as never;
   };
 
-  /** Downloads a file and returns its bytes, then deletes the downloaded copy. */
+  /**
+   * Downloads a file and returns its bytes, then deletes the downloaded copy. A download that receives nothing for
+   * a minute is cancelled (download.ts).
+   */
   async readFile(fileId: number): Promise<Uint8Array> {
-    await this.invoke({ _: 'downloadFile', file_id: fileId, priority: 1, offset: 0, limit: 0, synchronous: true });
+    await downloadWithStallLimit(this.invoke, fileId);
     const part = (await this.#send({ '@type': 'readFile', file_id: fileId })) as TdObject & {
       data?: Blob;
       message?: unknown;

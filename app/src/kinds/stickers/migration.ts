@@ -15,6 +15,7 @@ import type { Clock } from '../../core/clock';
 import type { StoredStickerPack } from '../../signal/storage';
 import type { SignalAccount } from '../../signal/transport';
 import type { ConvertedSticker, ConvertSticker } from './convert';
+import { DownloadStalledError } from '../../telegram/download';
 import { contentPackKey, type PackIdentity, packIdentity } from './identity';
 import { assignPositions, insertPacks } from './order';
 import { type PackIndex, toHex } from './pack-index';
@@ -446,12 +447,16 @@ export class StickerMigration extends EventTarget {
         stickers.map((_, i) => i),
         CONCURRENT_DOWNLOADS,
         async (i) => {
-          files[i] = await telegram.readFile(stickers[i].fileId);
+          files[i] = await telegram.readFile(stickers[i].fileId).catch((error: unknown) => {
+            if (!(error instanceof DownloadStalledError)) throw error;
+            throw new Error(`sticker ${i + 1}: ${error.message}`, { cause: error });
+          });
           entry.progress = { done: ++done, total: stickers.length };
           this.#changed();
         },
       );
     } catch (error) {
+      if ((error as Error).cause instanceof DownloadStalledError) throw error;
       throw new Error(`downloading from Telegram failed: ${message(error)}`);
     }
     entry.packKey = await contentPackKey({

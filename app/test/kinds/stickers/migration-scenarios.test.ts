@@ -4,6 +4,7 @@
 import { describe, expect, it } from 'vitest';
 import { ManifestRecord_Identifier_Type } from '../../../src/gen/SignalStorage_pb';
 import { packIdentity } from '../../../src/kinds/stickers/identity';
+import { DownloadStalledError } from '../../../src/telegram/download';
 import { packKeyOf, StickerWorld } from '../../scenario/stickers/sticker-world';
 
 const HOUR = 3_600_000;
@@ -61,6 +62,23 @@ describe('a first migration', () => {
     const alice = world.user([world.pack('A')], { recordIkm: false, contacts: 1 });
     await alice.visit();
     expect(await alice.installedTitles()).toEqual(['A']);
+  });
+});
+
+describe('downloads that stall', () => {
+  // Detects: a stalled download stopping the migration, or its pack failing without saying which sticker and how
+  // far the download got.
+  it('fails only the pack whose download stalled, naming the sticker, and goes on', async () => {
+    const world = new StickerWorld();
+    const [a, b] = [world.pack('A'), world.pack('B')];
+    const alice = world.user([a, b]);
+    alice.stickers.failNextStickerRead('A', new DownloadStalledError(12 * 1024, 48 * 1024, 60_000));
+    const page = await alice.visit();
+    expect(page.entry('A').state).toBe('failed');
+    expect(page.entry('A').error).toBe(
+      'sticker 1: downloading from Telegram made no progress for 60 seconds (12 of 48 KB received)',
+    );
+    expect(await alice.installedTitles()).toEqual(['B']);
   });
 });
 

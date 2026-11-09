@@ -4,7 +4,7 @@
 export class FakeTelegram {
   #files = new Map<number, Uint8Array>();
   #nextFileId = 1;
-  #failures: { fileIds: Set<number>; remaining: number }[] = [];
+  #failures: { fileIds: Set<number>; remaining: number; error?: Error }[] = [];
   /** Successful reads per file ID. */
   reads = new Map<number, number>();
 
@@ -19,7 +19,7 @@ export class FakeTelegram {
     const failure = this.#failures.find((candidate) => candidate.remaining > 0 && candidate.fileIds.has(fileId));
     if (failure) {
       failure.remaining--;
-      throw new Error('simulated Telegram download failure');
+      throw failure.error ?? new Error('simulated Telegram download failure');
     }
     const file = this.#files.get(fileId);
     if (!file) throw new Error(`no file ${fileId}`);
@@ -28,7 +28,8 @@ export class FakeTelegram {
   }
 
   /** The next read of any of these files fails. */
-  failNextRead(fileIds: number[]): void {
-    this.#failures.push({ fileIds: new Set(fileIds), remaining: 1 });
+  /** The next read of one of `fileIds` fails, with `error` if given. */
+  failNextRead(fileIds: number[], error?: Error): void {
+    this.#failures.push({ fileIds: new Set(fileIds), remaining: 1, error });
   }
 }

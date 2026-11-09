@@ -102,9 +102,10 @@ class TelegramStickers implements TelegramSource {
   }
 
   /** The next read of any sticker file of the pack `title` fails. */
-  failNextStickerRead(title: string): void {
+  failNextStickerRead(title: string, error?: Error): void {
     this.files.failNextRead(
       [...this.#fileTitles].filter(([, packTitle]) => packTitle === title).map(([fileId]) => fileId),
+      error,
     );
   }
 }
