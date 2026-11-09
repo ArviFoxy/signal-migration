@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use signal_migration_server::index::{AddressLimiter, ENTRY_LEN, Index};
 use signal_migration_server::relay::RelayTargets;
-use signal_migration_server::{ClientConfig, Config, TelegramApp, router};
+use signal_migration_server::{ClientConfig, Config, TelegramApp, demo_router, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -319,4 +319,32 @@ async fn compressed_copy_is_sent_to_a_browser_that_accepts_it() {
     let plain = client.get(&url).send().await.unwrap();
     assert!(plain.headers().get("content-encoding").is_none());
     assert_eq!(plain.bytes().await.unwrap().as_ref(), b"plain");
+}
+
+/// Detects: the demo server relaying to Signal, serving the index or a configuration, which would let the demo reach
+/// real services.
+#[tokio::test]
+async fn demo_server_serves_only_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("index.html"), b"demo").unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let app = demo_router(dir.path().to_path_buf());
+    tokio::spawn(async move {
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+            .await
+            .unwrap()
+    });
+    let client = reqwest::Client::new();
+    let page = client.get(format!("http://{address}/")).send().await.unwrap();
+    assert_eq!(page.bytes().await.unwrap().as_ref(), b"demo");
+    for path in ["/tunnel/chat.signal.org", "/v1/config", "/v1/sticker-packs/index"] {
+        let status = client
+            .get(format!("http://{address}{path}"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, 404, "{path}");
+    }
 }

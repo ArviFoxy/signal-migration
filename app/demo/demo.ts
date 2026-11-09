@@ -13,9 +13,12 @@ import { uploadStickerPack } from '../src/kinds/stickers/upload';
 import { StorageClient } from '../src/signal/storage';
 import type { ChatChannel, HttpsRequest } from '../src/signal/transport';
 import { loadSignalWasm } from '../src/signal/wasm';
+import { storageServiceKeyFromMasterKey } from '../src/wasm/signal_migration_wasm';
 import type { MigrationApp } from '../src/ui/migration-app';
 import '../src/ui/migration-app';
-import type { AppServices, LinkedDevice, TelegramSession } from '../src/ui/services';
+import type { AppServices, LinkedDevice, SnapshotStore, TelegramSession } from '../src/app/services';
+import { type Snapshot, Workflow } from '../src/app/workflow';
+import { connectRouter } from '../src/ui/router';
 import { FakeSignal } from '../test/scenario/fake-signal';
 import { contactRecord, initialStorage } from '../test/scenario/storage-builder';
 import { FakeIndex } from '../test/scenario/stickers/fake-index';
@@ -146,6 +149,29 @@ async function setUp(): Promise<AppServices> {
     readFile: async (fileId) => (await delay(120), files.get(fileId)!.slice()),
   };
 
+  /** The demo's linked device: the app's storage client over the simulated Signal service. */
+  const deviceFor = (deviceId: number): LinkedDevice => {
+    const chat = slowChat(signal.chat(aci, deviceId));
+    const storageServiceKey = storageServiceKeyFromMasterKey(masterKey);
+    const device: LinkedDevice = {
+      deviceId,
+      https: slowHttps,
+      stored: { aci, deviceId, password: 'demo', storageServiceKey },
+      onUnlinked: () => undefined,
+      get isLinked() {
+        return signal.isLinked(aci, deviceId);
+      },
+      withChat: (action) => action(chat),
+      storage: () => StorageClient.open(chat, storageServiceKey, deviceId, slowHttps),
+      async unlink() {
+        await delay(300);
+        signal.unlinkDevice(aci, deviceId);
+        device.onUnlinked();
+      },
+    };
+    return device;
+  };
+
   return {
     telegramApp: async () => ({ apiId: 0, apiHash: 'demo' }),
     async startTelegram(_app, onAuthorizationState) {
@@ -175,28 +201,14 @@ async function setUp(): Promise<AppServices> {
       };
       return session;
     },
+    eraseTelegram: async () => undefined,
     async linkSignal(showQrCode) {
       showQrCode('sgnl://linkdevice?uuid=demo&pub_key=demo');
       await delay(4000);
-      const deviceId = signal.linkDevice(aci);
-      const chat = slowChat(signal.chat(aci, deviceId));
-      const device: LinkedDevice = {
-        deviceId,
-        https: slowHttps,
-        onUnlinked: () => undefined,
-        get isLinked() {
-          return signal.isLinked(aci, deviceId);
-        },
-        withChat: (action) => action(chat),
-        storage: () => StorageClient.open(chat, masterKey, deviceId, slowHttps),
-        async unlink() {
-          await delay(300);
-          signal.unlinkDevice(aci, deviceId);
-          device.onUnlinked();
-        },
-      };
-      return device;
+      return deviceFor(signal.linkDevice(aci));
     },
+    restoreSignal: (stored) => deviceFor(stored.deviceId),
+    snapshots,
     migration: () => ({
       clock: systemClock,
       convert,
@@ -205,22 +217,37 @@ async function setUp(): Promise<AppServices> {
   };
 }
 
+/** The demo keeps its snapshot in memory: its simulated accounts do not survive a reload either. */
+let kept: Snapshot | null = null;
+const snapshots: SnapshotStore = {
+  load: async () => kept,
+  save: async (snapshot) => void (kept = snapshot),
+  clear: async () => void (kept = null),
+};
+
 /** The demo's services as soon as the page loads; each call waits for the setup, and fails with its error. */
 function servicesAfter(setup: Promise<AppServices>): AppServices {
+  let ready: AppServices | null = null;
+  void setup.then((services) => (ready = services));
   return {
     telegramApp: async () => (await setup).telegramApp(),
     startTelegram: async (...args) => (await setup).startTelegram(...args),
+    eraseTelegram: async () => undefined,
     linkSignal: async (...args) => (await setup).linkSignal(...args),
-    migration: () => {
-      throw new Error('the demo is still setting up');
+    restoreSignal: (stored) => {
+      if (!ready) throw new Error('the demo is still setting up');
+      return ready.restoreSignal(stored);
     },
+    migration: () => {
+      if (!ready) throw new Error('the demo is still setting up');
+      return ready.migration();
+    },
+    snapshots,
   };
 }
 
-const app = document.querySelector('migration-app') as MigrationApp;
 const setup = setUp();
-app.services = servicesAfter(setup);
-setup.then(
-  (services) => (app.services = services),
-  (error) => console.error('the demo could not set up', error),
-);
+setup.catch((error) => console.error('the demo could not set up', error));
+const workflow = new Workflow(servicesAfter(setup));
+(document.querySelector('migration-app') as MigrationApp).workflow = workflow;
+connectRouter(workflow);

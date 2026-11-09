@@ -1,6 +1,8 @@
 //! Configuration comes from the environment:
 //! `HOST` and `PORT` (default 127.0.0.1:8080), `STATIC_DIR` (the built web app), `INDEX_FILE`
 //! (the sticker pack index), and optionally `TLS_CERT` and `TLS_KEY` (PEM files) to serve HTTPS.
+//! `MODE=demo` serves only the demo's files (STATIC_DIR, built by `node build.mjs --demo`): no tunnel, no index, and
+//! it refuses to start with a Telegram key.
 //! `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are the Telegram app identity from my.telegram.org; without them the
 //! page cannot log in to Telegram.
 
@@ -8,7 +10,9 @@ use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use signal_migration_server::{ClientConfig, Config, TelegramApp, index::Index, relay::RelayTargets, router};
+use signal_migration_server::{
+    ClientConfig, Config, TelegramApp, demo_router, index::Index, relay::RelayTargets, router,
+};
 
 fn telegram_app() -> Result<Option<TelegramApp>, Box<dyn std::error::Error>> {
     match (env::var("TELEGRAM_API_ID"), env::var("TELEGRAM_API_HASH")) {
@@ -29,15 +33,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env::var("PORT").unwrap_or("8080".into())
     )
     .parse()?;
-    let config = Config {
-        static_dir: PathBuf::from(env::var("STATIC_DIR")?),
-        index: Index::open(PathBuf::from(env::var("INDEX_FILE")?)).await?,
-        relay_targets: RelayTargets::signal(),
-        client: ClientConfig {
-            telegram: telegram_app()?,
-        },
-    };
-    let app = router(config).into_make_service_with_connect_info::<SocketAddr>();
+    let static_dir = PathBuf::from(env::var("STATIC_DIR")?);
+    let app = if env::var("MODE").is_ok_and(|mode| mode == "demo") {
+        if env::var("TELEGRAM_API_ID").is_ok() || env::var("TELEGRAM_API_HASH").is_ok() {
+            return Err("the demo runs without keys: unset TELEGRAM_API_ID and TELEGRAM_API_HASH".into());
+        }
+        demo_router(static_dir)
+    } else {
+        router(Config {
+            static_dir,
+            index: Index::open(PathBuf::from(env::var("INDEX_FILE")?)).await?,
+            relay_targets: RelayTargets::signal(),
+            client: ClientConfig {
+                telegram: telegram_app()?,
+            },
+        })
+    }
+    .into_make_service_with_connect_info::<SocketAddr>();
 
     match (env::var("TLS_CERT"), env::var("TLS_KEY")) {
         (Ok(cert), Ok(key)) => {

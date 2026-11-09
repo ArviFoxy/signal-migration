@@ -9,6 +9,7 @@ import type { ManifestRecord } from '../../src/gen/SignalStorage_pb';
 import { basicAuthorization } from '../../src/signal/session';
 import { StorageClient } from '../../src/signal/storage';
 import type { ChatChannel, SignalAccount } from '../../src/signal/transport';
+import { storageServiceKeyFromMasterKey } from '../../src/wasm/signal_migration_wasm';
 import '../wasm';
 import { VirtualClock } from './clock';
 import { FakeSignal, type UploadLimit } from './fake-signal';
@@ -24,7 +25,7 @@ export class SimulatedAccount implements SignalAccount {
     readonly signal: FakeSignal,
     readonly aci: string,
     readonly deviceId: number,
-    readonly masterKey: Uint8Array,
+    readonly storageServiceKey: Uint8Array,
   ) {
     this.https = signal.https;
     this.#chat = signal.chat(aci, deviceId);
@@ -39,7 +40,7 @@ export class SimulatedAccount implements SignalAccount {
   }
 
   storage(): Promise<StorageClient> {
-    return StorageClient.open(this.#chat, this.masterKey, this.deviceId, this.https);
+    return StorageClient.open(this.#chat, this.storageServiceKey, this.deviceId, this.https);
   }
 }
 
@@ -56,7 +57,7 @@ export class Phone {
   }
 
   storage(): Promise<StorageClient> {
-    return StorageClient.open(this.chat, this.masterKey, 1, this.world.signal.https);
+    return StorageClient.open(this.chat, storageServiceKeyFromMasterKey(this.masterKey), 1, this.world.signal.https);
   }
 
   /** Writes a change on top of `manifest`: removes the `deleted` records and adds `added`. */
@@ -109,7 +110,8 @@ export class User {
 
   /** Links a new device, as scanning the page's QR code does. */
   linkDevice(): SimulatedAccount {
-    return new SimulatedAccount(this.world.signal, this.aci, this.world.signal.linkDevice(this.aci), this.masterKey);
+    const storageServiceKey = storageServiceKeyFromMasterKey(this.masterKey);
+    return new SimulatedAccount(this.world.signal, this.aci, this.world.signal.linkDevice(this.aci), storageServiceKey);
   }
 }
 

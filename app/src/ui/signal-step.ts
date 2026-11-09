@@ -3,6 +3,7 @@
 import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import QRCode from 'qrcode';
+import type { Workflow } from '../app/workflow';
 import { DEFAULT_DEVICE_NAME } from '../signal/link';
 import {
   connectionArrow,
@@ -14,51 +15,44 @@ import {
   qrBox,
   secondaryButton,
   stepHeader,
+  stickyFooter,
 } from './layout';
-import type { AppServices, LinkedDevice } from './services';
 
 @customElement('signal-step')
 export class SignalStep extends LightElement {
-  @property({ attribute: false }) services!: AppServices;
-  @property({ attribute: false }) linked: LinkedDevice | null = null;
+  @property({ attribute: false }) workflow!: Workflow;
   @state() private qrCode: string | null = null;
-  @state() private error: string | null = null;
   @state() private deviceName = DEFAULT_DEVICE_NAME;
-  #linking = false;
 
   connectedCallback(): void {
     super.connectedCallback();
-    if (!this.linked) void this.link();
+    if (!this.workflow.device && this.workflow.signal !== 'wait') void this.link();
   }
 
   private async link(): Promise<void> {
-    if (this.#linking) return;
-    this.#linking = true;
-    this.error = null;
     this.qrCode = null;
-    try {
-      const device = await this.services.linkSignal(
-        (url) => void QRCode.toDataURL(url, { margin: 1, width: 224 }).then((dataUrl) => (this.qrCode = dataUrl)),
-        () => this.deviceName,
-      );
-      this.emit('linked', device);
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-    } finally {
-      this.#linking = false;
-    }
+    await this.workflow.linkSignal(
+      (url) => void QRCode.toDataURL(url, { margin: 1, width: 224 }).then((dataUrl) => (this.qrCode = dataUrl)),
+      () => this.deviceName,
+    );
   }
 
   render() {
+    const device = this.workflow.device;
+    const failed = !device && this.workflow.signal !== 'wait' && this.workflow.error !== null;
     return html`${stepHeader(4, 'Connect Signal', 'Links this app as a device of your Signal account.')}
       ${
-        this.linked
+        device
           ? html`<p class="flex items-center gap-2 font-semibold text-accent">
-              ${icons.check(18)} Linked as device ${this.linked.deviceId}
+              ${icons.check(18)} Linked as device ${device.deviceId}
             </p>`
           : html`<div class="flex flex-wrap items-center gap-10">
                 ${qrBox(this.qrCode, 'QR code for linking a Signal device')}
-                ${instructions(['Open Signal on your phone', 'Settings › Linked devices › Link new device', 'Point the camera at this code'])}
+                ${instructions([
+                  'Open Signal on your phone',
+                  'Settings › Linked devices › Link new device',
+                  'Point the camera at this code',
+                ])}
               </div>
               <label class="flex max-w-[360px] flex-col gap-2">
                 <span class="text-sm font-semibold">Device name</span>
@@ -71,10 +65,9 @@ export class SignalStep extends LightElement {
               </label>`
       }
       ${
-        this.error
+        failed
           ? html`<div class="flex flex-wrap items-center gap-3">
-              <p class="text-danger" role="alert">${this.error}</p>
-              <button type="button" class=${secondaryButton} @click=${() => this.link()}>Try again</button>
+              <button type="button" class=${secondaryButton} @click=${() => this.link()}>Show a new code</button>
             </div>`
           : nothing
       }
@@ -103,11 +96,11 @@ export class SignalStep extends LightElement {
           >
         </figcaption>
       </figure>
-      <div class="mt-auto flex flex-wrap justify-between gap-3">
-        <button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
-        <button type="button" class=${primaryButton} ?disabled=${!this.linked} @click=${() => this.emit('next')}>
-          Continue
-        </button>
-      </div>`;
+      ${stickyFooter(
+        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
+          <button type="button" class=${primaryButton} ?disabled=${!device} @click=${() => this.emit('next')}>
+            Continue
+          </button>`,
+      )}`;
   }
 }

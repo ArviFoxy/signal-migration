@@ -1,6 +1,7 @@
 // The connections panel at the bottom of the step list: what the page is connected to right now, a way to
-// disconnect each, and for each a card that says what the connection is, first plainly, then technically.
-// Below it, a link to the source code.
+// disconnect each, and for each a card attached to its row that says what the connection is, first plainly, then
+// technically. The card shows while the pointer is over the row, or while its info button has focus (a tap on touch
+// screens). Below the panel, a link to the source code.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
@@ -20,32 +21,25 @@ const DOTS: Record<ConnectionState, string> = {
 
 const code = (text: string) => html`<code class="rounded bg-segment px-1 py-0.5 text-[12px]">${text}</code>`;
 
-/** What each connection is: one plain sentence, then the technical details. */
+/** What each connection is: one plain sentence about the connection and its encryption, then one technical line. */
 const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: string; technical: TemplateResult }> = {
   telegram: {
     title: 'Telegram',
-    plain:
-      'Your browser talks to Telegram directly, over an encrypted connection that only Telegram can read. No server of this site is in between.',
-    technical: html`TDLib, Telegram's own library, runs in this page. It opens a WebSocket over TLS to Telegram's
-    servers (${code('wss://*.web.telegram.org/apiws')}) and encrypts everything inside it with Telegram's MTProto
-    protocol.`,
+    plain: 'Your browser connects to Telegram directly, encrypted so that only Telegram can read it.',
+    technical: html`TDLib in this page, over a WebSocket to ${code('*.web.telegram.org')}, with MTProto encryption.`,
   },
   signal: {
     title: 'Signal',
     plain:
-      "Your browser talks to Signal through a tunnel on this site's server. The connection is end-to-end encrypted between your browser and Signal, so this site cannot read it.",
-    technical: html`The page opens a WebSocket to this site (${code('/tunnel/<host>')}). Inside it, the page runs its
-    own TLS session with ${code('chat.signal.org')}, ${code('storage.signal.org')} and ${code('cdn.signal.org')},
-    checked against Signal's root certificate (rustls in WebAssembly). The server forwards the encrypted bytes over TCP.
-    The tunnel is needed because browsers do not trust Signal's own certificate authority.`,
+      'Your browser connects to Signal through a tunnel on this site, end-to-end encrypted so that this site cannot read it.',
+    technical: html`TLS to ${code('*.signal.org')} inside a WebSocket to this site, checked against Signal's own root
+    certificate.`,
   },
   index: {
     title: 'Sticker pack index',
     plain:
-      "This site's server keeps a list of sticker packs that are already on Signal, to find packs that someone already uploaded. For each pack that you upload, it receives only the pack's hash and its Signal pack ID.",
-    technical: html`HTTPS to this site. The page downloads the whole list and matches it on this computer, so the server
-    does not learn which packs you have. To claim and add an upload, it sends a 32-byte key derived from the pack's
-    content with HKDF-SHA256, and with an added pack its 16-byte Signal pack ID.`,
+      'This site keeps a list of packs already on Signal, and receives only the hash and Signal pack ID of each pack that you upload.',
+    technical: html`HTTPS to this site. The list is downloaded and matched on this computer.`,
   },
 };
 
@@ -53,89 +47,108 @@ const githubMark = html`<svg width="16" height="16" viewBox="0 0 16 16" fill="cu
   ${svg`<path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path>`}
 </svg>`;
 
+/**
+ * Where the cards open: beside the panel (the sidebar on wide screens), with the arrow pointing left at the row, or
+ * below each row (the connections sheet on narrow screens), with the arrow pointing up.
+ */
+const PLACEMENT = {
+  side: {
+    card: 'left-full bottom-0 ml-4 w-[320px] before:absolute before:inset-y-0 before:-left-4 before:w-4',
+    arrow: '-left-[7px] bottom-[18px] border-b border-l',
+  },
+  below: {
+    card: 'inset-x-0 top-full mt-3 before:absolute before:inset-x-0 before:-top-3 before:h-3',
+    arrow: '-top-[7px] right-[18px] border-t border-l',
+  },
+};
+
 @customElement('connections-panel')
 export class ConnectionsPanel extends LightElement {
   @property({ attribute: false }) telegram!: Connection;
   @property({ attribute: false }) signal!: Connection;
   @property({ attribute: false }) index!: Connection;
+  @property({ attribute: false }) placement: keyof typeof PLACEMENT = 'side';
+  /** The ID of the confirmation card that "Clear everything" opens. */
+  @property({ attribute: false }) clearTarget = '';
+  /** Whether there is anything to clear; the button stays in place either way. */
+  @property({ attribute: false }) canClear = false;
 
-  private card(id: keyof typeof INFO, connection: Connection) {
+  private card(id: keyof typeof INFO) {
     const info = INFO[id];
+    const placement = PLACEMENT[this.placement];
     return html`<div
-      id="connection-info-${id}"
-      popover
-      class="m-auto w-[min(440px,calc(100vw-32px))] rounded-2xl bg-white p-6 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] ring-1 ring-line backdrop:bg-ink/20"
+      id="connection-info-${this.placement}-${id}"
+      role="tooltip"
+      class="connection-card invisible absolute z-50 rounded-xl bg-white p-4 text-ink opacity-0 shadow-[0_8px_32px_rgba(20,20,30,0.16)] ring-1 ring-line transition-opacity duration-150 ${placement.card}"
     >
-      <div class="flex flex-col gap-4">
-        <div class="flex items-start justify-between gap-3">
-          <div class="flex flex-col gap-1">
-            <h3 class="font-display text-lg font-semibold">${info.title}</h3>
-            <span class="flex items-center gap-2 text-sm text-muted">
-              <span class="size-2.5 flex-none rounded-full ${DOTS[connection.state]}"></span>${connection.status}
-            </span>
-          </div>
-          <button
-            type="button"
-            popovertarget="connection-info-${id}"
-            popovertargetaction="hide"
-            aria-label="Close"
-            class="flex size-9 cursor-pointer items-center justify-center rounded-lg text-xl leading-none text-muted hover:bg-panel"
-          >
-            ×
-          </button>
-        </div>
-        <p class="flex items-start gap-2 text-[15px]">${icons.lock()}<span>${info.plain}</span></p>
-        <div class="flex flex-col gap-1.5 rounded-xl bg-panel p-4 ring-1 ring-line ring-inset">
-          <span class="text-xs font-semibold tracking-[0.04em] text-muted uppercase">Technical details</span>
-          <p class="text-[13px] leading-relaxed text-muted">${info.technical}</p>
-        </div>
-      </div>
+      <span class="absolute size-3.5 rotate-45 border-line bg-white ${placement.arrow}"></span>
+      <p class="flex items-start gap-2.5">
+        <span class="mt-[3px]">${icons.lock()}</span>
+        <span class="flex flex-col gap-1.5">
+          <span class="text-sm leading-snug">${info.plain}</span>
+          <span class="text-xs leading-relaxed text-muted">${info.technical}</span>
+        </span>
+      </p>
     </div>`;
   }
 
   private row(id: keyof typeof INFO, connection: Connection) {
+    const action = connection.action && connection.state === 'on' ? connection.action : null;
     return html`<li
-      class="flex min-h-[52px] items-center gap-2 rounded-[10px] bg-white py-1.5 pr-1 pl-3 ring-1 ring-line ring-inset"
+      class="connection-row relative flex items-start gap-2.5 rounded-[10px] bg-white py-2.5 pr-1.5 pl-3 ring-1 ring-line ring-inset hover:ring-line-strong"
     >
-      <span class="flex min-w-0 flex-1 items-start gap-2.5">
-        <!-- The dot is centred on the name's line, not on the name and status together. -->
-        <span class="flex h-[18px] flex-none items-center">
-          <span class="size-2.5 rounded-full ${DOTS[connection.state]}"></span>
-        </span>
-        <span class="flex min-w-0 flex-col">
-          <span class="text-[13px] leading-[18px] font-semibold">${INFO[id].title}</span>
-          <span class="text-xs leading-4 text-muted">${connection.status}</span>
+      <!-- The dot is centred on the name's line. -->
+      <span class="flex h-[18px] flex-none items-center">
+        <span class="size-2.5 rounded-full ${DOTS[connection.state]}"></span>
+      </span>
+      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+        <span class="text-[13px] leading-[18px] font-semibold">${INFO[id].title}</span>
+        <span class="text-xs leading-4 whitespace-nowrap text-muted">
+          ${connection.status}${
+            action
+              ? html` ·
+                  <button
+                    type="button"
+                    class="cursor-pointer font-semibold text-danger hover:underline"
+                    @click=${() => this.emit(action.event)}
+                  >
+                    ${action.label}
+                  </button>`
+              : nothing
+          }
         </span>
       </span>
-      ${
-        connection.action && connection.state === 'on'
-          ? html`<button
-              type="button"
-              class="min-h-11 cursor-pointer rounded-lg px-2 text-[13px] font-semibold text-danger hover:bg-panel"
-              @click=${() => this.emit(connection.action!.event)}
-            >
-              ${connection.action.label}
-            </button>`
-          : nothing
-      }
       <button
         type="button"
-        popovertarget="connection-info-${id}"
         aria-label="About the ${INFO[id].title} connection"
-        class="flex size-11 flex-none cursor-pointer items-center justify-center rounded-lg hover:bg-panel"
+        aria-describedby="connection-info-${this.placement}-${id}"
+        class="-my-1 flex size-8 flex-none cursor-pointer items-center justify-center rounded-lg text-muted hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
       >
         ${icons.info()}
       </button>
-      ${this.card(id, connection)}
+      ${this.card(id)}
     </li>`;
   }
 
   render() {
-    return html`<section aria-labelledby="connections-heading" class="flex flex-col gap-2.5">
-      <h2 id="connections-heading" class="text-xs font-semibold tracking-[0.04em] text-muted uppercase">Connections</h2>
+    return html`<section aria-labelledby="connections-heading-${this.placement}" class="flex flex-col gap-2.5">
+      <h2
+        id="connections-heading-${this.placement}"
+        class="text-xs font-semibold tracking-[0.04em] text-muted uppercase"
+      >
+        Connections
+      </h2>
       <ul class="flex flex-col gap-2">
         ${this.row('telegram', this.telegram)} ${this.row('signal', this.signal)} ${this.row('index', this.index)}
       </ul>
+      <button
+        type="button"
+        popovertarget=${this.clearTarget}
+        ?disabled=${!this.canClear}
+        class="mt-1 cursor-pointer self-start text-[13px] font-semibold text-danger hover:underline disabled:cursor-default disabled:text-line-strong disabled:no-underline"
+      >
+        Clear everything
+      </button>
       <a
         href=${SOURCE_CODE}
         target="_blank"

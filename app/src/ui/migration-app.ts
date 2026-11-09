@@ -1,179 +1,49 @@
-// The migration wizard: the step list and connections panel on the left, the current step on the right.
+// The wizard's view: the step list, connections and "Clear everything" on the left, the current step on the right.
+// It holds no state of its own beyond what is on screen: it reads the workflow (app/workflow.ts) and calls its
+// actions, and re-renders when the workflow changes.
 //
-// Flow: what to move → Telegram login → sticker packs (read, looked up in the index, downloaded; then Telegram is
-// signed out) → Signal linking → review → migration → done (Signal unlinked). Logins exist only while the page runs.
+// The sidebar stays on screen while a long step (100+ packs) scrolls; on narrow screens it becomes a bar at the top
+// whose connections open in a card.
 
-import { html, nothing } from 'lit';
-import { customElement, property, state } from 'lit/decorators.js';
-import type * as Td from 'tdlib-types';
-import { StickerMigration } from '../kinds/stickers/migration';
+import { html, nothing, type PropertyValues } from 'lit';
+import { customElement, property } from 'lit/decorators.js';
+import type { ConnectionState, Workflow } from '../app/workflow';
 import '../kinds/stickers/ui/done-step';
 import '../kinds/stickers/ui/migrate-step';
 import '../kinds/stickers/ui/packs-step';
 import '../kinds/stickers/ui/review-step';
-import type { Connection, ConnectionState } from './connections-panel';
+import type { Connection } from './connections-panel';
 import './connections-panel';
-import { icons, LightElement, primaryButton, STEP_LABELS, stepHeader } from './layout';
-import { type AppServices, type LinkedDevice, realServices, type TelegramSession } from './services';
+import { icons, LightElement, primaryButton, secondaryButton, STEP_LABELS, stepHeader, stickyFooter } from './layout';
 import './signal-step';
 import './telegram-step';
 
-type Step = 'start' | 'telegram' | 'packs' | 'signal' | 'review' | 'migrate' | 'done';
-const STEP_ORDER: Step[] = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate', 'done'];
-
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-/** Each step element lays out its sections like the main column does. */
-const STEP_CLASS = 'flex flex-1 flex-col gap-8';
+const STEP_ORDER = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate', 'done'] as const;
 
 @customElement('migration-app')
 export class MigrationApp extends LightElement {
-  @property({ attribute: false }) services: AppServices = realServices;
-  @state() private step: Step = 'start';
-  @state() private telegram: TelegramSession | null = null;
-  @state() private telegramState: Td.AuthorizationState | null = null;
-  @state() private telegramConnection: ConnectionState = 'off';
-  @state() private signal: LinkedDevice | null = null;
-  @state() private signalConnection: ConnectionState = 'off';
-  @state() private unlinkedAutomatically = false;
-  @state() private migration: StickerMigration | null = null;
-  @state() private error: string | null = null;
-  @state() private movingStickers = true;
-  @state() private packsStage: 'choose' | 'download' = 'choose';
+  @property({ attribute: false }) workflow!: Workflow;
+  #onChange = () => this.requestUpdate();
+  #shownStep: string | undefined;
 
-  connectedCallback(): void {
-    super.connectedCallback();
-    window.addEventListener('beforeunload', (event) => {
-      if (this.signal || this.telegramConnection === 'on') event.preventDefault();
-    });
-  }
-
-  private run(action: () => Promise<void>): void {
-    this.error = null;
-    action().catch((error) => (this.error = message(error)));
-  }
-
-  private go(step: Step): void {
-    this.step = step;
-    this.error = null;
-    window.scrollTo({ top: 0 });
-  }
-
-  private async startTelegram(): Promise<void> {
-    this.go('telegram');
-    const app = await this.services.telegramApp();
-    if (!app)
-      throw new Error('This site has no Telegram app identity configured yet, so it cannot sign in to Telegram.');
-    this.telegramConnection = 'wait';
-    this.telegram = await this.services.startTelegram(app, (authState) => {
-      this.telegramState = authState;
-      if (authState._ === 'authorizationStateReady') {
-        this.telegramConnection = 'on';
-        if (this.step === 'telegram') this.run(() => this.readPacks());
-      }
-    });
-  }
-
-  private async restartTelegram(): Promise<void> {
-    const old = this.telegram;
-    Object.assign(this, { telegram: null, telegramState: null });
-    await old?.close();
-    await this.startTelegram();
-  }
-
-  private async signOutOfTelegram(): Promise<void> {
-    const session = this.telegram;
-    this.telegram = null;
-    await session?.logOut();
-    this.telegramConnection = 'ended';
-  }
-
-  /** Reads the pack list; the index lookup and the previews continue in the background while the user chooses. */
-  private async readPacks(): Promise<void> {
-    this.go('packs');
-    if (this.migration?.entries.length) return;
-    const migration = new StickerMigration(this.services.migration());
-    // The connections panel shows the migration's progress (packs added to the index).
-    migration.addEventListener('change', () => this.requestUpdate());
-    this.migration = migration;
-    this.packsStage = 'choose';
-    const source = this.telegram!.source;
-    await migration.readTelegram(source);
-    migration.lookUpInIndex().catch((error) => (this.error = message(error)));
-    void migration.loadPreviews(source);
-  }
-
-  /** Downloads the chosen packs that are not on Signal yet; when all succeeded, signs out of Telegram and moves on. */
-  private async downloadPacks(): Promise<void> {
-    const migration = this.migration!;
-    this.packsStage = 'download';
-    migration.stopPreviews();
-    await migration.download(this.telegram!.source);
-    if (!migration.selected.some((entry) => entry.state === 'failed')) await this.leavePacks();
-  }
-
-  /** Continues without the packs whose download failed. */
-  private async skipFailedPacks(): Promise<void> {
-    for (const entry of this.migration!.selected)
-      if (entry.state === 'failed') this.migration!.setSelected(entry, false);
-    await this.leavePacks();
-  }
-
-  private async leavePacks(): Promise<void> {
-    if (this.telegram) await this.signOutOfTelegram();
-    this.go(this.signal ? 'review' : 'signal');
-  }
-
-  private async onLinked(device: LinkedDevice): Promise<void> {
-    this.signal = device;
-    this.signalConnection = 'on';
-    device.onUnlinked = () => {
-      this.signal = null;
-      this.signalConnection = 'ended';
-      if (this.step === 'review') this.go('signal');
-    };
-    await this.migration!.readSignal(device);
-    this.go('review');
-  }
-
-  private async migrate(): Promise<void> {
-    if (!this.signal) {
-      this.go('signal');
-      return;
+  protected willUpdate(changed: PropertyValues<this>): void {
+    if (changed.has('workflow')) {
+      (changed.get('workflow') as Workflow | undefined)?.removeEventListener('change', this.#onChange);
+      this.workflow.addEventListener('change', this.#onChange);
     }
-    this.go('migrate');
-    await this.migration!.run(this.signal);
-    if (this.migration!.selected.every((entry) => entry.state === 'in-signal')) await this.finish();
   }
 
-  /** Unlinks the Signal device and ends any Telegram session. */
-  private async finish(): Promise<void> {
-    this.go('done');
-    const errors: string[] = [];
-    if (this.signal) {
-      await this.signal.unlink().catch((error) => errors.push(`Unlinking Signal failed: ${message(error)}`));
-      this.unlinkedAutomatically = true;
+  /** A new step starts at the top of the page. */
+  protected updated(): void {
+    if (this.workflow.route !== this.#shownStep) {
+      this.#shownStep = this.workflow.route;
+      window.scrollTo({ top: 0 });
+      this.querySelector('main')?.scrollTo({ top: 0 });
     }
-    if (this.telegram)
-      await this.signOutOfTelegram().catch((error) => errors.push(`Signing out of Telegram failed: ${message(error)}`));
-    this.error = errors.length > 0 ? errors.join(' ') : null;
-  }
-
-  private async unlinkFromPanel(): Promise<void> {
-    await this.signal?.unlink();
-  }
-
-  private restart(): void {
-    Object.assign(this, {
-      migration: null,
-      telegramState: null,
-      telegramConnection: 'off',
-      signalConnection: 'off',
-      unlinkedAutomatically: false,
-    });
-    this.go('start');
   }
 
   private connections(): { telegram: Connection; signal: Connection; index: Connection } {
+    const w = this.workflow;
     const telegramStatus: Record<ConnectionState, string> = {
       off: 'Not connected',
       wait: 'Waiting for sign-in',
@@ -184,27 +54,20 @@ export class MigrationApp extends LightElement {
       off: 'Not linked',
       wait: 'Waiting for scan',
       on: 'Linked',
-      ended: this.unlinkedAutomatically ? 'Unlinked automatically' : 'Unlinked',
+      ended: w.unlinkedAutomatically ? 'Unlinked automatically' : 'Unlinked',
     };
-    const signalState: ConnectionState =
-      this.signalConnection === 'off' && this.step === 'signal' ? 'wait' : this.signalConnection;
-    const migration = this.migration;
-    const added = migration?.addedToIndex ?? 0;
-    const indexContacted = migration !== null && migration.entries.length > 0;
+    const added = w.stickers?.addedToIndex ?? 0;
+    const contacted = w.stickers !== null && w.stickers.entries.length > 0;
     return {
       telegram: {
-        state: this.telegramConnection,
-        status: telegramStatus[this.telegramConnection],
+        state: w.telegram,
+        status: telegramStatus[w.telegram],
         action: { label: 'Sign out', event: 'telegram-sign-out' },
       },
-      signal: {
-        state: signalState,
-        status: signalStatus[signalState],
-        action: { label: 'Unlink', event: 'signal-unlink' },
-      },
+      signal: { state: w.signal, status: signalStatus[w.signal], action: { label: 'Unlink', event: 'signal-unlink' } },
       index: {
-        state: !indexContacted ? 'off' : this.step === 'done' ? 'ended' : 'on',
-        status: !indexContacted
+        state: !contacted ? 'off' : w.route === 'done' ? 'ended' : 'on',
+        status: !contacted
           ? 'Not contacted'
           : added > 0
             ? `${added} pack${added === 1 ? '' : 's'} added`
@@ -213,14 +76,60 @@ export class MigrationApp extends LightElement {
     };
   }
 
-  private nav() {
-    const current = STEP_ORDER.indexOf(this.step);
+  /** The connections, "Clear everything" and the source code link; in the sidebar, or in a card on narrow screens. */
+  private connectionsPanel(placement: 'side' | 'below') {
     const connections = this.connections();
+    const w = this.workflow;
+    const clearId = `clear-everything-${placement}`;
+    return html`<connections-panel
+        .telegram=${connections.telegram}
+        .signal=${connections.signal}
+        .index=${connections.index}
+        .placement=${placement}
+        .clearTarget=${clearId}
+        .canClear=${w.telegramSession !== null || w.device !== null || w.stickers !== null}
+        @telegram-sign-out=${() => w.signOutOfTelegram()}
+        @signal-unlink=${() => w.unlinkSignal()}
+      ></connections-panel>
+      ${html`<div
+        id=${clearId}
+        popover
+        class="m-auto w-[min(420px,calc(100vw-32px))] rounded-2xl bg-white p-6 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] ring-1 ring-line backdrop:bg-ink/20"
+      >
+        <div class="flex flex-col gap-4">
+          <h3 class="font-display text-lg font-semibold">Clear everything?</h3>
+          <p class="text-[15px]">
+            This signs out of Telegram, unlinks the Signal device, and deletes what this page keeps in your browser.
+            Packs already uploaded and installed stay in Signal.
+          </p>
+          <div class="flex justify-end gap-3">
+            <button type="button" popovertarget=${clearId} popovertargetaction="hide" class=${secondaryButton}>
+              Cancel
+            </button>
+            <button
+              type="button"
+              class="${primaryButton} bg-danger hover:bg-danger"
+              @click=${() => {
+                document.getElementById(clearId)?.hidePopover();
+                void w.clearEverything();
+              }}
+            >
+              Clear everything
+            </button>
+          </div>
+        </div>
+      </div>`}`;
+  }
+
+  private nav() {
+    const current = STEP_ORDER.indexOf(this.workflow.route);
     return html`<nav
       aria-label="Migration steps"
-      class="flex flex-[1_1_272px] flex-col gap-7 border-r border-line bg-panel px-6 py-8"
+      class="hidden w-[272px] flex-none flex-col gap-7 border-r border-line bg-panel px-7 py-8 lg:flex"
     >
-      <div class="font-display text-base font-semibold">signal-migration</div>
+      <div class="font-display text-[19px] leading-snug font-semibold tracking-[-0.01em]">
+        Telegram to Signal Migration 🦊
+      </div>
       <ol class="flex flex-col gap-4">
         ${STEP_LABELS.map((label, i) => {
           const done = i < current;
@@ -240,18 +149,35 @@ export class MigrationApp extends LightElement {
           </li>`;
         })}
       </ol>
-      <connections-panel
-        class="mt-auto"
-        .telegram=${connections.telegram}
-        .signal=${connections.signal}
-        .index=${connections.index}
-        @telegram-sign-out=${() => this.run(() => this.signOutOfTelegram())}
-        @signal-unlink=${() => this.run(() => this.unlinkFromPanel())}
-      ></connections-panel>
+      <div class="mt-auto flex flex-col gap-3">${this.connectionsPanel('side')}</div>
     </nav>`;
   }
 
+  /** The bar that replaces the sidebar on narrow screens. */
+  private topBar() {
+    const current = STEP_ORDER.indexOf(this.workflow.route);
+    const label =
+      current < STEP_LABELS.length ? `Step ${current + 1} of ${STEP_LABELS.length} · ${STEP_LABELS[current]}` : 'Done';
+    return html`<header
+      class="flex items-center justify-between gap-3 border-b border-line bg-panel px-4 py-3 lg:hidden"
+    >
+      <span class="flex flex-col">
+        <span class="font-display text-base leading-snug font-semibold">Telegram to Signal Migration 🦊</span>
+        <span class="text-xs text-muted">${label}</span>
+      </span>
+      <button type="button" popovertarget="connections-sheet" class=${secondaryButton}>Connections</button>
+      <div
+        id="connections-sheet"
+        popover
+        class="m-auto w-[min(400px,calc(100vw-32px))] overflow-visible rounded-2xl bg-panel p-5 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] backdrop:bg-ink/20"
+      >
+        <div class="flex flex-col gap-3">${this.connectionsPanel('below')}</div>
+      </div>
+    </header>`;
+  }
+
   private startStep() {
+    const w = this.workflow;
     const card = (symbol: ReturnType<typeof icons.download>, name: string, text: string) =>
       html`<li class="flex flex-col gap-2 rounded-xl bg-panel p-[18px] ring-1 ring-line ring-inset">
         ${symbol}<span class="text-[15px] font-semibold">${name}</span><span class="text-sm text-muted">${text}</span>
@@ -259,15 +185,8 @@ export class MigrationApp extends LightElement {
     return html`${stepHeader(1, 'What to move', 'Copies what you choose from Telegram into your Signal account.')}
       <fieldset class="flex min-w-0 flex-col gap-3">
         <legend class="mb-3 text-sm font-semibold">From Telegram</legend>
-        <label
-          class="flex cursor-pointer items-center gap-4 rounded-xl px-5 py-[18px] ring-1 ring-line-strong ring-inset has-checked:bg-accent-soft has-checked:ring-2 has-checked:ring-accent"
-        >
-          <input
-            type="checkbox"
-            class="size-5 flex-none accent-accent"
-            .checked=${this.movingStickers}
-            @change=${(event: Event) => (this.movingStickers = (event.target as HTMLInputElement).checked)}
-          />
+        <label class="flex items-center gap-4 rounded-xl bg-accent-soft px-5 py-[18px] ring-2 ring-accent ring-inset">
+          <input type="checkbox" class="size-5 flex-none accent-accent" checked disabled />
           <span class="flex flex-col gap-0.5">
             <span class="text-base font-semibold">Sticker packs</span>
             <span class="text-sm text-muted">Installed packs, in your Telegram order</span>
@@ -277,91 +196,110 @@ export class MigrationApp extends LightElement {
       <section aria-labelledby="start-connections" class="flex flex-col gap-3">
         <h2 id="start-connections" class="text-sm font-semibold">Connections</h2>
         <ul class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
-          ${card(icons.download(), 'Telegram', 'Signs in to read your packs, then signs out.')}
+          ${card(icons.download(), 'Telegram', 'Signed in for the migration, to read your packs. Signed out at the end.')}
           ${card(icons.link(), 'Signal', 'Linked only while the migration runs, to install and upload packs.')}
-          ${card(icons.database(), 'Sticker pack index', 'A list of packs already on Signal, used to avoid uploading them again. It receives only the hash and Signal pack ID of each pack that you upload.')}
+          ${card(
+            icons.database(),
+            'Sticker pack index',
+            'A list of packs already on Signal, used to avoid uploading them again. It receives only the hash and Signal pack ID of each pack that you upload.',
+          )}
         </ul>
       </section>
-      <div class="mt-auto flex flex-wrap justify-end gap-3">
-        <button
-          type="button"
-          class=${primaryButton}
-          ?disabled=${!this.movingStickers}
-          @click=${() => this.run(() => this.startTelegram())}
-        >
-          Start
-        </button>
-      </div>`;
+      ${stickyFooter(
+        html`<span></span> <button type="button" class=${primaryButton} @click=${() => w.start()}>Start</button>`,
+      )}`;
   }
 
   private content() {
-    switch (this.step) {
+    const w = this.workflow;
+    if (w.restoring) return stepHeader(null, 'Continuing your migration', 'Signing in again and reading your packs…');
+    switch (w.route) {
       case 'start':
         return this.startStep();
       case 'telegram':
         return html`<telegram-step
-          class=${STEP_CLASS}
-          .session=${this.telegram}
-          .authState=${this.telegramState}
-          @restart-telegram=${() => this.run(() => this.restartTelegram())}
-          @back=${() => this.go('start')}
-          @next=${() => this.run(() => this.readPacks())}
+          class="contents"
+          .session=${w.telegramSession}
+          .authState=${w.telegramAuth}
+          @restart-telegram=${() => w.restartTelegram()}
+          @back=${() => w.navigate('start')}
+          @next=${() => w.continueFromTelegram()}
         ></telegram-step>`;
       case 'packs':
         return html`<sticker-packs-step
-          class=${STEP_CLASS}
-          .migration=${this.migration}
-          .stage=${this.packsStage}
-          @retry-download=${() => this.run(() => this.downloadPacks())}
-          @skip-failed=${() => this.run(() => this.skipFailedPacks())}
-          @back=${() => this.go('telegram')}
-          @next=${() => this.run(() => this.downloadPacks())}
+          class="contents"
+          .migration=${w.stickers}
+          @select=${(event: CustomEvent<{ entries: never[]; selected: boolean }>) =>
+            w.setSelected(event.detail.entries, event.detail.selected)}
+          @back=${() => w.navigate('telegram')}
+          @next=${() => w.continueFromPacks()}
         ></sticker-packs-step>`;
       case 'signal':
         return html`<signal-step
-          class=${STEP_CLASS}
-          .services=${this.services}
-          .linked=${this.signal}
-          @linked=${(event: CustomEvent<LinkedDevice>) => this.run(() => this.onLinked(event.detail))}
-          @back=${() => this.go('packs')}
-          @next=${() => this.go('review')}
+          class="contents"
+          .workflow=${w}
+          @back=${() => w.navigate('packs')}
+          @next=${() => w.navigate('review')}
         ></signal-step>`;
       case 'review':
         return html`<sticker-review-step
-          class=${STEP_CLASS}
-          .migration=${this.migration}
-          @back=${() => this.go('signal')}
-          @start=${() => this.run(() => this.migrate())}
+          class="contents"
+          .migration=${w.stickers}
+          @back=${() => w.navigate('signal')}
+          @start=${() => w.startMigration()}
         ></sticker-review-step>`;
       case 'migrate':
         return html`<sticker-migrate-step
-          class=${STEP_CLASS}
-          .migration=${this.migration}
-          @retry=${() => this.run(() => this.migrate())}
-          @relink=${() => this.go('signal')}
-          @finish=${() => this.run(() => this.finish())}
+          class="contents"
+          .migration=${w.stickers}
+          @retry=${() => w.startMigration()}
+          @relink=${() => w.navigate('signal')}
+          @finish=${() => w.finish()}
         ></sticker-migrate-step>`;
       case 'done':
         return html`<sticker-done-step
-          class=${STEP_CLASS}
-          .migration=${this.migration}
-          .telegramStatus=${this.telegramConnection === 'on' ? 'Signing out…' : 'Signed out'}
-          .signalStatus=${this.signal ? 'Unlinking…' : this.unlinkedAutomatically ? 'Unlinked automatically' : 'Unlinked'}
-          @restart=${() => this.restart()}
+          class="contents"
+          .migration=${w.stickers}
+          .telegramStatus=${w.telegram === 'on' ? 'Signing out…' : 'Signed out'}
+          .signalStatus=${w.device ? 'Unlinking…' : w.unlinkedAutomatically ? 'Unlinked automatically' : 'Unlinked'}
+          @restart=${() => w.startOver()}
         ></sticker-done-step>`;
     }
   }
 
   render() {
-    return html`<div class="flex min-h-screen items-start justify-center bg-page px-4 py-12 font-sans text-ink">
+    const w = this.workflow;
+    // On wide screens: a card that fills the window inside a margin, with the step list on the left and the step on
+    // the right; only the step scrolls, inside the card. On narrow screens: the page itself scrolls.
+    return html`<div class="min-h-screen bg-page font-sans text-ink lg:h-screen lg:p-8">
       <div
-        class="flex min-h-[720px] w-full max-w-[1120px] flex-wrap overflow-hidden rounded-2xl bg-white shadow-[0_1px_2px_rgba(20,20,30,0.06),0_8px_24px_rgba(20,20,30,0.06)]"
+        class="mx-auto flex w-full max-w-[1200px] flex-col bg-white lg:h-full lg:flex-row lg:overflow-hidden lg:rounded-[20px] lg:shadow-[0_1px_2px_rgba(20,20,30,0.06),0_12px_32px_rgba(20,20,30,0.08)]"
       >
-        ${this.nav()}
-        <main class="flex min-w-0 flex-[999_1_560px] flex-col gap-8 px-6 py-10 sm:px-12">
-          ${this.content()} ${this.error ? html`<p class="text-danger" role="alert">${this.error}</p>` : nothing}
+        ${this.nav()} ${this.topBar()}
+        <main class="flex min-w-0 flex-1 flex-col gap-8 px-4 pt-8 sm:px-10 lg:overflow-y-auto lg:px-12 lg:pt-0">
+          <!-- The top padding inside the scrolling column, so that sticky bars stick to its top edge. -->
+          <div class="-mb-8 hidden h-10 flex-none lg:block" aria-hidden="true"></div>
+          ${this.content()}
         </main>
       </div>
+      ${
+        w.error
+          ? html`<div
+              role="alert"
+              class="fixed bottom-6 left-1/2 z-50 flex w-[min(560px,calc(100vw-32px))] -translate-x-1/2 items-start gap-3 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-[0_8px_32px_rgba(20,20,30,0.3)]"
+            >
+              <span class="flex-1">${w.error}</span>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                class="cursor-pointer text-white/70 hover:text-white"
+                @click=${() => w.dismissError()}
+              >
+                ×
+              </button>
+            </div>`
+          : nothing
+      }
     </div>`;
   }
 }

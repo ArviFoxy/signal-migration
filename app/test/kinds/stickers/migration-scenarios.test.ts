@@ -241,19 +241,37 @@ describe('failures', () => {
     expect(world.index.entries).toHaveLength(2);
   });
 
-  // Detects: a failed Telegram download being impossible to retry before logging out.
-  it('downloads a failed pack again on retry', async () => {
+  // Detects: a failed Telegram download stopping the migration, or not being downloaded again on retry.
+  it('fails only the pack whose download failed, and downloads it again on retry', async () => {
     const world = new StickerWorld();
     const alice = world.user([world.pack('A'), world.pack('B'), world.pack('C')]);
     alice.stickers.failNextStickerRead('B');
     const page = alice.openPage();
     await page.readTelegram();
-    await page.download();
-    expect(page.entry('B').state).toBe('failed');
-    await page.download();
-    expect(page.entry('B').state).toBe('to-upload');
     await page.linkSignal();
     await page.run();
+    expect(page.entry('B').state).toBe('failed');
+    expect(page.entry('B').error).toMatch(/downloading from Telegram failed/);
+    expect(await alice.installedTitles()).toEqual(['A', 'C']);
+    await page.run();
+    expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
+  });
+
+  // Detects: the next pack not being prepared while waiting for Signal's upload limit, which would add its download
+  // and conversion time to every wait.
+  it('downloads the next pack while waiting for the upload limit', async () => {
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: UPLOAD_INTERVAL } });
+    const alice = world.user([world.pack('A'), world.pack('B'), world.pack('C')]);
+    let preparedDuringWait = false;
+    await alice.visit({
+      onChange: (migration) => {
+        // B waits for the limit with its stickers ready; C is the next pack.
+        const c = migration.entries.find((entry) => entry.pack.title === 'C')!;
+        if (migration.uploadAllowedAt !== null && (c.state === 'downloading' || c.state === 'converting'))
+          preparedDuringWait = true;
+      },
+    });
+    expect(preparedDuringWait).toBe(true);
     expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
   });
 
@@ -264,7 +282,6 @@ describe('failures', () => {
     world.signal.failNext((request) => request === 'https POST cdn.signal.org /');
     const page = alice.openPage();
     await page.readTelegram();
-    await page.download();
     await page.linkSignal();
     await page.run();
     expect(page.entry('A').state).toBe('failed');
@@ -341,7 +358,6 @@ describe('choices', () => {
       },
     });
     await page.readTelegram();
-    await page.download();
     await page.linkSignal();
     await page.run();
     expect(uploadsWhilePaused).toBe(1);

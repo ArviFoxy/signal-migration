@@ -2,7 +2,7 @@
 
 import { html } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { icons, primaryButton, stepHeader } from '../../../ui/layout';
+import { icons, primaryButton, stepHeader, stickyFooter } from '../../../ui/layout';
 import { MigrationView } from './view';
 
 @customElement('sticker-done-step')
@@ -38,9 +38,11 @@ export class StickerDoneStep extends MigrationView {
           ${row('Sticker pack index', `Received the hash and Signal pack ID of ${migration.addedToIndex} uploaded pack${migration.addedToIndex === 1 ? '' : 's'}`)}
         </ul>
       </section>
-      <div class="mt-auto flex flex-wrap justify-between gap-3">
-        <span></span>
-        <button type="button" class=${primaryButton} @click=${() => this.emit('restart')}>Move something else</button>
-      </div>`;
+      ${stickyFooter(
+        html`<span></span>
+          <button type="button" class=${primaryButton} @click=${() => this.emit('restart')}>
+            Move something else
+          </button>`,
+      )}`;
   }
 }

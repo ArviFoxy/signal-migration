@@ -1,5 +1,6 @@
 // The temporary linked device for one migration: linked by QR code, logged in, unlinked at the end.
-// Its login and the account's master key live in this object only; nothing is written to the browser's storage.
+// Its login and the storage service key (`stored`) are kept by the workflow until the migration is done or the
+// user clears it; the account's master key is never kept.
 
 import { httpsRequest } from './http-client';
 import { type LinkEvents, linkDevice, type LinkedAccount } from './link';
@@ -7,6 +8,9 @@ import { SignalSession } from './session';
 import { SocketClosedError } from './socket';
 import { StorageClient } from './storage';
 import type { ChatChannel, SignalAccount } from './transport';
+
+/** A linked device's login and storage service key, as kept between visits. */
+export type StoredDevice = { aci: string; deviceId: number; password: string; storageServiceKey: Uint8Array };
 
 /** The server closes a removed device's connection with this code. */
 const DEVICE_REMOVED = 4401;
@@ -29,6 +33,20 @@ export class SignalConnection implements SignalAccount {
     this.#account = account;
   }
 
+  /** A device linked during an earlier visit. */
+  static restore(stored: StoredDevice): SignalConnection {
+    const { aci, deviceId, password, storageServiceKey } = stored;
+    return new SignalConnection({
+      credentials: { aci, deviceId, password },
+      storageServiceKey: storageServiceKey.slice(),
+    });
+  }
+
+  /** What is kept in the browser to use this device again after a reload. */
+  get stored(): StoredDevice {
+    return { ...this.#account.credentials, storageServiceKey: this.#account.storageServiceKey.slice() };
+  }
+
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device. */
   static async link(
     showQrCode: (url: string) => void,
@@ -49,7 +67,7 @@ export class SignalConnection implements SignalAccount {
   #markRemoved(): void {
     if (this.#removed) return;
     this.#removed = true;
-    this.#account.masterKey.fill(0);
+    this.#account.storageServiceKey.fill(0);
     this.#account.credentials.password = '';
     this.onUnlinked();
   }
@@ -82,7 +100,9 @@ export class SignalConnection implements SignalAccount {
   }
 
   async storage(): Promise<StorageClient> {
-    return this.withChat((chat) => StorageClient.open(chat, this.#account.masterKey, this.deviceId, this.https));
+    return this.withChat((chat) =>
+      StorageClient.open(chat, this.#account.storageServiceKey, this.deviceId, this.https),
+    );
   }
 
   /** Removes this device from the account and forgets its login. */

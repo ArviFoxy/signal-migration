@@ -1,11 +1,11 @@
 // The sticker pack migration, in the order of the wizard:
 // 1. readTelegram: the user's installed packs in Telegram order. Then, while the user chooses packs,
 //    lookUpInIndex finds which are already on Signal and loadPreviews loads up to four preview images per pack.
-// 2. download: the sticker files of each selected pack that is not on Signal yet. After this the app logs out of
-//    Telegram, so the files are kept in memory until they are uploaded.
-// 3. readSignal: which packs the Signal account already has.
-// 4. run: installs the packs someone already uploaded, then uploads and installs the rest one by one, within
-//    Signal's upload limit.
+// 2. readSignal: which packs the Signal account already has.
+// 3. run: installs the packs someone already uploaded, then takes the rest pack by pack: download from Telegram,
+//    convert, upload to Signal, add to the index, install. Signal's upload limit sets the pace (50 at once, then one
+//    every 72 minutes by default), so only the pack being uploaded and the next one are held in memory; the next is
+//    downloaded and converted while waiting for the limit.
 //
 // Nothing is stored between visits. A later visit computes the same state from Telegram, the sticker pack index
 // and the Signal account, so a migration that stopped (closed page, rate limit) continues where it was.
@@ -31,6 +31,7 @@ export type PackState =
   | 'to-upload'
   /** Someone else is uploading it right now; looked at again later. */
   | 'claimed-elsewhere'
+  | 'downloading'
   | 'converting'
   | 'uploading'
   | 'installing'
@@ -55,8 +56,8 @@ export type PackEntry = {
   packId: Uint8Array | null;
   /** Up to four preview images for the pack list. */
   thumbnails: { data: Uint8Array; mimeType: string }[];
-  /** Whether the pack's sticker files are in memory; only packs to upload need them. */
-  downloaded: boolean;
+  /** Whether the pack's stickers are downloaded and converted, ready to upload. */
+  prepared: boolean;
   progress: { done: number; total: number } | null;
   conversion: ConversionSummary | null;
   error: string | null;
@@ -130,14 +131,6 @@ class IndexUnavailableError extends Error {
 export class StickerMigration extends EventTarget {
   entries: PackEntry[] = [];
   readProgress: { done: number; total: number } | null = null;
-  /** The download of sticker files: packs and stickers done of total, and the pack being downloaded. */
-  downloadProgress: {
-    packsDone: number;
-    packsTotal: number;
-    stickersDone: number;
-    stickersTotal: number;
-    current: string | null;
-  } | null = null;
   phase: RunPhase = 'idle';
   stopReason: string | null = null;
   /** While waiting for Signal's upload limit: when the next upload is allowed (ms since the epoch). */
@@ -153,7 +146,6 @@ export class StickerMigration extends EventTarget {
   addedToIndex = 0;
   installed = 0;
   #services: MigrationServices;
-  #files = new Map<PackEntry, Uint8Array[]>();
   #converted = new Map<PackEntry, StickerFile[]>();
   #lookup: Promise<void> | null = null;
   #previewsStopped = false;
@@ -214,7 +206,7 @@ export class StickerMigration extends EventTarget {
         state: 'checking' as PackState,
         packId: null,
         thumbnails: [],
-        downloaded: false,
+        prepared: false,
         progress: null,
         conversion: null,
         error: null,
@@ -264,68 +256,6 @@ export class StickerMigration extends EventTarget {
   /** Stops loading previews; the ones not yet loaded are not needed after the user has chosen. */
   stopPreviews(): void {
     this.#previewsStopped = true;
-  }
-
-  /** The selected packs whose sticker files still need downloading: those not on Signal yet. */
-  get toDownload(): PackEntry[] {
-    return this.selected.filter(
-      (entry) => !entry.downloaded && (entry.state === 'to-upload' || entry.state === 'failed'),
-    );
-  }
-
-  /**
-   * Downloads the sticker files of each selected pack that is not on Signal yet, pack by pack in Telegram order.
-   * A pack whose download fails is marked failed; downloading again retries it.
-   */
-  async download(telegram: TelegramSource): Promise<void> {
-    await this.lookUpInIndex();
-    const packs = this.toDownload;
-    const progress = {
-      packsDone: 0,
-      packsTotal: packs.length,
-      stickersDone: 0,
-      stickersTotal: packs.reduce((sum, entry) => sum + entry.pack.stickers.length, 0),
-      current: null as string | null,
-    };
-    this.downloadProgress = progress;
-    this.#changed();
-    for (const entry of packs) {
-      progress.current = entry.pack.title;
-      Object.assign(entry, { error: null, progress: { done: 0, total: entry.pack.stickers.length } });
-      this.#changed();
-      const files: Uint8Array[] = new Array(entry.pack.stickers.length);
-      // The parallel reads stop at the first failure; all of them have settled when forEachConcurrently returns.
-      let failure: unknown = null;
-      await forEachConcurrently(
-        entry.pack.stickers.map((sticker, i) => ({ sticker, i })),
-        CONCURRENT_DOWNLOADS,
-        async ({ sticker, i }) => {
-          if (failure !== null) return;
-          try {
-            files[i] = await telegram.readFile(sticker.fileId);
-          } catch (error) {
-            failure = error;
-            return;
-          }
-          entry.progress = { done: entry.progress!.done + 1, total: entry.pack.stickers.length };
-          progress.stickersDone++;
-          this.#changed();
-        },
-      );
-      if (failure === null) {
-        this.#files.set(entry, files);
-        Object.assign(entry, { downloaded: true, state: 'to-upload' });
-      } else {
-        // The stickers of a failed pack count as handled, so that the bar still ends full.
-        progress.stickersDone += entry.pack.stickers.length - entry.progress!.done;
-        Object.assign(entry, { state: 'failed', error: `downloading from Telegram failed: ${message(failure)}` });
-      }
-      entry.progress = null;
-      progress.packsDone++;
-      this.#changed();
-    }
-    progress.current = null;
-    this.#changed();
   }
 
   /** Marks the packs the Signal account already has installed. */
@@ -419,28 +349,51 @@ export class StickerMigration extends EventTarget {
     throw new IndexUnavailableError();
   }
 
-  async #convert(entry: PackEntry): Promise<StickerFile[]> {
-    const files = this.#files.get(entry);
-    if (!files) throw new Error('the sticker files were not downloaded from Telegram; start again to download them');
+  /** Downloads a pack's stickers from Telegram and converts them; the result waits in memory for the upload. */
+  async #prepare(telegram: TelegramSource, entry: PackEntry): Promise<void> {
+    if (this.#converted.has(entry)) return;
     const stickers = entry.pack.stickers;
-    const converted: ConvertedSticker[] = new Array(stickers.length);
-    let done = 0;
-    entry.progress = { done, total: stickers.length };
-    await forEachConcurrently(
-      stickers.map((sticker, i) => ({ sticker, i })),
+    const step = async <T>(
+      state: PackState,
+      work: (index: number) => Promise<T>,
+      concurrency: number,
+    ): Promise<T[]> => {
+      const results: T[] = new Array(stickers.length);
+      let done = 0;
+      Object.assign(entry, { state, progress: { done, total: stickers.length } });
+      this.#changed();
+      await forEachConcurrently(
+        stickers.map((_, i) => i),
+        concurrency,
+        async (i) => {
+          results[i] = await work(i);
+          entry.progress = { done: ++done, total: stickers.length };
+          this.#changed();
+        },
+      );
+      return results;
+    };
+    let files: Uint8Array[];
+    try {
+      files = await step('downloading', (i) => telegram.readFile(stickers[i].fileId), CONCURRENT_DOWNLOADS);
+    } catch (error) {
+      throw new Error(`downloading from Telegram failed: ${message(error)}`);
+    }
+    const converted = await step(
+      'converting',
+      (i) => this.#services.convert(files[i], stickers[i].format),
       CONCURRENT_CONVERSIONS,
-      async ({ sticker, i }) => {
-        converted[i] = await this.#services.convert(files[i], sticker.format);
-        entry.progress = { done: ++done, total: stickers.length };
-        this.#changed();
-      },
     );
     entry.conversion = summarize(converted);
-    return converted.map((sticker, i) => ({ image: sticker.image, emoji: stickers[i].emoji }));
+    this.#converted.set(
+      entry,
+      converted.map((sticker, i) => ({ image: sticker.image, emoji: stickers[i].emoji })),
+    );
+    Object.assign(entry, { prepared: true, progress: null });
   }
 
   /** Migrates one pack that is not installed. Returns false when someone else holds its claim. */
-  async #migrateOne(signal: SignalAccount, entry: PackEntry): Promise<boolean> {
+  async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<boolean> {
     const { lookupKey, packKey } = entry.identity;
     // Someone may have uploaded the pack since the index was read.
     entry.state = 'checking';
@@ -449,11 +402,7 @@ export class StickerMigration extends EventTarget {
     entry.packId = await this.#services.index.find(lookupKey, packKey);
     if (!entry.packId) {
       if (!(await this.#claim(entry))) return false;
-      if (!this.#converted.has(entry)) {
-        entry.state = 'converting';
-        this.#changed();
-        this.#converted.set(entry, await this.#convert(entry));
-      }
+      await this.#prepare(telegram, entry);
       entry.state = 'uploading';
       this.#changed();
       const content = { title: entry.pack.title, stickers: this.#converted.get(entry)! };
@@ -471,7 +420,6 @@ export class StickerMigration extends EventTarget {
       );
       this.uploaded++;
       this.#converted.delete(entry);
-      this.#files.delete(entry);
       await this.#addToIndex(entry);
     }
     entry.state = 'installing';
@@ -485,8 +433,11 @@ export class StickerMigration extends EventTarget {
     while (this.#paused) await new Promise<void>((resolve) => (this.#resume = resolve));
   }
 
-  /** Installs every selected pack: first those already uploaded, in one write, then the rest one by one. */
-  async run(signal: SignalAccount): Promise<void> {
+  /**
+   * Installs every selected pack: first those already uploaded, in one write, then the rest pack by pack, reading
+   * their stickers from `telegram`.
+   */
+  async run(signal: SignalAccount, telegram: TelegramSource): Promise<void> {
     const { clock } = this.#services;
     Object.assign(this, { phase: 'running', stopReason: null });
     this.#changed();
@@ -521,7 +472,7 @@ export class StickerMigration extends EventTarget {
       const [entry] = queue.splice(index, 1);
       entry.error = null;
       try {
-        if (!(await this.#migrateOne(signal, entry))) {
+        if (!(await this.#migrateOne(signal, telegram, entry))) {
           entry.state = 'claimed-elsewhere';
           recheckAt.set(entry, clock.now() + CLAIM_RECHECK_MS);
           queue.push(entry);
@@ -535,7 +486,16 @@ export class StickerMigration extends EventTarget {
           this.#limitReached = true;
           this.uploadAllowedAt = clock.now() + waitMs;
           this.#changed();
-          await clock.sleep(this.uploadAllowedAt - clock.now());
+          // While waiting, the next pack is downloaded and converted. If that fails, it is tried again in its turn.
+          const next = queue.find((other) => other !== entry && other.state === 'to-upload' && !other.prepared);
+          await Promise.all([
+            clock.sleep(this.uploadAllowedAt - clock.now()),
+            next &&
+              this.#prepare(telegram, next).then(
+                () => (next.state = 'to-upload'),
+                () => Object.assign(next, { state: 'to-upload', progress: null }),
+              ),
+          ]);
           this.uploadAllowedAt = null;
         } else {
           Object.assign(entry, { state: 'failed', error: message(error), progress: null });

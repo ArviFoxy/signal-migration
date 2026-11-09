@@ -98,11 +98,21 @@ export const icons = {
       22,
       '#1B1B1F',
     ),
-  lock: () =>
+  lock: (colour = '#3F3CBB') =>
     icon(
       svg`<rect x="5" y="11" width="14" height="10" rx="2"></rect><path d="M8 11V7a4 4 0 0 1 8 0v4"></path>`,
       16,
-      '#3F3CBB',
+      colour,
+    ),
+  eye: () =>
+    icon(
+      svg`<path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"></path><circle cx="12" cy="12" r="3"></circle>`,
+      18,
+    ),
+  eyeOff: () =>
+    icon(
+      svg`<path d="M10.6 5.1A10 10 0 0 1 12 5c6.5 0 10 7 10 7a17 17 0 0 1-2.2 3.2"></path><path d="M6.6 6.6C3.8 8.4 2 12 2 12s3.5 7 10 7a9.7 9.7 0 0 0 5.4-1.6"></path><path d="M9.9 9.9a3 3 0 0 0 4.2 4.2"></path><path d="M3 3l18 18"></path>`,
+      18,
     ),
   search: () => icon(svg`<circle cx="11" cy="11" r="7"></circle><path d="M20 20l-4-4"></path>`, 16, '#5B5F6A'),
   info: () =>
@@ -171,4 +181,22 @@ export function instructions(
     ${steps.map((text, i) => html`<li class="flex items-baseline gap-3.5"><span class="w-[18px] flex-none font-semibold text-accent">${i + 1}</span><span class="text-base">${text}</span></li>`)}
     ${extra === nothing ? nothing : html`<li class="pl-8">${extra}</li>`}
   </ol>`;
+}
+
+/** The step's actions, kept at the bottom of the window while a long step scrolls. */
+export function stickyFooter(content: TemplateResult): TemplateResult {
+  return html`<div
+    class="sticky bottom-0 z-20 -mx-4 mt-auto flex flex-wrap items-center justify-between gap-3 border-t border-line bg-white/95 px-4 py-3 backdrop-blur sm:-mx-10 sm:px-10 lg:-mx-12 lg:px-12"
+  >
+    ${content}
+  </div>`;
+}
+
+/** A bar kept at the top of the window while a long step scrolls: filters, or the progress of a running step. */
+export function stickyBar(content: TemplateResult): TemplateResult {
+  return html`<div
+    class="sticky top-0 z-20 -mx-4 flex flex-col gap-3 border-b border-line bg-white/95 px-4 py-3 backdrop-blur sm:-mx-10 sm:px-10 lg:-mx-12 lg:px-12"
+  >
+    ${content}
+  </div>`;
 }

@@ -16,8 +16,9 @@ import {
   qrBox,
   secondaryButton,
   stepHeader,
+  stickyFooter,
 } from './layout';
-import type { TelegramSession } from './services';
+import type { TelegramSession } from '../app/services';
 
 type Query = Parameters<TelegramSession['invoke']>[0];
 
@@ -29,6 +30,7 @@ export class TelegramStep extends LightElement {
   @state() private qrCode: string | null = null;
   @state() private error: string | null = null;
   @state() private sending = false;
+  @state() private showPassword = false;
   #qrLink: string | null = null;
   #qrRequestedFor: TelegramSession | null = null;
 
@@ -91,13 +93,36 @@ export class TelegramStep extends LightElement {
     >
       <label class="flex min-w-[220px] flex-1 flex-col gap-2">
         <span class="text-sm font-semibold">${label}</span>
-        <input
-          type=${type}
-          autocomplete=${autocomplete}
-          required
-          ?disabled=${this.sending}
-          class="min-h-11 rounded-[10px] px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
-        />
+        ${
+          type === 'password'
+            ? html`<span class="relative flex items-center">
+                <span class="pointer-events-none absolute left-3.5 flex text-muted">${icons.lock('currentColor')}</span>
+                <input
+                  type=${this.showPassword ? 'text' : 'password'}
+                  autocomplete=${autocomplete}
+                  placeholder="••••••••"
+                  required
+                  ?disabled=${this.sending}
+                  class="min-h-11 w-full rounded-[10px] bg-panel pr-11 pl-10 text-[15px] tracking-wide ring-1 ring-line-strong ring-inset placeholder:text-line-strong focus:bg-white focus:ring-2 focus:ring-accent focus:outline-none"
+                />
+                <button
+                  type="button"
+                  aria-label=${this.showPassword ? 'Hide password' : 'Show password'}
+                  aria-pressed=${this.showPassword}
+                  class="absolute right-1 flex size-9 cursor-pointer items-center justify-center rounded-lg text-muted hover:bg-segment"
+                  @click=${() => (this.showPassword = !this.showPassword)}
+                >
+                  ${this.showPassword ? icons.eyeOff() : icons.eye()}
+                </button>
+              </span>`
+            : html`<input
+                type=${type}
+                autocomplete=${autocomplete}
+                required
+                ?disabled=${this.sending}
+                class="min-h-11 rounded-[10px] px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
+              />`
+        }
       </label>
       <button type="submit" class=${primaryButton} ?disabled=${this.sending}>Continue</button>
     </form>`;
@@ -195,14 +220,14 @@ export class TelegramStep extends LightElement {
           ${connectionEnd(icons.servers(), 'Telegram servers', 'operated by Telegram')}
         </div>
         <figcaption class="text-sm">
-          Direct connection, no server in between. Signed out of Telegram as soon as the packs are downloaded.
+          Direct connection, no server in between. Signed out of Telegram when the migration is done.
         </figcaption>
       </figure>
-      <div class="mt-auto flex flex-wrap justify-between gap-3">
-        <button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
-        <button type="button" class=${primaryButton} ?disabled=${!ready} @click=${() => this.emit('next')}>
-          Continue
-        </button>
-      </div>`;
+      ${stickyFooter(
+        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
+          <button type="button" class=${primaryButton} ?disabled=${!ready} @click=${() => this.emit('next')}>
+            Continue
+          </button>`,
+      )}`;
   }
 }

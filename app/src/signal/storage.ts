@@ -23,7 +23,6 @@ import {
   encryptStorageBlob,
   storageManifestKey,
   storageRecordKey,
-  storageServiceKeyFromMasterKey,
 } from '../wasm/signal_migration_wasm';
 import { httpsRequest } from './http-client';
 import { basicAuthorization } from './session';
@@ -63,10 +62,13 @@ export class StorageClient {
     this.#https = https;
   }
 
-  /** Gets storage service credentials over the logged-in chat connection of device `deviceId`. */
+  /**
+   * Gets storage service credentials over the logged-in chat connection of device `deviceId`. `storageServiceKey` is
+   * derived from the account's master key once, at linking (link.ts); the master key itself is not kept.
+   */
   static async open(
     chat: ChatChannel,
-    masterKey: Uint8Array,
+    storageServiceKey: Uint8Array,
     deviceId: number,
     https: HttpsRequest = httpsRequest,
   ): Promise<StorageClient> {
@@ -78,12 +80,7 @@ export class StorageClient {
       password: string;
     };
     await loadSignalWasm();
-    return new StorageClient(
-      basicAuthorization(username, password),
-      storageServiceKeyFromMasterKey(masterKey),
-      deviceId,
-      https,
-    );
+    return new StorageClient(basicAuthorization(username, password), storageServiceKey, deviceId, https);
   }
 
   async #request(method: string, path: string, body?: Uint8Array) {

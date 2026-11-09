@@ -12,6 +12,7 @@ import {
   generateKyberLastResortPreKey,
   generateSignedPreKey,
   ProvisioningReceiver,
+  storageServiceKeyFromMasterKey,
 } from '../wasm/signal_migration_wasm';
 import { basicAuthorization, type DeviceCredentials } from './session';
 import { connectChat } from './socket';
@@ -24,8 +25,11 @@ const SCAN_TIMEOUT_MS = 180_000;
 /** What the migration keeps from linking, in memory only, until it unlinks. */
 export type LinkedAccount = {
   credentials: DeviceCredentials;
-  /** Decrypts the account's storage service records (installed sticker packs and their order). */
-  masterKey: Uint8Array;
+  /**
+   * Decrypts the account's storage service records (installed sticker packs and their order). Derived from the
+   * account's master key, which is discarded right after linking: the migration needs nothing else it protects.
+   */
+  storageServiceKey: Uint8Array;
 };
 
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
@@ -141,7 +145,10 @@ export async function linkDevice(
       });
       if (response.status !== 200) throw new Error(`linking was refused: ${response.status} ${response.message}`);
       const { deviceId } = JSON.parse(new TextDecoder().decode(response.body)) as { deviceId: number };
-      return { credentials: { aci: provision.aci, deviceId, password }, masterKey: provision.masterKey.slice() };
+      return {
+        credentials: { aci: provision.aci, deviceId, password },
+        storageServiceKey: storageServiceKeyFromMasterKey(provision.masterKey),
+      };
     } finally {
       socket.close();
     }

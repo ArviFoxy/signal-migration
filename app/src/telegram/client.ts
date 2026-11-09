@@ -1,12 +1,11 @@
 // The user's Telegram account, through TDLib running in the page (tdweb, built from third_party/td).
 //
-// The page talks to Telegram directly; nothing goes through our server. The user logs in on each visit and
-// nothing is kept afterwards:
-// - TDLib's database directory, which holds the login, lives in memory only. tdweb mounts it on an IndexedDB
-//   database and copies it there every few seconds; the `readOnly` option turns that copying off.
+// The page talks to Telegram directly; nothing goes through our server. The login lasts for the migration:
+// - TDLib's database directory, which holds the login, is kept in an IndexedDB database (tdweb copies it there
+//   every few seconds), so a reload resumes the session instead of leaving it behind in the user's active sessions.
 // - Downloaded files go to a second IndexedDB database. The files are public sticker images; they are deleted
-//   once read, and the whole database is deleted when the session ends.
-// Both databases are also deleted at start, in case an earlier visit ended without logging out.
+//   once read.
+// Logging out deletes both. A start that does not resume a session deletes whatever an earlier visit left.
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
@@ -69,7 +68,6 @@ export class TelegramClient {
     this.#client = new TdClient({
       instanceName: INSTANCE_NAME,
       useDatabase: false,
-      readOnly: true,
       jsLogVerbosityLevel: 'error',
       logVerbosityLevel: 1,
       onUpdate: (raw) => {
@@ -84,14 +82,16 @@ export class TelegramClient {
   }
 
   /**
-   * Starts TDLib after deleting anything an earlier visit left behind. `onAuthorizationState` is called with each
-   * login state, and with the closing states after `logOut`.
+   * Starts TDLib. With `resume`, TDLib continues the session kept in the browser; otherwise anything an earlier
+   * visit left behind is deleted first. `onAuthorizationState` is called with each login state, and with the
+   * closing states after `logOut`.
    */
   static async start(
     app: TelegramApp,
     onAuthorizationState: (state: Td.AuthorizationState) => void,
+    resume: boolean,
   ): Promise<TelegramClient> {
-    await eraseTelegramData();
+    if (!resume) await eraseTelegramData();
     return new TelegramClient(app, onAuthorizationState);
   }
 

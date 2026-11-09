@@ -150,10 +150,6 @@ export class StickerPage {
     }
   }
 
-  async download(): Promise<void> {
-    await this.migration.download(this.user.stickers);
-  }
-
   /** Links a new device and reads which packs the account has. */
   async linkSignal(): Promise<void> {
     this.account = this.user.linkDevice();
@@ -162,7 +158,7 @@ export class StickerPage {
 
   async run(): Promise<void> {
     try {
-      await this.migration.run(this.account!);
+      await this.migration.run(this.account!, this.user.stickers);
     } catch (error) {
       if (!(error instanceof PageClosed)) throw error;
       this.left = true;
@@ -220,11 +216,10 @@ export class StickerUser extends User {
     return new StickerPage(this, options);
   }
 
-  /** A whole visit: Telegram, download, Signal, migration. */
+  /** A whole visit: Telegram, Signal, migration. */
   async visit(options: VisitOptions = {}): Promise<StickerPage> {
     const page = this.openPage(options);
     await page.readTelegram();
-    await page.download();
     await page.linkSignal();
     await page.run();
     return page;

@@ -38,6 +38,12 @@ async fn client_config(State(config): State<ClientConfig>) -> Json<ClientConfig>
     Json(config)
 }
 
+/// The demo: only the built demo's files (app/dist-demo). No tunnel to Signal, no sticker pack index and no
+/// configuration, so that nothing the demo does can reach a real service.
+pub fn demo_router(static_dir: PathBuf) -> Router {
+    Router::new().fallback_service(ServeDir::new(static_dir).precompressed_br().precompressed_gzip())
+}
+
 pub fn router(config: Config) -> Router {
     let index_routes = Router::new()
         .route("/v1/sticker-packs/index", get(index::read).post(index::append))

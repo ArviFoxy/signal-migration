@@ -121,6 +121,11 @@ export class FakeSignal {
     this.#account(aci).devices.set(deviceId, { linked: false });
   }
 
+  /** The IDs of every device the account has had, the primary device (1) included. */
+  devices(aci: string): number[] {
+    return [...this.#account(aci).devices.keys()];
+  }
+
   isLinked(aci: string, deviceId: number): boolean {
     return this.#account(aci).devices.get(deviceId)?.linked ?? false;
   }
