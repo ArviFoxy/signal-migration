@@ -18,8 +18,8 @@ export class LightElement extends LitElement {
 export const STEP_LABELS = [
   'What to move',
   'Telegram login',
-  'Select sticker packs',
   'Signal login',
+  'Select sticker packs',
   'Review',
   'Migrate',
   // Not a screen of its own: the migration screen's final state, once both logins are ended.

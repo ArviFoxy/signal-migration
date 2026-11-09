@@ -142,6 +142,10 @@ export class StickerMigration extends EventTarget {
   entries: PackEntry[] = [];
   readProgress: { done: number; total: number } | null = null;
   phase: RunPhase = 'idle';
+  /** Every pack was looked up in the index (lookUpInIndex finished). */
+  lookedUp = false;
+  /** The Signal account whose installed packs were last read (readSignal). */
+  signalReadFrom: SignalAccount | null = null;
   stopReason: string | null = null;
   /** While waiting for Signal's upload limit: when the next upload is allowed (ms since the epoch). */
   uploadAllowedAt: number | null = null;
@@ -250,6 +254,8 @@ export class StickerMigration extends EventTarget {
         entry.state = this.#services.index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
         this.#changed();
       });
+      this.lookedUp = true;
+      this.#changed();
     })();
     this.#lookup.catch(() => (this.#lookup = null));
     return this.#lookup;
@@ -294,6 +300,7 @@ export class StickerMigration extends EventTarget {
       if (installed)
         Object.assign(entry, { state: 'in-signal', packId: installed.packId, packKey: installed.packKey, error: null });
     }
+    this.signalReadFrom = signal;
     this.#changed();
   }
 

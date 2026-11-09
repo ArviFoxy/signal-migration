@@ -55,7 +55,7 @@ export class MigrationApp extends LightElement {
 
   /** A new step starts at the top of the page. */
   protected updated(): void {
-    if (this.workflow.step !== this.#shownStep) {
+    if (this.workflow && this.workflow.step !== this.#shownStep) {
       this.#shownStep = this.workflow.step;
       window.scrollTo({ top: 0 });
       this.querySelector('main')?.scrollTo({ top: 0 });
@@ -243,22 +243,22 @@ export class MigrationApp extends LightElement {
           @try-again=${() => w.tryAgain()}
           @select=${(event: CustomEvent<{ entries: never[]; selected: boolean }>) =>
             w.setSelected(event.detail.entries, event.detail.selected)}
-          @back=${() => w.goTo('telegram')}
+          @back=${() => w.goTo('signal')}
           @next=${() => w.goTo('review')}
         ></sticker-packs-step>`;
       case 'signal':
         return html`<signal-step
           class="contents"
           .link=${w.signal}
-          @back=${() => w.goTo('packs')}
-          @next=${() => w.goTo('review')}
+          @back=${() => w.goTo('telegram')}
+          @next=${() => w.goTo('packs')}
         ></signal-step>`;
       case 'review':
         return html`<sticker-review-step
           class="contents"
           .migration=${w.stickers}
           .ready=${w.packsReady}
-          @back=${() => w.goTo('signal')}
+          @back=${() => w.goTo('packs')}
           @start=${() => w.startMigration()}
         ></sticker-review-step>`;
       case 'migrate':
@@ -284,6 +284,7 @@ export class MigrationApp extends LightElement {
 
   render() {
     const w = this.workflow;
+    if (!w) return nothing;
     // On wide screens: a card that fills the window inside a margin, with the step list on the left and the step on
     // the right; only the step scrolls, inside the card. On narrow screens: the page itself scrolls.
     return html`<div class="min-h-screen bg-page font-sans text-ink lg:h-screen lg:p-8">

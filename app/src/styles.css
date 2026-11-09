@@ -33,3 +33,25 @@
   --color-ended: #8a8d96;
   --color-danger: #a12a1e;
 }
+
+/*
+ * A scrollbar that stays visible, for long lists: macOS hides scrollbars until the user scrolls. WebKit and Chromium
+ * draw it from the ::-webkit-scrollbar rules; Firefox, which lacks them, from scrollbar-color.
+ */
+.scrollbar-visible::-webkit-scrollbar {
+  width: 12px;
+}
+.scrollbar-visible::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-visible::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 9999px;
+  background: var(--color-line-strong) padding-box;
+}
+@supports not selector(::-webkit-scrollbar) {
+  .scrollbar-visible {
+    scrollbar-color: var(--color-line-strong) transparent;
+    scrollbar-width: thin;
+  }
+}

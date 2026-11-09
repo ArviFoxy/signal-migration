@@ -2,7 +2,7 @@
 //
 // It is a hierarchical state machine. Its own state is the phase of the process:
 //
-//   loading ──▶ setup (start ▸ telegram ▸ packs ▸ signal ▸ review) ──▶ migrating ──▶ finishing ──▶ finished
+//   loading ──▶ setup (start ▸ telegram ▸ signal ▸ packs ▸ review) ──▶ migrating ──▶ finishing ──▶ finished
 //                 ▲                                                                                 │
 //                 ├────────── clearing ◀── "Disconnect and clear local state", from any phase       │
 //                 └─────────────────────────────────────────────────────── start over ◀────────────┘
@@ -30,7 +30,7 @@ import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from '.
 import { type SignalState, SignalLink, type UnlinkReason } from './signal-link';
 import { TelegramLogin, type TelegramState } from './telegram-login';
 
-export const STEPS = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate'] as const;
+export const STEPS = ['start', 'telegram', 'signal', 'packs', 'review', 'migrate'] as const;
 export type Step = (typeof STEPS)[number];
 export type SetupStep = Exclude<Step, 'migrate'>;
 const SETUP_STEPS: readonly string[] = STEPS.filter((step) => step !== 'migrate');
@@ -95,8 +95,9 @@ export function stepShown(phase: Phase, telegram: TelegramState, signal: SignalS
   const needsMet: Record<Step, boolean> = {
     start: true,
     telegram: true,
-    packs: signedIn,
+    // Both logins come before choosing packs, so that nobody chooses among 100+ packs before both are known to work.
     signal: signedIn,
+    packs: signedIn && linked,
     review: signedIn && linked,
     migrate: signedIn && linked,
   };
@@ -150,9 +151,6 @@ export class Workflow extends EventTarget {
   error: string | null = null;
   /** The Telegram session the packs were read from. */
   #stickersSession: TelegramSession | null = null;
-  /** The packs are read and looked up in the index. */
-  #stickersReady = false;
-  #signalReadFor: LinkedDevice | null = null;
   #readingSignal = false;
   #running = false;
   /** Background work that failed and waits for "Try again". */
@@ -227,7 +225,8 @@ export class Workflow extends EventTarget {
   /** The packs are read and looked up in the index, and Signal's installed packs are read from the linked device. */
   get packsReady(): boolean {
     const device = this.signal.device;
-    return this.#stickersReady && (device === null || this.#signalReadFor === device);
+    const stickers = this.stickers;
+    return !!stickers?.lookedUp && (device === null || stickers.signalReadFrom === device);
   }
 
   /** Whether background work failed and can be tried again. */
@@ -296,8 +295,8 @@ export class Workflow extends EventTarget {
     if (step !== 'signal' && this.signal.state.kind === 'linking') this.signal.cancel();
 
     const stickers = this.stickers;
-    if (!active || !stickers || !this.#stickersReady || !device) return;
-    if (this.#signalReadFor !== device) {
+    if (!active || !stickers || !stickers.lookedUp || !device) return;
+    if (stickers.signalReadFrom !== device) {
       if (!this.#readingSignal && !this.#failed.has('signal')) this.#readSignal(stickers, device);
       return;
     }
@@ -321,8 +320,6 @@ export class Workflow extends EventTarget {
     if (this.stickers) this.#deselected = this.#snapshot()?.deselected ?? this.#deselected;
     this.stickers = null;
     this.#stickersSession = null;
-    this.#stickersReady = false;
-    this.#signalReadFor = null;
     this.#running = false;
     this.#failed.clear();
   }
@@ -340,8 +337,6 @@ export class Workflow extends EventTarget {
           if (this.#deselected.includes(entry.pack.setId)) stickers.setSelected(entry, false);
         if (this.phase.kind === 'setup') void stickers.loadPreviews(session.source);
         await stickers.lookUpInIndex();
-        if (this.stickers !== stickers) return;
-        this.#stickersReady = true;
       } catch (error) {
         if (this.stickers !== stickers) return;
         this.#failed.add('packs');
@@ -356,9 +351,7 @@ export class Workflow extends EventTarget {
     void stickers
       .readSignal(device)
       .then(
-        () => {
-          if (this.stickers === stickers && this.signal.device === device) this.#signalReadFor = device;
-        },
+        () => undefined,
         (error) => {
           if (this.stickers !== stickers || this.signal.device !== device) return;
           this.#failed.add('signal');

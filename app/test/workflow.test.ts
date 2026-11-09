@@ -34,17 +34,18 @@ async function openPage(user: StickerUser, browser: Browser, options: Parameters
 }
 type Page = Awaited<ReturnType<typeof openPage>>;
 
-/** Presses Start and scans the Telegram code; returns once the packs are read and looked up. */
+/** Presses Start and scans the Telegram code; returns on the Signal step, once the packs are read and looked up. */
 async function signIn(page: Page): Promise<void> {
   page.workflow.goTo('packs');
   await until(() => page.scanTelegramCode(), 'a Telegram QR code to scan');
-  await until(() => page.workflow.step === 'packs' && page.workflow.packsReady, 'the packs');
+  await until(() => page.workflow.step === 'signal' && page.workflow.packsReady, 'the Signal step');
 }
 
-/** Continues from the packs and scans the Signal code; returns on the review. */
+/** Scans the Signal code, then continues from the packs; returns on the review. */
 async function link(page: Page): Promise<void> {
-  page.workflow.goTo('review');
   await until(() => page.scanSignalCode(), 'a Signal QR code to scan');
+  await until(() => page.workflow.step === 'packs' && page.workflow.packsReady, 'the packs');
+  page.workflow.goTo('review');
   await until(() => page.workflow.step === 'review' && page.workflow.packsReady, 'the review');
 }
 
@@ -113,7 +114,10 @@ describe('the workflow', () => {
     browser.closePage();
 
     const second = await openPage(alice, browser);
-    await until(() => second.workflow.step === 'packs' && second.workflow.packsReady, 'the packs after the reload');
+    await until(
+      () => second.workflow.step === 'signal' && second.workflow.packsReady,
+      'the Signal step after the reload',
+    );
     expect(second.server.active.size).toBe(1);
   });
 
@@ -132,7 +136,6 @@ describe('the workflow', () => {
     browser.closePage();
     const second = await openPage(alice, browser);
     await until(() => second.workflow.packsReady, 'the packs after the reload');
-    expect(second.workflow.step).toBe('packs');
     expect(second.workflow.stickers!.entries.map((entry) => entry.selected)).toEqual([true, false, true]);
   });
 
@@ -196,7 +199,7 @@ describe('the workflow', () => {
 
     await login.submit({ _: 'setAuthenticationPhoneNumber', phone_number: '+1 555 0100' });
     await login.submit({ _: 'checkAuthenticationCode', code: TelegramServer.CODE });
-    await until(() => page.workflow.step === 'packs', 'the packs');
+    await until(() => page.workflow.step === 'signal', 'the Signal step');
     expect(page.server.active.size).toBe(1);
   });
 
@@ -224,9 +227,8 @@ describe('the workflow', () => {
     const alice = world.user([world.pack('A')]);
     const page = await openPage(alice, new Browser());
     await signIn(page);
-    page.workflow.goTo('review');
     await until(() => page.workflow.signal.state.kind === 'linking', 'linking');
-    page.workflow.goTo('packs');
+    page.workflow.goTo('telegram');
     await settle(page);
     expect(page.workflow.signal.state.kind).toBe('off');
     expect(page.scanSignalCode()).toBe(true);

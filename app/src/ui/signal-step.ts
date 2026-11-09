@@ -54,7 +54,7 @@ export class SignalStep extends LightElement {
     const link = this.link;
     const device = link.device;
     const url = this.qrUrl;
-    return html`${stepHeader(4, 'Connect Signal', 'Links your browser as a device of your Signal account.')}
+    return html`${stepHeader(3, 'Connect Signal', 'Links your browser as a device of your Signal account.')}
       ${
         device
           ? html`<p class="flex items-center gap-2 font-semibold text-accent">

@@ -130,7 +130,7 @@ export class StickerPacksStep extends MigrationView {
     const allVisibleSelected =
       visible.length > 0 && visible.every((entry) => entry.selected || entry.pack.stickers.length > MAX_STICKERS);
     if (reading) {
-      return html`${stepHeader(3, 'Sticker packs', 'Reading your packs from Telegram…')}
+      return html`${stepHeader(4, 'Sticker packs', 'Reading your packs from Telegram…')}
       ${
         readProgress
           ? html`<div class="flex flex-col gap-2">
@@ -151,7 +151,7 @@ export class StickerPacksStep extends MigrationView {
           }`,
       )}`;
     }
-    return html`${stepHeader(3, 'Sticker packs', 'Choose the packs to add to your Signal.')}
+    return html`${stepHeader(4, 'Sticker packs', 'Choose the packs to add to your Signal.')}
     ${stickyBar(
       html`<div class="flex flex-wrap items-center justify-between gap-3">
           <div role="group" aria-label="Filter packs" class="inline-flex flex-wrap gap-1 rounded-[10px] bg-segment p-1">

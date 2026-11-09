@@ -7,6 +7,7 @@
     "generate": "buf generate && tdl-install-types -o src/gen/tdlib-types.d.ts ../third_party/td/td/generate/scheme/td_api.tl",
     "build:wasm": "cd ../crates/signal-wasm && cargo build --release && wasm-bindgen --target web --out-dir ../../app/src/wasm target/wasm32-unknown-unknown/release/signal_migration_wasm.wasm && cd ../../app && wasm-opt -Oz --strip-debug --strip-producers src/wasm/signal_migration_wasm_bg.wasm -o src/wasm/signal_migration_wasm_bg.wasm",
     "build": "npm run generate && npm run build:wasm && node build.mjs",
+    "screens": "node build.mjs --fixtures && node fixtures/screens.mjs",
     "check": "npm run generate && npm run build:wasm && tsc --noEmit",
     "test": "npm run generate && vitest run",
     "format": "prettier --write . && (cd ../crates/server && cargo fmt) && (cd ../crates/signal-wasm && cargo fmt)",

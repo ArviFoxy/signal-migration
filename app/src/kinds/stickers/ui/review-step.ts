@@ -60,7 +60,7 @@ export class StickerReviewStep extends MigrationView {
               <h2 id="converted" class="text-base font-semibold">
                 Converted to animated PNG for Signal · ${animated.length} pack${animated.length === 1 ? '' : 's'}
               </h2>
-              <ul class="flex flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset">
+              <ul class="flex shrink-0 flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset">
                 ${shown.map(
                   (pack) =>
                     html`<li class="flex justify-between gap-3 border-b border-[#F0F0EC] px-4 py-2.5 last:border-b-0">

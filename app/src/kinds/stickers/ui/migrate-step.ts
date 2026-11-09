@@ -21,8 +21,6 @@ import { conversionDescription, formatDuration, MigrationView } from './view';
 type Filter = 'all' | 'active' | 'waiting' | 'done' | 'failed';
 
 const WORKING: PackState[] = ['checking', 'downloading', 'converting', 'uploading', 'installing'];
-/** How long the list stops following the current pack after the user scrolls it. */
-const USER_SCROLL_PAUSE_MS = 8000;
 
 function group(entry: PackEntry): Exclude<Filter, 'all'> {
   if (entry.state === 'in-signal') return 'done';
@@ -83,12 +81,14 @@ export class StickerMigrateStep extends MigrationView {
   /** Unlinking Signal and signing out of Telegram, before `finished`. */
   @property({ attribute: false }) ending = false;
   @state() private filter: Filter = 'all';
-  @state() private currentOutOfView = false;
+  /** Where the current pack's row is: in the list's view, or above or below it. */
+  @state() private currentIs: 'in-view' | 'above' | 'below' = 'in-view';
   #ticker: ReturnType<typeof setInterval> | null = null;
-  #userScrolledAt = 0;
+  /** The pack the list last followed, and the row element watched for being in view. */
   #followed: PackEntry | null = null;
+  #watched: Element | null = null;
+  #hasFollowed = false;
   #observer: IntersectionObserver | null = null;
-  #noteUserScroll = () => (this.#userScrolledAt = Date.now());
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -96,43 +96,62 @@ export class StickerMigrateStep extends MigrationView {
     this.#ticker = setInterval(() => {
       if (this.migration?.uploadAllowedAt) this.requestUpdate();
     }, 1000);
-    for (const event of ['wheel', 'touchmove', 'keydown'])
-      window.addEventListener(event, this.#noteUserScroll, { passive: true });
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
     if (this.#ticker) clearInterval(this.#ticker);
-    for (const event of ['wheel', 'touchmove', 'keydown']) window.removeEventListener(event, this.#noteUserScroll);
     this.#observer?.disconnect();
   }
 
-  /** The row of the current pack, followed when it changes unless the user scrolled recently. */
-  protected updated(): void {
-    if (!this.migration) return;
-    const current = this.migration.current;
-    const row = current ? this.querySelector<HTMLElement>(`[data-rank="${current.rank}"]`) : null;
-    if (current !== this.#followed) {
-      this.#followed = current;
-      this.#observer?.disconnect();
-      if (row) {
-        this.#observer = new IntersectionObserver(([seen]) => (this.currentOutOfView = !seen.isIntersecting), {
-          threshold: 0.5,
-        });
-        this.#observer.observe(row);
-        if (Date.now() - this.#userScrolledAt > USER_SCROLL_PAUSE_MS)
-          row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      } else {
-        this.currentOutOfView = false;
-      }
-    }
+  private get list(): HTMLElement | null {
+    return this.querySelector('ul[aria-label="Packs"]');
   }
 
-  private jumpToCurrent(): void {
-    const current = this.migration?.current;
-    if (current)
-      this.querySelector(`[data-rank="${current.rank}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
-    this.#userScrolledAt = 0;
+  private rowOf(entry: PackEntry | null): HTMLElement | null {
+    return entry ? (this.list?.querySelector<HTMLElement>(`[data-rank="${entry.rank}"]`) ?? null) : null;
+  }
+
+  /** Scrolls the list so that `row` is in its middle; the list scrolls, not the page. */
+  private scrollToRow(row: HTMLElement, behavior: ScrollBehavior = 'smooth'): void {
+    const list = this.list!;
+    list.scrollTo({ top: row.offsetTop - (list.clientHeight - row.offsetHeight) / 2, behavior });
+  }
+
+  /**
+   * Follows the current pack: when the migration moves on to the next pack, the list scrolls to it if the previous
+   * one was in view. A user who scrolled away is not pulled back; the button on the scrollbar brings them back.
+   */
+  protected updated(): void {
+    const current = this.migration?.current ?? null;
+    const row = this.rowOf(current);
+    if (row !== this.#watched) {
+      this.#watched = row;
+      this.#observer?.disconnect();
+      if (row) {
+        this.#observer = new IntersectionObserver(
+          ([seen]) => {
+            const view = seen.rootBounds;
+            this.currentIs = seen.isIntersecting
+              ? 'in-view'
+              : view && seen.boundingClientRect.top < view.top
+                ? 'above'
+                : 'below';
+          },
+          { root: this.list, threshold: 0.5 },
+        );
+        this.#observer.observe(row);
+      } else {
+        this.currentIs = 'in-view';
+      }
+    }
+    if (current !== this.#followed) {
+      const follow = this.currentIs === 'in-view';
+      this.#followed = current;
+      // The first time, the list opens at the current pack at once; later it moves along smoothly.
+      if (row && follow) this.scrollToRow(row, this.#hasFollowed ? 'smooth' : 'instant');
+      if (row) this.#hasFollowed = true;
+    }
   }
 
   /** The status symbol and the line saying what is happening to a pack. */
@@ -209,19 +228,44 @@ export class StickerMigrateStep extends MigrationView {
     </li>`;
   }
 
+  /**
+   * The button at the foot of the list's scrollbar that goes to the current pack, pointing to where it is. It shows
+   * only while the current pack is out of view, over the list, so that nothing moves when it appears.
+   */
+  private currentButton(current: PackEntry | null) {
+    const hidden = !current || !this.rowOf(current) || this.currentIs === 'in-view';
+    const arrow = this.currentIs === 'above' ? 'M12 19V5M5 12l7-7 7 7' : 'M12 5v14M5 12l7 7 7-7';
+    return html`<button
+      type="button"
+      aria-hidden=${hidden}
+      tabindex=${hidden ? -1 : 0}
+      class="absolute right-5 bottom-3 flex cursor-pointer items-center gap-1.5 rounded-full bg-white px-3 py-1.5 text-[13px] font-semibold text-accent shadow-[0_2px_12px_rgba(20,20,30,0.18)] ring-1 ring-line transition-opacity duration-150 ${
+        hidden ? 'pointer-events-none opacity-0' : 'opacity-100'
+      }"
+      @click=${() => {
+        const row = this.rowOf(current);
+        if (row) this.scrollToRow(row);
+      }}
+    >
+      <svg
+        width="14"
+        height="14"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="2.5"
+        aria-hidden="true"
+      >
+        ${svg`<path d=${arrow} stroke-linecap="round" stroke-linejoin="round"></path>`}
+      </svg>
+      Current pack
+    </button>`;
+  }
+
   /** The footer's actions; the footer is always there, so that nothing moves when the migration ends. */
   private actions(ended: boolean, failed: number) {
     const migration = this.migration!;
-    const jump =
-      this.currentOutOfView && migration.current
-        ? html`<button
-            type="button"
-            class="cursor-pointer text-sm font-medium text-accent hover:underline"
-            @click=${() => this.jumpToCurrent()}
-          >
-            Jump to the current pack
-          </button>`
-        : html`<span></span>`;
+    const jump = html`<span></span>`;
     if (this.finished) {
       return html`${jump}<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>
           Start over
@@ -348,9 +392,15 @@ export class StickerMigrateStep extends MigrationView {
     ${
       shown.length === 0
         ? html`<p class="text-sm text-muted">No packs here.</p>`
-        : html`<ul aria-label="Packs" class="flex flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset">
-            ${shown.map((entry) => this.row(entry, entry === current))}
-          </ul>`
+        : html`<div class="relative flex min-h-[240px] flex-col lg:flex-1">
+            <ul
+              aria-label="Packs"
+              class="scrollbar-visible relative flex max-h-[70vh] flex-col overflow-y-auto overscroll-contain rounded-xl ring-1 ring-card-line ring-inset lg:max-h-none lg:min-h-0 lg:flex-1"
+            >
+              ${shown.map((entry) => this.row(entry, entry === current))}
+            </ul>
+            ${this.currentButton(current)}
+          </div>`
     }
     ${stickyFooter(this.actions(ended, failed))}`;
   }

@@ -13,8 +13,13 @@ import path from 'node:path';
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib';
 
 const tdwebDist = '../build/tdweb/dist';
-const outdir = 'dist';
-const entries = ['src/main.ts', 'src/kinds/stickers/apng-worker.ts', 'src/fonts.css'];
+// With --fixtures it builds the screen fixtures instead (fixtures/fixtures.ts), into dist-fixtures/, for
+// fixtures/screens.mjs; that build is never served.
+const fixtures = process.argv.includes('--fixtures');
+const outdir = fixtures ? 'dist-fixtures' : 'dist';
+const entries = fixtures
+  ? ['fixtures/fixtures.ts', 'src/fonts.css']
+  : ['src/main.ts', 'src/kinds/stickers/apng-worker.ts', 'src/fonts.css'];
 
 fs.rmSync(outdir, { recursive: true, force: true });
 fs.mkdirSync(outdir, { recursive: true });
@@ -33,6 +38,10 @@ await build({
 execFileSync('node_modules/.bin/tailwindcss', ['--input', 'src/styles.css', '--output', `${outdir}/styles.css`], {
   stdio: 'inherit',
 });
+if (fixtures) {
+  fs.copyFileSync('fixtures/fixtures.html', `${outdir}/index.html`);
+  process.exit(0);
+}
 fs.copyFileSync('public/index.html', `${outdir}/index.html`);
 fs.copyFileSync('src/wasm/signal_migration_wasm_bg.wasm', `${outdir}/signal_migration_wasm_bg.wasm`);
 for (const file of fs.readdirSync(tdwebDist)) {
