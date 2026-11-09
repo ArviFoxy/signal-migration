@@ -2,7 +2,7 @@
 // Pause stay at the top of the window; the pack in progress comes first in the queue, and the queue can be filtered.
 
 import { html, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import {
   icons,
   primaryButton,
@@ -60,6 +60,8 @@ function status(entry: PackEntry, next: boolean): { label: string; tone: keyof t
 
 @customElement('sticker-migrate-step')
 export class StickerMigrateStep extends MigrationView {
+  /** The workflow finished: Signal unlinked, Telegram signed out, nothing kept. The screen stays as it was. */
+  @property({ attribute: false }) finished = false;
   @state() private filter: Filter = 'all';
 
   private row(entry: PackEntry, next: boolean) {
@@ -75,6 +77,37 @@ export class StickerMigrateStep extends MigrationView {
       </span>
       <span class="${CHIP} ${TONES[tone]}">${label}</span>
     </li>`;
+  }
+
+  /** The footer's actions; the footer itself is always there, so that nothing moves when the migration ends. */
+  private actions(finished: boolean, failed: number) {
+    const migration = this.migration;
+    if (this.finished) {
+      return html`<span></span>
+        <button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>Start over</button>`;
+    }
+    if (!finished) {
+      return html`<span></span>
+        <button
+          type="button"
+          class=${secondaryButton}
+          @click=${() => (migration.paused ? migration.resume() : migration.pause())}
+        >
+          ${migration.paused ? 'Resume uploads' : 'Pause uploads'}
+        </button>`;
+    }
+    const retry =
+      migration.phase === 'stopped'
+        ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('relink')}>
+            Link Signal again
+          </button>`
+        : failed > 0
+          ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
+              Retry failed packs
+            </button>`
+          : html`<span></span>`;
+    return html`${retry}
+      <button type="button" class=${primaryButton} @click=${() => this.emit('finish')}>Finish</button>`;
   }
 
   render() {
@@ -105,7 +138,10 @@ export class StickerMigrateStep extends MigrationView {
       { id: 'failed', label: 'Failed' },
     ];
 
-    return html`${stepHeader(6, finished ? 'Migration finished' : 'Migrating', 'Keep this page open until the uploads finish. After a reload it continues where it stopped.')}
+    const description = this.finished
+      ? 'Signal was unlinked and Telegram signed out. Nothing is kept in this browser.'
+      : 'Keep this page open until the uploads finish. After a reload it continues where it stopped.';
+    return html`${stepHeader(6, finished ? 'Migration finished' : 'Migrating', description)}
     ${stickyBar(
       html`<div class="grid gap-4 sm:grid-cols-2">
           ${
@@ -148,17 +184,6 @@ export class StickerMigrateStep extends MigrationView {
                   : html`<span class="text-muted">${migration.paused ? 'Paused' : 'Running'}</span>`
             }
           </span>
-          ${
-            finished
-              ? nothing
-              : html`<button
-                  type="button"
-                  class="${secondaryButton} min-h-9 px-4 text-sm"
-                  @click=${() => (migration.paused ? migration.resume() : migration.pause())}
-                >
-                  ${migration.paused ? 'Resume' : 'Pause'}
-                </button>`
-          }
         </div>`,
     )}
     ${migration.stopReason ? html`<p class="text-danger" role="alert">${migration.stopReason}.</p>` : nothing}
@@ -194,22 +219,6 @@ export class StickerMigrateStep extends MigrationView {
           </section>`
         : nothing
     }
-    ${
-      finished
-        ? stickyFooter(
-            html`${
-                migration.phase === 'stopped'
-                  ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('relink')}>
-                      Link Signal again
-                    </button>`
-                  : failed > 0
-                    ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
-                        Retry failed packs
-                      </button>`
-                    : html`<span></span>`
-              } <button type="button" class=${primaryButton} @click=${() => this.emit('finish')}>Finish</button>`,
-          )
-        : nothing
-    }`;
+    ${stickyFooter(this.actions(finished, failed))}`;
   }
 }

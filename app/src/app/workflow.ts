@@ -11,7 +11,7 @@ import type * as Td from 'tdlib-types';
 import { type PackEntry, StickerMigration } from '../kinds/stickers/migration';
 import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from './services';
 
-export const ROUTES = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate', 'done'] as const;
+export const ROUTES = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate'] as const;
 export type Route = (typeof ROUTES)[number];
 export type ConnectionState = 'off' | 'wait' | 'on' | 'ended';
 
@@ -51,6 +51,8 @@ export class Workflow extends EventTarget {
   signal: ConnectionState = 'off';
   unlinkedAutomatically = false;
   stickers: StickerMigration | null = null;
+  /** The migration ended: Signal unlinked, Telegram signed out, the snapshot deleted. */
+  finished = false;
   #started = false;
   #telegramSettled: ((outcome: 'ready' | 'login') => void) | null = null;
 
@@ -86,7 +88,7 @@ export class Workflow extends EventTarget {
   }
 
   #save(): void {
-    if (this.route === 'done' || this.restoring) return;
+    if (this.finished || this.restoring) return;
     this.services.snapshots.save(this.#snapshot()).catch((error) => {
       this.error = `This browser could not keep the migration's progress: ${message(error)}`;
       this.#changed();
@@ -104,7 +106,7 @@ export class Workflow extends EventTarget {
     switch (route) {
       case 'start':
       case 'telegram':
-        return this.route !== 'done';
+        return !this.finished;
       case 'packs':
         return this.telegram === 'on' && this.stickers !== null;
       case 'signal':
@@ -112,9 +114,7 @@ export class Workflow extends EventTarget {
       case 'review':
         return this.device !== null && this.stickers !== null;
       case 'migrate':
-        return this.#started && this.device !== null;
-      case 'done':
-        return this.route === 'done';
+        return this.#started && (this.device !== null || this.finished);
     }
   }
 
@@ -273,9 +273,13 @@ export class Workflow extends EventTarget {
     return this.#act(() => this.#runMigration());
   }
 
-  /** Ends the migration: unlinks Signal, signs out of Telegram and deletes everything kept in the browser. */
+  /**
+   * Ends the migration: unlinks Signal, signs out of Telegram and deletes everything kept in the browser. The
+   * migration screen stays as it is, in its final state.
+   */
   async #finish(): Promise<void> {
-    this.#go('done');
+    this.finished = true;
+    this.#changed();
     const errors: string[] = [];
     if (this.device) {
       await this.device.unlink().catch((error) => errors.push(`Unlinking Signal failed: ${message(error)}`));
@@ -328,6 +332,7 @@ export class Workflow extends EventTarget {
       signal: 'off',
       unlinkedAutomatically: false,
       stickers: null,
+      finished: false,
     });
     this.#started = false;
     this.#changed();

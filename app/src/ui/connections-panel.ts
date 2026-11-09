@@ -68,7 +68,7 @@ export class ConnectionsPanel extends LightElement {
   @property({ attribute: false }) signal!: Connection;
   @property({ attribute: false }) index!: Connection;
   @property({ attribute: false }) placement: keyof typeof PLACEMENT = 'side';
-  /** The ID of the confirmation card that "Clear everything" opens. */
+  /** The ID of the confirmation card that "Disconnect and clear local state" opens. */
   @property({ attribute: false }) clearTarget = '';
   /** Whether there is anything to clear; the button stays in place either way. */
   @property({ attribute: false }) canClear = false;
@@ -147,7 +147,7 @@ export class ConnectionsPanel extends LightElement {
         ?disabled=${!this.canClear}
         class="mt-1 cursor-pointer self-start text-[13px] font-semibold text-danger hover:underline disabled:cursor-default disabled:text-line-strong disabled:no-underline"
       >
-        Clear everything
+        Disconnect and clear local state
       </button>
       <a
         href=${SOURCE_CODE}

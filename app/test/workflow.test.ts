@@ -59,7 +59,8 @@ describe('the workflow', () => {
     expect(page.workflow.route).toBe('review');
     const deviceId = page.workflow.device!.deviceId;
     await page.workflow.startMigration();
-    expect(page.workflow.route).toBe('done');
+    expect(page.workflow.route).toBe('migrate');
+    expect(page.workflow.finished).toBe(true);
     expect(page.workflow.error).toBeNull();
     expect(await alice.installedTitles()).toEqual(['A', 'B']);
     expect(browser.snapshot).toBeNull();
@@ -82,7 +83,8 @@ describe('the workflow', () => {
 
     await world.clock.advance(5 * 60 * MINUTE);
     const second = await openPage(alice, browser);
-    expect(second.workflow.route).toBe('done');
+    expect(second.workflow.route).toBe('migrate');
+    expect(second.workflow.finished).toBe(true);
     expect(world.signal.devices(alice.aci)).toEqual([1, deviceId]);
     expect(await alice.installedTitles()).toEqual(['A', 'B', 'C', 'D', 'E']);
     expect(world.signal.packsUploaded.get(alice.aci)).toBe(5);

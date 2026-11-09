@@ -1,4 +1,4 @@
-// The wizard's view: the step list, connections and "Clear everything" on the left, the current step on the right.
+// The wizard's view: the step list, connections and "Disconnect and clear local state" on the left, the current step on the right.
 // It holds no state of its own beyond what is on screen: it reads the workflow (app/workflow.ts) and calls its
 // actions, and re-renders when the workflow changes.
 //
@@ -8,7 +8,6 @@
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import type { ConnectionState, Workflow } from '../app/workflow';
-import '../kinds/stickers/ui/done-step';
 import '../kinds/stickers/ui/migrate-step';
 import '../kinds/stickers/ui/packs-step';
 import '../kinds/stickers/ui/review-step';
@@ -18,7 +17,7 @@ import { icons, LightElement, primaryButton, secondaryButton, STEP_LABELS, stepH
 import './signal-step';
 import './telegram-step';
 
-const STEP_ORDER = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate', 'done'] as const;
+const STEP_ORDER = ['start', 'telegram', 'packs', 'signal', 'review', 'migrate'] as const;
 
 @customElement('migration-app')
 export class MigrationApp extends LightElement {
@@ -66,7 +65,7 @@ export class MigrationApp extends LightElement {
       },
       signal: { state: w.signal, status: signalStatus[w.signal], action: { label: 'Unlink', event: 'signal-unlink' } },
       index: {
-        state: !contacted ? 'off' : w.route === 'done' ? 'ended' : 'on',
+        state: !contacted ? 'off' : w.finished ? 'ended' : 'on',
         status: !contacted
           ? 'Not contacted'
           : added > 0
@@ -76,7 +75,7 @@ export class MigrationApp extends LightElement {
     };
   }
 
-  /** The connections, "Clear everything" and the source code link; in the sidebar, or in a card on narrow screens. */
+  /** The connections, "Disconnect and clear local state" and the source code link; in the sidebar, or in a card on narrow screens. */
   private connectionsPanel(placement: 'side' | 'below') {
     const connections = this.connections();
     const w = this.workflow;
@@ -87,7 +86,7 @@ export class MigrationApp extends LightElement {
         .index=${connections.index}
         .placement=${placement}
         .clearTarget=${clearId}
-        .canClear=${w.telegramSession !== null || w.device !== null || w.stickers !== null}
+        .canClear=${!w.finished && (w.telegramSession !== null || w.device !== null || w.stickers !== null)}
         @telegram-sign-out=${() => w.signOutOfTelegram()}
         @signal-unlink=${() => w.unlinkSignal()}
       ></connections-panel>
@@ -97,10 +96,11 @@ export class MigrationApp extends LightElement {
         class="m-auto w-[min(420px,calc(100vw-32px))] rounded-2xl bg-white p-6 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] ring-1 ring-line backdrop:bg-ink/20"
       >
         <div class="flex flex-col gap-4">
-          <h3 class="font-display text-lg font-semibold">Clear everything?</h3>
+          <h3 class="font-display text-lg font-semibold">Disconnect and clear local state?</h3>
           <p class="text-[15px]">
-            This signs out of Telegram, unlinks the Signal device, and deletes what this page keeps in your browser.
-            Packs already uploaded and installed stay in Signal.
+            This signs out of Telegram, unlinks this page's device from Signal, and deletes what this page keeps in your
+            browser, then starts over. Nothing in your Telegram or Signal account is deleted: packs already added stay
+            in Signal.
           </p>
           <div class="flex justify-end gap-3">
             <button type="button" popovertarget=${clearId} popovertargetaction="hide" class=${secondaryButton}>
@@ -114,7 +114,7 @@ export class MigrationApp extends LightElement {
                 void w.clearEverything();
               }}
             >
-              Clear everything
+              Disconnect and clear
             </button>
           </div>
         </div>
@@ -254,16 +254,10 @@ export class MigrationApp extends LightElement {
           .migration=${w.stickers}
           @retry=${() => w.startMigration()}
           @relink=${() => w.navigate('signal')}
+          .finished=${w.finished}
           @finish=${() => w.finish()}
-        ></sticker-migrate-step>`;
-      case 'done':
-        return html`<sticker-done-step
-          class="contents"
-          .migration=${w.stickers}
-          .telegramStatus=${w.telegram === 'on' ? 'Signing out…' : 'Signed out'}
-          .signalStatus=${w.device ? 'Unlinking…' : w.unlinkedAutomatically ? 'Unlinked automatically' : 'Unlinked'}
           @restart=${() => w.startOver()}
-        ></sticker-done-step>`;
+        ></sticker-migrate-step>`;
     }
   }
 
