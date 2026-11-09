@@ -140,21 +140,24 @@ export class StickerPage {
     });
   }
 
+  /** Reads the packs, looks them up in the index, loads the previews and applies the selection. */
   async readTelegram(): Promise<void> {
     await this.migration.readTelegram(this.user.stickers);
+    await this.migration.lookUpInIndex();
+    await this.migration.loadPreviews(this.user.stickers);
+    for (const entry of this.migration.entries) {
+      if (this.options.select && !this.options.select(entry.pack.title)) this.migration.setSelected(entry, false);
+    }
   }
 
   async download(): Promise<void> {
     await this.migration.download(this.user.stickers);
   }
 
-  /** Links a new device, reads which packs the account has, and applies the selection. */
+  /** Links a new device and reads which packs the account has. */
   async linkSignal(): Promise<void> {
     this.account = this.user.linkDevice();
     await this.migration.readSignal(this.account);
-    for (const entry of this.migration.entries) {
-      if (this.options.select && !this.options.select(entry.pack.title)) this.migration.setSelected(entry, false);
-    }
   }
 
   async run(): Promise<void> {

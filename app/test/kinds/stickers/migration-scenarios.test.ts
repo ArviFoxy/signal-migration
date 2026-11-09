@@ -300,7 +300,7 @@ describe('failures', () => {
 });
 
 describe('choices', () => {
-  // Detects: deselected packs being uploaded or installed anyway.
+  // Detects: deselected packs being downloaded, uploaded or installed anyway.
   it('leaves deselected packs alone', async () => {
     const world = new StickerWorld();
     const alice = world.user([world.pack('A'), world.pack('B'), world.pack('C')]);
@@ -308,6 +308,7 @@ describe('choices', () => {
     expect(await alice.installedTitles()).toEqual(['A', 'C']);
     expect(world.signal.packsUploaded.get(alice.aci)).toBe(2);
     expect(page.entry('B').state).toBe('to-upload');
+    expect(alice.stickers.stickerReads('B')).toBe(0);
   });
 
   // Detects: a pack Signal cannot hold (over 200 stickers) being selectable.

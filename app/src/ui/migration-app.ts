@@ -38,6 +38,7 @@ export class MigrationApp extends LightElement {
   @state() private migration: StickerMigration | null = null;
   @state() private error: string | null = null;
   @state() private movingStickers = true;
+  @state() private packsStage: 'choose' | 'download' = 'choose';
 
   connectedCallback(): void {
     super.connectedCallback();
@@ -86,7 +87,7 @@ export class MigrationApp extends LightElement {
     this.telegramConnection = 'ended';
   }
 
-  /** Reads and downloads the packs, then signs out of Telegram unless a download failed. */
+  /** Reads the pack list; the index lookup and the previews continue in the background while the user chooses. */
   private async readPacks(): Promise<void> {
     this.go('packs');
     if (this.migration?.entries.length) return;
@@ -94,14 +95,27 @@ export class MigrationApp extends LightElement {
     // The connections panel shows the migration's progress (packs added to the index).
     migration.addEventListener('change', () => this.requestUpdate());
     this.migration = migration;
-    await migration.readTelegram(this.telegram!.source);
-    await migration.download(this.telegram!.source);
-    if (!migration.entries.some((entry) => entry.state === 'failed')) await this.signOutOfTelegram();
+    this.packsStage = 'choose';
+    const source = this.telegram!.source;
+    await migration.readTelegram(source);
+    migration.lookUpInIndex().catch((error) => (this.error = message(error)));
+    void migration.loadPreviews(source);
   }
 
-  private async retryDownload(): Promise<void> {
-    await this.migration!.download(this.telegram!.source);
-    if (!this.migration!.entries.some((entry) => entry.state === 'failed')) await this.signOutOfTelegram();
+  /** Downloads the chosen packs that are not on Signal yet; when all succeeded, signs out of Telegram and moves on. */
+  private async downloadPacks(): Promise<void> {
+    const migration = this.migration!;
+    this.packsStage = 'download';
+    migration.stopPreviews();
+    await migration.download(this.telegram!.source);
+    if (!migration.selected.some((entry) => entry.state === 'failed')) await this.leavePacks();
+  }
+
+  /** Continues without the packs whose download failed. */
+  private async skipFailedPacks(): Promise<void> {
+    for (const entry of this.migration!.selected)
+      if (entry.state === 'failed') this.migration!.setSelected(entry, false);
+    await this.leavePacks();
   }
 
   private async leavePacks(): Promise<void> {
@@ -204,7 +218,7 @@ export class MigrationApp extends LightElement {
     const connections = this.connections();
     return html`<nav
       aria-label="Migration steps"
-      class="flex flex-[1_1_240px] flex-col gap-7 border-r border-line bg-panel px-7 py-8"
+      class="flex flex-[1_1_272px] flex-col gap-7 border-r border-line bg-panel px-6 py-8"
     >
       <div class="font-display text-base font-semibold">signal-migration</div>
       <ol class="flex flex-col gap-4">
@@ -297,10 +311,11 @@ export class MigrationApp extends LightElement {
         return html`<sticker-packs-step
           class=${STEP_CLASS}
           .migration=${this.migration}
-          .telegramOpen=${this.telegram !== null}
-          @retry-download=${() => this.run(() => this.retryDownload())}
+          .stage=${this.packsStage}
+          @retry-download=${() => this.run(() => this.downloadPacks())}
+          @skip-failed=${() => this.run(() => this.skipFailedPacks())}
           @back=${() => this.go('telegram')}
-          @next=${() => this.run(() => this.leavePacks())}
+          @next=${() => this.run(() => this.downloadPacks())}
         ></sticker-packs-step>`;
       case 'signal':
         return html`<signal-step

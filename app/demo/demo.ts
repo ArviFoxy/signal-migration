@@ -21,7 +21,7 @@ import { contactRecord, initialStorage } from '../test/scenario/storage-builder'
 import { FakeIndex } from '../test/scenario/stickers/fake-index';
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
-const PACKS: { title: string; emoji: string; colour: string; format: StickerFormat; count: number }[] = [
+const BASE_PACKS: { title: string; emoji: string; colour: string; format: StickerFormat; count: number }[] = [
   { title: 'Fox Friends', emoji: '🦊', colour: '#F2D8C4', format: 'tgs', count: 12 },
   { title: 'Sleepy Wolves', emoji: '🐺', colour: '#CFD8EE', format: 'webp', count: 8 },
   { title: 'Dragon Moods', emoji: '🐉', colour: '#D9E8D3', format: 'tgs', count: 10 },
@@ -31,10 +31,25 @@ const PACKS: { title: string; emoji: string; colour: string; format: StickerForm
   { title: 'Raccoon Gremlins', emoji: '🦝', colour: '#E6F0E2', format: 'tgs', count: 7 },
   { title: 'Deer Days', emoji: '🦌', colour: '#F2E3EF', format: 'webp', count: 5 },
 ];
-/** Packs that other people already migrated, so that they are on Signal before the demo starts. */
-const ALREADY_UPLOADED = ['Sleepy Wolves', 'Bun Reactions', 'Deer Days'];
+/** How many packs the demo account has: `?packs=170` in the address, otherwise the eight above. */
+const PACK_COUNT = Number(new URLSearchParams(location.search).get('packs')) || BASE_PACKS.length;
+const PACKS = Array.from({ length: PACK_COUNT }, (_, i) => {
+  const base = BASE_PACKS[i % BASE_PACKS.length];
+  const round = Math.floor(i / BASE_PACKS.length);
+  return { ...base, title: round === 0 ? base.title : `${base.title} ${round + 1}`, count: base.count + (round % 5) };
+});
+/** Packs that other people already migrated, so that they are on Signal before the demo starts: every third. */
+const ALREADY_UPLOADED = new Set(PACKS.filter((_, i) => i % 3 === 1).map((pack) => pack.title));
 
-async function stickerImage(emoji: string, colour: string, n: number): Promise<Uint8Array> {
+/** Sticker images are drawn once per emoji, colour and size, then reused. */
+const images = new Map<string, Promise<Uint8Array>>();
+function stickerImage(emoji: string, colour: string, n: number): Promise<Uint8Array> {
+  const key = `${emoji}${colour}${n % 3}`;
+  if (!images.has(key)) images.set(key, drawSticker(emoji, colour, n));
+  return images.get(key)!;
+}
+
+async function drawSticker(emoji: string, colour: string, n: number): Promise<Uint8Array> {
   const canvas = new OffscreenCanvas(128, 128);
   const context = canvas.getContext('2d')!;
   context.fillStyle = colour;
@@ -86,7 +101,9 @@ const convert: ConvertSticker = async (file, format) => {
 
 async function setUp(): Promise<AppServices> {
   await loadSignalWasm();
-  const signal = new FakeSignal(systemClock, { burst: 3, intervalMs: 30_000 });
+  // The publisher of earlier uploads has no upload limit; the user's account gets a small one, so that the wait
+  // for Signal's limit shows within a minute.
+  const signal = new FakeSignal(systemClock, { burst: Infinity, intervalMs: 30_000 });
   const index = new FakeIndex(systemClock);
   const { packs, files } = await telegramData();
 
@@ -96,7 +113,7 @@ async function setUp(): Promise<AppServices> {
   const slowHttps: HttpsRequest = async (...args) => (await delay(80), signal.https(...args));
 
   const publisher = signal.chat(signal.createAccount(), 1);
-  for (const pack of packs.filter((candidate) => ALREADY_UPLOADED.includes(candidate.title))) {
+  for (const pack of packs.filter((candidate) => ALREADY_UPLOADED.has(candidate.title))) {
     const identity = await packIdentity(pack);
     const stickers = pack.stickers.map((sticker) => ({ image: files.get(sticker.fileId)!, emoji: sticker.emoji }));
     const packId = await uploadStickerPack(
@@ -109,6 +126,7 @@ async function setUp(): Promise<AppServices> {
     await index.backend.add(new Uint8Array([...identity.lookupKey, ...packId]));
   }
 
+  signal.uploadLimit = { burst: 3, intervalMs: 30_000 };
   const aci = signal.createAccount();
   const masterKey = crypto.getRandomValues(new Uint8Array(32));
   const seeded = initialStorage(masterKey, crypto.getRandomValues(new Uint8Array(32)), [
@@ -125,7 +143,7 @@ async function setUp(): Promise<AppServices> {
       }
       return structuredClone(packs);
     },
-    readFile: async (fileId) => (await delay(25), files.get(fileId)!.slice()),
+    readFile: async (fileId) => (await delay(120), files.get(fileId)!.slice()),
   };
 
   return {
@@ -187,5 +205,22 @@ async function setUp(): Promise<AppServices> {
   };
 }
 
+/** The demo's services as soon as the page loads; each call waits for the setup, and fails with its error. */
+function servicesAfter(setup: Promise<AppServices>): AppServices {
+  return {
+    telegramApp: async () => (await setup).telegramApp(),
+    startTelegram: async (...args) => (await setup).startTelegram(...args),
+    linkSignal: async (...args) => (await setup).linkSignal(...args),
+    migration: () => {
+      throw new Error('the demo is still setting up');
+    },
+  };
+}
+
 const app = document.querySelector('migration-app') as MigrationApp;
-void setUp().then((services) => (app.services = services));
+const setup = setUp();
+app.services = servicesAfter(setup);
+setup.then(
+  (services) => (app.services = services),
+  (error) => console.error('the demo could not set up', error),
+);

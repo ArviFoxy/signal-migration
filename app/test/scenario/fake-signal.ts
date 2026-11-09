@@ -86,7 +86,8 @@ export class FakeSignal {
 
   constructor(
     readonly clock: Pick<Clock, 'now'>,
-    readonly uploadLimit: UploadLimit = { burst: 50, intervalMs: 72 * 60_000 },
+    /** The upload limit of accounts created from now on. */
+    public uploadLimit: UploadLimit = { burst: 50, intervalMs: 72 * 60_000 },
   ) {}
 
   /** A new account ID, made at random so that no real-looking identifier is written into the tests. */
