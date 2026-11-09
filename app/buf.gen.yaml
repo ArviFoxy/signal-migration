@@ -9,6 +9,7 @@ inputs:
       - ../third_party/Signal-Desktop/protos/Stickers.proto
       - ../third_party/Signal-Desktop/protos/DeviceMessages.proto
       - ../third_party/Signal-Desktop/protos/DeviceName.proto
+      - ../third_party/Signal-Desktop/protos/SignalStorage.proto
 plugins:
   - local: protoc-gen-es
     out: src/gen
