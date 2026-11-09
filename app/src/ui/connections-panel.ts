@@ -22,8 +22,8 @@ const DOTS: Record<ConnectionState, string> = {
 const code = (text: string) => html`<code class="rounded bg-segment px-1 py-0.5 text-[12px]">${text}</code>`;
 
 /**
- * What each connection is: one plain sentence about the connection and its encryption, one technical line, when it
- * ends, and a diagram of it.
+ * What each connection is: one plain sentence about the connection and its encryption, one technical line, and a
+ * diagram of it.
  */
 const INFO: Record<
   'telegram' | 'signal' | 'index',
@@ -32,7 +32,6 @@ const INFO: Record<
     diagram?: { parts: DiagramPart[]; encryption: string };
     plain: string;
     technical: TemplateResult;
-    ends?: string;
   }
 > = {
   telegram: {
@@ -48,7 +47,6 @@ const INFO: Record<
     plain: 'Your browser talks to Telegram directly. The connection is encrypted, and only Telegram can read it.',
     technical: html`Your browser runs TDLib, Telegram's own library. TDLib connects to ${code('*.web.telegram.org')}
     over a WebSocket and encrypts everything with MTProto, Telegram's protocol.`,
-    ends: 'Signed out of Telegram when the migration is done.',
   },
   signal: {
     title: 'Signal',
@@ -67,7 +65,6 @@ const INFO: Record<
     technical: html`Signal uses their own certificate authority which is not trusted by the browser. To work around this
     the browser opens a WebSocket to the migration server, and runs its own TLS connection to ${code('*.signal.org')}
     inside it, checked against Signal's root certificate.`,
-    ends: 'Linked only while the migration runs, and unlinked automatically when it finishes.',
   },
   index: {
     title: 'Sticker pack index',
@@ -123,7 +120,6 @@ export class ConnectionsPanel extends LightElement {
           <span class="flex flex-col gap-2">
             <span class="text-sm leading-snug">${info.plain}</span>
             <span class="text-xs leading-relaxed text-muted">${info.technical}</span>
-            ${info.ends ? html`<span class="text-xs leading-relaxed text-muted">${info.ends}</span>` : nothing}
           </span>
         </p>
         ${info.diagram ? connectionDiagram(info.diagram.parts, info.diagram.encryption) : nothing}
