@@ -8,7 +8,7 @@ import QRCode from 'qrcode';
 import { ProvisioningAddressSchema } from './gen/chat_provisioning_pb';
 import { ProvisionMessageSchema } from './gen/DeviceMessages_pb';
 import { DeviceNameSchema } from './gen/DeviceName_pb';
-import { SignalSocket } from './signal-socket';
+import { SignalSocket, SocketClosedError } from './signal-socket';
 import init, {
   encryptDeviceName,
   generateKyberLastResortPreKey,
@@ -137,9 +137,16 @@ export async function runLinkCycle(callbacks: LinkCycleCallbacks): Promise<void>
       const list = parseJson<{ devices: { id: number }[] }>(devices.body).devices;
       report(`login: OK, the account has ${list.length} devices, including this one: ${list.some((d) => d.id === deviceId)}`);
 
-      const removal = await session.request('DELETE', `/v1/devices/${deviceId}`);
-      unlinked = removal.status === 200 || removal.status === 204;
-      report(unlinked ? 'unlink: OK, device removed' : `unlink: FAILED, server answered ${removal.status}`);
+      try {
+        const removal = await session.request('DELETE', `/v1/devices/${deviceId}`);
+        unlinked = removal.status === 200 || removal.status === 204;
+        report(unlinked ? 'unlink: OK, device removed' : `unlink: FAILED, server answered ${removal.status}`);
+      } catch (error) {
+        // The server closes a removed device's socket with 4401, often before the DELETE response arrives.
+        if (!(error instanceof SocketClosedError && error.code === 4401)) throw error;
+        unlinked = true;
+        report('unlink: OK, device removed (the server closed its socket with 4401)');
+      }
     } finally {
       session.close();
     }

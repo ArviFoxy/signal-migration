@@ -15,6 +15,13 @@ export type ServerRequestHandler = (request: WebSocketRequestMessage) => number;
  * A Signal chat WebSocket: request/response messages in both directions, matched by id.
  * Server-initiated requests (queued messages, "queue empty") go to `onServerRequest`.
  */
+/** The socket closed while a request was waiting for its response. */
+export class SocketClosedError extends Error {
+  constructor(readonly code: number) {
+    super(`socket closed (code ${code})`);
+  }
+}
+
 /** How often to send Signal's keepalive request. Signal's clients use about 30 s; idle sockets get dropped. */
 const KEEPALIVE_INTERVAL_MS = 30_000;
 
@@ -33,7 +40,7 @@ export class SignalSocket {
     socket.onmessage = (event) => this.#receive(new Uint8Array(event.data as ArrayBuffer));
     socket.onclose = (event) => {
       clearInterval(this.#keepalive);
-      for (const { reject } of this.#pending.values()) reject(new Error(`socket closed (code ${event.code})`));
+      for (const { reject } of this.#pending.values()) reject(new SocketClosedError(event.code));
       this.#pending.clear();
       if (!this.#closedByUs) this.onUnexpectedClose(event.code);
     };
