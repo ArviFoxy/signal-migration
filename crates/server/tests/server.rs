@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use futures_util::{SinkExt, StreamExt};
 use signal_migration_server::index::{AddressLimiter, ENTRY_LEN, Index};
 use signal_migration_server::relay::RelayTargets;
-use signal_migration_server::{Config, router};
+use signal_migration_server::{ClientConfig, Config, TelegramApp, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -20,9 +20,13 @@ struct TestServer {
 }
 
 async fn start(relay_targets: RelayTargets) -> TestServer {
+    start_with_client_config(relay_targets, ClientConfig { telegram: None }).await
+}
+
+async fn start_with_client_config(relay_targets: RelayTargets, client: ClientConfig) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let index_path = dir.path().join("index.bin");
-    let config = Config { static_dir: dir.path().to_path_buf(), index: Index::open(index_path.clone()).await.unwrap(), relay_targets, diagnostics_log: false };
+    let config = Config { static_dir: dir.path().to_path_buf(), index: Index::open(index_path.clone()).await.unwrap(), relay_targets, diagnostics_log: false, client };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     tokio::spawn(async move {
@@ -97,7 +101,7 @@ async fn appended_entry_is_read_back_and_persists_across_restart() {
     let restarted = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
-        let config = Config { static_dir: std::env::temp_dir(), index: reopened, relay_targets: RelayTargets::signal(), diagnostics_log: false };
+        let config = Config { static_dir: std::env::temp_dir(), index: reopened, relay_targets: RelayTargets::signal(), diagnostics_log: false, client: ClientConfig { telegram: None } };
         tokio::spawn(async move { axum::serve(listener, router(config).into_make_service_with_connect_info::<SocketAddr>()).await.unwrap() });
         address
     };
@@ -160,4 +164,13 @@ fn address_limiter_refuses_when_empty_and_refills_over_time() {
     assert!(!limiter.allow(address, start));
     assert!(limiter.allow(address, start + Duration::from_secs(10)));
     assert!(!limiter.allow(address, start + Duration::from_secs(10)));
+}
+
+/// Detects: the page not receiving the Telegram app identity it needs to start TDLib, or receiving it under other names.
+#[tokio::test]
+async fn config_carries_the_telegram_app_identity() {
+    let client = ClientConfig { telegram: Some(TelegramApp { api_id: 12345, api_hash: "0123456789abcdef".into() }) };
+    let server = start_with_client_config(RelayTargets::signal(), client).await;
+    let body = reqwest::Client::new().get(format!("http://{}/v1/config", server.base)).send().await.unwrap().text().await.unwrap();
+    assert_eq!(body, r#"{"telegram":{"apiId":12345,"apiHash":"0123456789abcdef"}}"#);
 }
