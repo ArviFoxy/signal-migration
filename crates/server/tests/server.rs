@@ -206,63 +206,6 @@ async fn read_from_offset_returns_only_later_entries() {
     assert_eq!(body.as_ref(), entry(3).as_slice());
 }
 
-fn claim_body(lookup_key: u8, claimant: u8) -> Vec<u8> {
-    [vec![lookup_key; 32], vec![claimant; 32]].concat()
-}
-
-/// Detects: two uploaders both being allowed to upload the same pack at once.
-#[tokio::test]
-async fn claim_by_someone_else_is_refused_while_the_first_holds() {
-    let server = start(RelayTargets::signal()).await;
-    let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/sticker-packs/claims", server.base);
-    assert_eq!(
-        client.post(&url).body(claim_body(9, 1)).send().await.unwrap().status(),
-        201
-    );
-    assert_eq!(
-        client.post(&url).body(claim_body(9, 2)).send().await.unwrap().status(),
-        409
-    );
-    assert_eq!(
-        client.post(&url).body(claim_body(8, 2)).send().await.unwrap().status(),
-        201
-    );
-}
-
-/// Detects: an uploader being locked out of its own pack for the claim's lifetime after a failed upload.
-#[tokio::test]
-async fn holder_can_renew_its_claim() {
-    let server = start(RelayTargets::signal()).await;
-    let client = reqwest::Client::new();
-    let url = format!("http://{}/v1/sticker-packs/claims", server.base);
-    assert_eq!(
-        client.post(&url).body(claim_body(9, 1)).send().await.unwrap().status(),
-        201
-    );
-    assert_eq!(
-        client.post(&url).body(claim_body(9, 1)).send().await.unwrap().status(),
-        201
-    );
-}
-
-/// Detects: a claim without a claimant token (the earlier format) being accepted and then held by nobody.
-#[tokio::test]
-async fn claim_without_claimant_is_rejected() {
-    let server = start(RelayTargets::signal()).await;
-    let url = format!("http://{}/v1/sticker-packs/claims", server.base);
-    assert_eq!(
-        reqwest::Client::new()
-            .post(&url)
-            .body(vec![9u8; 32])
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        400
-    );
-}
-
 /// Detects: the per-address limit never refusing, or never letting a client back in after waiting.
 #[test]
 fn address_limiter_refuses_when_empty_and_refills_over_time() {

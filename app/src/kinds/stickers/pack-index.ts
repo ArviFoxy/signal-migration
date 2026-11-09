@@ -2,7 +2,7 @@
 // which Signal pack ID. An entry is a pack's lookup key (identity.ts) and its pack ID, 48 bytes in all.
 //
 // The page downloads the whole index and matches it locally, so the server never learns which packs a user has.
-// It sends the server only lookup keys, when claiming a pack before uploading it and when adding the upload.
+// It sends the server a lookup key only when adding an upload.
 // An entry is trusted only after the pack's manifest, fetched from Signal's CDN, decrypts with the pack key that
 // the user derived from the Telegram pack: a wrong or forged entry fails that check and is ignored.
 
@@ -23,14 +23,12 @@ const PUBLIC_CDN = 'https://cdn-ca.signal.org';
 export const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
 /** The server's answers, as in crates/server/src/index.rs. "busy" is its per-address rate limit. */
-export type ClaimResult = 'granted' | 'held-by-someone-else' | 'busy';
 export type AddResult = 'added' | 'busy';
 
 /** The index server's three operations. */
 export interface IndexBackend {
   /** Entries from number `from` on, concatenated; at most the server's page size. */
   read(from: number): Promise<Uint8Array>;
-  claim(lookupKey: Uint8Array, claimant: Uint8Array): Promise<ClaimResult>;
   add(entry: Uint8Array): Promise<AddResult>;
 }
 
@@ -46,14 +44,6 @@ export const httpIndexBackend: IndexBackend = {
     const response = await fetchServer(`/v1/sticker-packs/index?from=${from}`);
     if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
     return new Uint8Array(await response.arrayBuffer());
-  },
-  async claim(lookupKey, claimant) {
-    const body = new Uint8Array([...lookupKey, ...claimant]);
-    const response = await fetchServer('/v1/sticker-packs/claims', { method: 'POST', body });
-    if (response.status === 201) return 'granted';
-    if (response.status === 409) return 'held-by-someone-else';
-    if (response.status === 429) return 'busy';
-    throw new Error(`claiming a sticker pack answered ${response.status}`);
   },
   async add(entry) {
     const response = await fetchServer('/v1/sticker-packs/index', {
@@ -92,8 +82,6 @@ export class PackIndex {
   #backend: IndexBackend;
   #manifests: ManifestSource;
   #pageSize: number;
-  /** A random token for this page's claims, so that it can renew them; it identifies nothing beyond this visit. */
-  readonly #claimant = crypto.getRandomValues(new Uint8Array(32));
   #packIds = new Map<string, Uint8Array[]>();
   #entryCount = 0;
   #verified = new Map<string, Uint8Array>();
@@ -155,12 +143,7 @@ export class PackIndex {
     return null;
   }
 
-  /** Claims the pack for upload for 15 minutes, or renews this page's own claim. */
-  claim(lookupKey: Uint8Array): Promise<ClaimResult> {
-    return this.#backend.claim(lookupKey, this.#claimant);
-  }
-
-  /** Adds an uploaded pack, which also ends its claim. */
+  /** Adds an uploaded pack. */
   async add(lookupKey: Uint8Array, packId: Uint8Array): Promise<AddResult> {
     const entry = new Uint8Array(ENTRY_LENGTH);
     entry.set(lookupKey, 0);

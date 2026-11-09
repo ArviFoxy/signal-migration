@@ -2,8 +2,6 @@
 //!
 //! Lookup keys are derived from a Telegram pack's content, so only someone who has the pack can compute one.
 //! Clients download the whole list and match it locally; the server never learns which packs a user has.
-//! Short-lived upload claims stop two people from uploading the same pack at once. A claim carries a random token
-//! that the claiming page chose, so that the page can renew its own claim, for example to retry a failed upload.
 //! The server keeps no accounts and logs no client addresses; per-address limits live in memory only.
 
 use std::collections::{HashMap, HashSet};
@@ -21,9 +19,6 @@ use tokio::sync::Mutex;
 
 pub const ENTRY_LEN: usize = 48;
 pub const LOOKUP_KEY_LEN: usize = 32;
-pub const CLAIMANT_LEN: usize = 32;
-/// How long an upload claim holds a pack for one uploader.
-pub const CLAIM_DURATION: Duration = Duration::from_secs(15 * 60);
 /// At most this many entries per read; a client reads again from where the last read ended.
 pub const MAX_ENTRIES_PER_READ: usize = 100_000;
 
@@ -61,10 +56,7 @@ pub struct IndexState {
     path: PathBuf,
     entries: Vec<[u8; ENTRY_LEN]>,
     known: HashSet<[u8; ENTRY_LEN]>,
-    /// Who holds each claim, and until when.
-    claims: HashMap<[u8; LOOKUP_KEY_LEN], ([u8; CLAIMANT_LEN], Instant)>,
     append_limiter: AddressLimiter,
-    claim_limiter: AddressLimiter,
 }
 
 #[derive(Clone)]
@@ -87,9 +79,7 @@ impl Index {
             path,
             entries,
             known,
-            claims: HashMap::new(),
             append_limiter: AddressLimiter::new(60, Duration::from_secs(60)),
-            claim_limiter: AddressLimiter::new(120, Duration::from_secs(30)),
         }))))
     }
 }
@@ -143,37 +133,5 @@ pub async fn append(
     }
     state.entries.push(entry);
     state.known.insert(entry);
-    state
-        .claims
-        .remove(&<[u8; LOOKUP_KEY_LEN]>::try_from(&entry[..LOOKUP_KEY_LEN]).expect("prefix"));
-    StatusCode::CREATED.into_response()
-}
-
-/// `POST /v1/sticker-packs/claims` with a 32-byte lookup key and a 32-byte claimant token: 201 when this caller
-/// may upload the pack now (a new claim, or a renewal of its own), 409 when someone else holds an unexpired claim.
-pub async fn claim(
-    State(index): State<Index>,
-    ConnectInfo(client): ConnectInfo<std::net::SocketAddr>,
-    body: Bytes,
-) -> Response {
-    if body.len() != LOOKUP_KEY_LEN + CLAIMANT_LEN {
-        return StatusCode::BAD_REQUEST.into_response();
-    }
-    let lookup_key: [u8; LOOKUP_KEY_LEN] = body[..LOOKUP_KEY_LEN].try_into().expect("length checked");
-    let claimant: [u8; CLAIMANT_LEN] = body[LOOKUP_KEY_LEN..].try_into().expect("length checked");
-    let now = Instant::now();
-    let mut state = index.0.lock().await;
-    state.claims.retain(|_, (_, expires)| *expires > now);
-    if state
-        .claims
-        .get(&lookup_key)
-        .is_some_and(|(holder, _)| *holder != claimant)
-    {
-        return StatusCode::CONFLICT.into_response();
-    }
-    if !state.claim_limiter.allow(client.ip(), now) {
-        return StatusCode::TOO_MANY_REQUESTS.into_response();
-    }
-    state.claims.insert(lookup_key, (claimant, now + CLAIM_DURATION));
     StatusCode::CREATED.into_response()
 }

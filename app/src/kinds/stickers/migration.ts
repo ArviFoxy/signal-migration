@@ -33,8 +33,6 @@ export type PackState =
    */
   | 'available'
   | 'to-upload'
-  /** Someone else is uploading it right now; looked at again later. */
-  | 'claimed-elsewhere'
   | 'downloading'
   | 'converting'
   | 'uploading'
@@ -90,8 +88,6 @@ const THUMBNAILS_PER_PACK = 4;
 const CONCURRENT_VERIFICATIONS = 6;
 const CONCURRENT_DOWNLOADS = 4;
 const CONCURRENT_CONVERSIONS = 2;
-/** How long to wait before looking again at a pack someone else claimed. */
-const CLAIM_RECHECK_MS = 2 * 60_000;
 /** How long to wait when the index server limits this address. */
 const INDEX_BUSY_WAIT_MS = 60_000;
 const INDEX_ATTEMPTS = 10;
@@ -423,16 +419,6 @@ export class StickerMigration extends EventTarget {
     throw new Error('the Signal account kept changing while installing packs; try again');
   }
 
-  /** Claims the pack; false when someone else holds the claim. Waits while the index server limits requests. */
-  async #claim(entry: PackEntry): Promise<boolean> {
-    for (let attempt = 0; attempt < INDEX_ATTEMPTS; attempt++) {
-      const result = await this.#services.index.claim(entry.identity.lookupKey);
-      if (result !== 'busy') return result === 'granted';
-      await this.#services.clock.sleep(INDEX_BUSY_WAIT_MS);
-    }
-    throw new IndexUnavailableError();
-  }
-
   async #addToIndex(entry: PackEntry): Promise<void> {
     for (let attempt = 0; attempt < INDEX_ATTEMPTS; attempt++) {
       if ((await this.#services.index.add(entry.identity.lookupKey, entry.packId!)) === 'added') {
@@ -523,21 +509,31 @@ export class StickerMigration extends EventTarget {
     this.#changed();
   }
 
-  /** Migrates one pack that is not installed. Returns false when someone else holds its claim. */
-  async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<boolean> {
-    const { lookupKey } = entry.identity;
-    // Someone may have uploaded the pack since the index was read.
+  /** Someone may have uploaded the pack since the index was last read: the pack ID of their upload, or null. */
+  async #uploadedMeanwhile(entry: PackEntry): Promise<Uint8Array | null> {
+    await this.#services.index.refresh();
+    return this.#services.index.find(entry.identity.lookupKey, entry.packKey!);
+  }
+
+  /**
+   * Migrates one pack that is not installed. The index is asked again right before the upload, so that a pack
+   * someone uploaded meanwhile is installed instead of uploaded twice.
+   */
+  async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
     entry.state = 'checking';
     this.#changed();
-    await this.#services.index.refresh();
     // The pack key comes from the stickers themselves, so they are downloaded before the index is asked.
     await this.#download(telegram, entry);
-    entry.packId = await this.#services.index.find(lookupKey, entry.packKey!);
+    entry.packId = await this.#uploadedMeanwhile(entry);
     if (!entry.packId) {
-      if (!(await this.#claim(entry))) return false;
       this.#plannedInstalls.delete(entry);
       this.#plannedUploads.add(entry);
       await this.#prepare(telegram, entry);
+      entry.state = 'checking';
+      this.#changed();
+      entry.packId = await this.#uploadedMeanwhile(entry);
+    }
+    if (!entry.packId) {
       entry.state = 'uploading';
       this.#changed();
       const content = { title: entry.pack.title, stickers: this.#converted.get(entry)! };
@@ -554,15 +550,17 @@ export class StickerMigration extends EventTarget {
         ),
       );
       this.uploaded++;
-      this.#converted.delete(entry);
       await this.#addToIndex(entry);
+    } else if (this.#plannedUploads.delete(entry)) {
+      // Uploaded by someone else while this page converted it: an install after all.
+      this.#plannedInstalls.add(entry);
     }
+    this.#converted.delete(entry);
     this.#originals.delete(entry);
     entry.state = 'installing';
     this.#changed();
     await this.#install(signal, [entry]);
     Object.assign(entry, { state: 'in-signal', progress: null, error: null });
-    return true;
   }
 
   async #waitWhilePaused(cancel: AbortSignal): Promise<void> {
@@ -605,39 +603,19 @@ export class StickerMigration extends EventTarget {
 
     // Packs on Signal whose key needs their stickers come first: installing them never waits for the upload limit.
     const queue = this.selected
-      .filter(
-        (entry) =>
-          entry.state === 'available' ||
-          entry.state === 'to-upload' ||
-          entry.state === 'claimed-elsewhere' ||
-          entry.state === 'failed',
-      )
+      .filter((entry) => entry.state === 'available' || entry.state === 'to-upload' || entry.state === 'failed')
       .sort((a, b) => Number(b.state === 'available') - Number(a.state === 'available'));
     for (const entry of queue) if (!this.#plannedInstalls.has(entry)) this.#plannedUploads.add(entry);
     this.#changed();
-    const recheckAt = new Map<PackEntry, number>();
     while (queue.length > 0) {
       await this.#waitWhilePaused(cancel);
       cancel.throwIfAborted();
       if (!signal.isLinked) break;
-      const index = queue.findIndex((entry) => (recheckAt.get(entry) ?? 0) <= clock.now());
-      if (index < 0) {
-        await untilCancelled(
-          clock.sleep(Math.min(...queue.map((entry) => recheckAt.get(entry)!)) - clock.now()),
-          cancel,
-        );
-        continue;
-      }
-      const [entry] = queue.splice(index, 1);
+      const entry = queue.shift()!;
       entry.error = null;
       try {
-        if (await untilCancelled(this.#migrateOne(signal, telegram, entry), cancel)) {
-          await this.#announce(signal, [entry], false);
-        } else {
-          entry.state = 'claimed-elsewhere';
-          recheckAt.set(entry, clock.now() + CLAIM_RECHECK_MS);
-          queue.push(entry);
-        }
+        await untilCancelled(this.#migrateOne(signal, telegram, entry), cancel);
+        await this.#announce(signal, [entry], false);
       } catch (error) {
         // A cancelled run leaves the pack as it was; the next run takes it up again.
         if (cancel.aborted) throw error;

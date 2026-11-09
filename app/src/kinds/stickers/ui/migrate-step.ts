@@ -194,12 +194,6 @@ export class StickerMigrateStep extends MigrationView {
         };
       case 'installing':
         return { symbol: progressRing(null), detail: 'Adding to your sticker list', tone: 'text-upload-text' };
-      case 'claimed-elsewhere':
-        return {
-          symbol: SYMBOLS.limit,
-          detail: 'Someone else is uploading it · checking again soon',
-          tone: 'text-muted',
-        };
       case 'available':
         return { symbol: SYMBOLS.waiting, detail: 'Already on Signal · will be installed', tone: 'text-muted' };
       default:

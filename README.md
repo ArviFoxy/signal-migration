@@ -30,9 +30,8 @@ Signal's root certificates (the ones libsignal ships).
 ## What the server sees
 
 - **Relay:** encrypted bytes, which Signal host they go to, and when.
-- **Index:** for each uploaded pack, a 32-byte lookup key and the 16-byte Signal pack ID. While a pack is being
-  uploaded, a claim on its lookup key with a random token, so that two people do not upload it at the same time.
-  Client addresses are used for rate limits, in memory only, and are not logged.
+- **Index:** for each uploaded pack, a 32-byte lookup key and the 16-byte Signal pack ID. Client addresses are used
+  for rate limits, in memory only, and are not logged.
 - **Nothing else:** no Telegram traffic, no Signal credentials, no pack keys, no stickers.
 
 ## Pack keys and the index
@@ -47,7 +46,8 @@ Each pack has two values, computed in the browser (`app/src/kinds/stickers/ident
 Both encodings start with a fixed label and give every field a 4-byte length, so two different packs never encode
 the same. This scheme is fixed: changing it would make every earlier upload unfindable.
 
-Everyone who migrates the same Telegram pack computes the same values, so a pack is uploaded once. The index
+Everyone who migrates the same Telegram pack computes the same values, so a pack is uploaded once. Right before
+each upload, the browser reads the entries added since its last read and looks the pack up again. The index
 (`/v1/sticker-packs/index`) is an append-only list of 48-byte entries, `lookup key ‖ pack ID`. The browser downloads
 all of it and searches it locally. Before installing a pack from an entry, it downloads the pack's stickers, computes
 the pack key and checks that the pack's manifest on Signal's CDN decrypts with it.

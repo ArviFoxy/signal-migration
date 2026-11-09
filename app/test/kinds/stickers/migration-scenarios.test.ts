@@ -164,29 +164,27 @@ describe('sharing uploads between users', () => {
     expect(world.signal.packsUploaded.get(carol.aci) ?? 0).toBe(0);
   });
 
-  // Detects: two users uploading the same pack at the same time.
-  it('waits while someone else holds the claim, then installs their upload', async () => {
-    const world = new StickerWorld();
-    const a = world.pack('A');
-    const alice = world.user([a, world.pack('B')]);
-    world.index.claimAsSomeoneElse((await packIdentity(a)).lookupKey);
-    world.clock.after(5 * MINUTE, async () => void (await world.migrateElsewhere(a)));
-    await alice.visit();
-    expect(await alice.installedTitles()).toEqual(['A', 'B']);
-    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
-  });
-
-  // Detects: a pack never being migrated because whoever claimed it closed their page.
-  it('uploads a pack itself once an abandoned claim expires', async () => {
+  // Detects: a pack uploaded twice when someone else uploaded it while this page was converting it: the index must
+  // be asked again right before the upload.
+  it('installs the upload someone made while this page converted the pack, instead of uploading it', async () => {
     const world = new StickerWorld();
     const a = world.pack('A');
     const alice = world.user([a]);
-    world.index.claimAsSomeoneElse((await packIdentity(a)).lookupKey);
-    const start = world.clock.now();
-    await alice.visit();
+    let converting = false;
+    let uploadedElsewhere = false;
+    world.index.beforeRead = async () => {
+      if (!converting || uploadedElsewhere) return;
+      uploadedElsewhere = true;
+      await world.migrateElsewhere(a);
+    };
+    await alice.visit({
+      onChange: (migration) => {
+        if (migration.entries.some((entry) => entry.state === 'converting')) converting = true;
+      },
+    });
+    expect(uploadedElsewhere).toBe(true);
     expect(await alice.installedTitles()).toEqual(['A']);
-    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
-    expect(world.clock.now() - start).toBeGreaterThanOrEqual(15 * MINUTE);
+    expect(world.signal.packsUploaded.get(alice.aci) ?? 0).toBe(0);
   });
 
   // Detects: an upload whose index entry could not be added at first being uploaded a second time.
@@ -330,23 +328,6 @@ describe('failures', () => {
     });
     expect(preparedDuringWait).toBe(true);
     expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
-  });
-
-  // Detects: a retry after a failed upload being blocked by the user's own claim until it expires.
-  it('retries a failed upload at once, renewing its own claim', async () => {
-    const world = new StickerWorld();
-    const alice = world.user([world.pack('A'), world.pack('B')]);
-    world.signal.failNext((request) => request === 'https POST cdn.signal.org /');
-    const page = alice.openPage();
-    await page.readTelegram();
-    await page.linkSignal();
-    await page.run();
-    expect(page.entry('A').state).toBe('failed');
-    expect(await alice.installedTitles()).toEqual(['B']);
-    const start = world.clock.now();
-    await page.run();
-    expect(await alice.installedTitles()).toEqual(['A', 'B']);
-    expect(world.clock.now() - start).toBeLessThan(15 * MINUTE);
   });
 
   // Detects: the migration going on with a device the user unlinked from their phone, sending requests that Signal

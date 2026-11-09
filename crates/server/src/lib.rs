@@ -7,7 +7,7 @@ pub mod relay;
 use std::path::PathBuf;
 
 use axum::extract::State;
-use axum::routing::{get, post};
+use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
 use tower_http::services::ServeDir;
@@ -49,7 +49,6 @@ pub fn demo_router(static_dir: PathBuf) -> Router {
 pub fn router(config: Config) -> Router {
     let index_routes = Router::new()
         .route("/v1/sticker-packs/index", get(index::read).post(index::append))
-        .route("/v1/sticker-packs/claims", post(index::claim))
         .with_state(config.index);
     let relay_routes = Router::new()
         .route("/tunnel/{host}", get(relay::tunnel))
