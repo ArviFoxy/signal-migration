@@ -1,25 +1,46 @@
-// Mirrors the workflow's step in the address bar (#/packs, #/review, ...), so that the browser's Back and Forward
-// buttons move between steps. The workflow decides: an address for a step that is not reachable yet is replaced by
-// the current step's.
+// Mirrors the step on screen in the address bar (#/packs, #/review, ...), so that the browser's Back and Forward
+// buttons move between steps.
+//
+// An address is a request that the workflow may refuse: it is accepted only for a step that can be on screen now
+// (Workflow.canShow). Otherwise the address bar goes back to the step shown, and nothing else happens; an address
+// typed by hand never starts a login or skips a step.
+//
+// Only the user's own navigation (Start, Continue, Back, starting the migration) adds an entry to the browser's
+// history. When the step on screen changes by itself (a login completes, Signal is unlinked from the phone), the
+// current entry is replaced, so that Back leads to steps the user actually went through.
 
-import { ROUTES, type Route, type Workflow } from '../app/workflow';
+import { STEPS, type Step, type Workflow } from '../app/workflow';
 
-const routeOf = (hash: string): Route | null => {
+const stepOf = (hash: string): Step | null => {
   const name = hash.replace(/^#\/?/, '');
-  return (ROUTES as readonly string[]).includes(name) ? (name as Route) : null;
+  return (STEPS as readonly string[]).includes(name) ? (name as Step) : null;
 };
 
+/** What the user asked for: the step asked for in setup, or the phase. */
+const requestOf = (workflow: Workflow) => (workflow.phase.kind === 'setup' ? workflow.phase.step : workflow.phase.kind);
+
 export function connectRouter(workflow: Workflow): void {
-  let shown: Route = workflow.route;
+  let shown: Step = workflow.step;
+  let requested = requestOf(workflow);
+  let followingHistory = false;
   history.replaceState(null, '', `#/${shown}`);
   workflow.addEventListener('change', () => {
-    if (workflow.route === shown) return;
-    shown = workflow.route;
-    if (routeOf(location.hash) !== shown) history.pushState(null, '', `#/${shown}`);
+    const request = requestOf(workflow);
+    const asked = request !== requested && !followingHistory;
+    requested = request;
+    if (workflow.step === shown) return;
+    shown = workflow.step;
+    if (stepOf(location.hash) === shown) return;
+    if (asked) history.pushState(null, '', `#/${shown}`);
+    else history.replaceState(null, '', `#/${shown}`);
   });
   window.addEventListener('popstate', () => {
-    const wanted = routeOf(location.hash);
-    if (wanted && workflow.navigate(wanted)) return;
-    history.replaceState(null, '', `#/${workflow.route}`);
+    const wanted = stepOf(location.hash);
+    if (wanted && workflow.canShow(wanted)) {
+      followingHistory = true;
+      workflow.goTo(wanted);
+      followingHistory = false;
+    }
+    if (stepOf(location.hash) !== workflow.step) history.replaceState(null, '', `#/${workflow.step}`);
   });
 }

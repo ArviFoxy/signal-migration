@@ -7,7 +7,8 @@ import { LightElement } from '../../../ui/layout';
 import type { ConversionSummary, PackEntry, PackState, StickerMigration } from '../migration';
 
 export class MigrationView extends LightElement {
-  @property({ attribute: false }) migration!: StickerMigration;
+  /** Null until the packs are being read from Telegram. */
+  @property({ attribute: false }) migration!: StickerMigration | null;
   #onChange = () => this.requestUpdate();
 
   protected willUpdate(changed: PropertyValues<this>): void {

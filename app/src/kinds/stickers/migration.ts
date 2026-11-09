@@ -179,6 +179,16 @@ export class StickerMigration extends EventTarget {
   }
 
   /** Packs to upload, in the order they are uploaded. */
+  /** Whether the pack was on Signal already when the migration started (installed, not uploaded). */
+  wasOnSignal(entry: PackEntry): boolean {
+    return this.#plannedInstalls.has(entry);
+  }
+
+  /** The pack the migration is working on or waiting with: the first selected one not yet in Signal or failed. */
+  get current(): PackEntry | null {
+    return this.selected.find((entry) => entry.state !== 'in-signal' && entry.state !== 'failed') ?? null;
+  }
+
   get uploadQueue(): PackEntry[] {
     return [...this.#plannedUploads];
   }
@@ -270,6 +280,13 @@ export class StickerMigration extends EventTarget {
 
   setSelected(entry: PackEntry, selected: boolean): void {
     entry.selected = selected && entry.pack.stickers.length <= MAX_STICKERS;
+    this.#changed();
+  }
+
+  /** Puts the packs that failed back in line, for the next run. */
+  retryFailed(): void {
+    for (const entry of this.selected)
+      if (entry.state === 'failed') Object.assign(entry, { state: 'to-upload', error: null, progress: null });
     this.#changed();
   }
 
@@ -390,6 +407,7 @@ export class StickerMigration extends EventTarget {
       converted.map((sticker, i) => ({ image: sticker.image, emoji: stickers[i].emoji })),
     );
     Object.assign(entry, { prepared: true, progress: null });
+    this.#changed();
   }
 
   /** Migrates one pack that is not installed. Returns false when someone else holds its claim. */
@@ -492,8 +510,14 @@ export class StickerMigration extends EventTarget {
             clock.sleep(this.uploadAllowedAt - clock.now()),
             next &&
               this.#prepare(telegram, next).then(
-                () => (next.state = 'to-upload'),
-                () => Object.assign(next, { state: 'to-upload', progress: null }),
+                () => {
+                  next.state = 'to-upload';
+                  this.#changed();
+                },
+                () => {
+                  Object.assign(next, { state: 'to-upload', progress: null });
+                  this.#changed();
+                },
               ),
           ]);
           this.uploadAllowedAt = null;

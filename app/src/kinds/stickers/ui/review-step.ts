@@ -2,7 +2,7 @@
 // upload limit adds. Long lists start collapsed, for 100+ packs.
 
 import { html, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { primaryButton, secondaryButton, stepHeader, stickyFooter } from '../../../ui/layout';
 import { estimatedUploadWaitMs, UPLOAD_BURST, UPLOAD_INTERVAL_MS } from '../migration';
 import { formatDuration, MigrationView } from './view';
@@ -11,9 +11,12 @@ const COLLAPSED_ROWS = 6;
 
 @customElement('sticker-review-step')
 export class StickerReviewStep extends MigrationView {
+  /** The packs are read from Telegram, the index and Signal. */
+  @property({ attribute: false }) ready = false;
   @state() private showAll = false;
 
   render() {
+    if (!this.migration) return stepHeader(5, 'Review', 'Reading your packs…');
     const selected = this.migration.selected;
     const inSignal = selected.filter((entry) => entry.state === 'in-signal').length;
     const install = selected.filter((entry) => entry.state === 'available').length;
@@ -49,7 +52,7 @@ export class StickerReviewStep extends MigrationView {
       </ul>
       <p class="text-sm text-muted">
         New packs go into your Signal sticker list in your Telegram order. Packs already in Signal keep their place.
-        Keep this page open while it uploads; after a reload it continues where it stopped.
+        Keep this tab open while it uploads. After a reload, it continues where it stopped.
       </p>
       ${
         animated.length > 0
@@ -85,7 +88,7 @@ export class StickerReviewStep extends MigrationView {
           <button
             type="button"
             class=${primaryButton}
-            ?disabled=${install + toUpload.length === 0}
+            ?disabled=${!this.ready || install + toUpload.length === 0}
             @click=${() => this.emit('start')}
           >
             Start migration

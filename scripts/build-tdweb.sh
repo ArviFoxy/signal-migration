@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds TDLib's web client (tdweb) from the third_party/td submodule into third_party/td/example/web/tdweb/dist.
+# Builds TDLib's web client (tdweb) from the third_party/td submodule: the WebAssembly module into the submodule's
+# example/web/tdweb/src/prebuilt, then the JavaScript, patched, into build/tdweb/dist (scripts/build-tdweb-js.sh).
 #
 # The steps are TDLib's own (example/web/build-openssl.sh, build-tdlib.sh, copy-tdlib.sh, build-tdweb.sh),
 # with one change: the WebAssembly module is linked with -g1. TDLib builds with -Os, and at -Os Emscripten
@@ -43,6 +44,4 @@ cmake --build build/generate
 cmake --build build/wasm --target td_wasm
 ./copy-tdlib.sh
 
-cd tdweb
-npm ci
-npm run build
+"$repo/scripts/build-tdweb-js.sh"

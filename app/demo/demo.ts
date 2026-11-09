@@ -16,7 +16,8 @@ import { loadSignalWasm } from '../src/signal/wasm';
 import { storageServiceKeyFromMasterKey } from '../src/wasm/signal_migration_wasm';
 import type { MigrationApp } from '../src/ui/migration-app';
 import '../src/ui/migration-app';
-import type { AppServices, LinkedDevice, SnapshotStore, TelegramSession } from '../src/app/services';
+import type { AppServices, LinkedDevice, SnapshotStore } from '../src/app/services';
+import { LinkingCancelledError } from '../src/signal/link';
 import { type Snapshot, Workflow } from '../src/app/workflow';
 import { connectRouter } from '../src/ui/router';
 import { FakeSignal } from '../test/scenario/fake-signal';
@@ -172,42 +173,53 @@ async function setUp(): Promise<AppServices> {
     return device;
   };
 
+  let instances = 0;
   return {
-    telegramApp: async () => ({ apiId: 0, apiHash: 'demo' }),
-    async startTelegram(_app, onAuthorizationState) {
-      const set = (state: object) => onAuthorizationState(state as Td.AuthorizationState);
-      setTimeout(() => set({ _: 'authorizationStateWaitPhoneNumber' }), 500);
-      const session: TelegramSession = {
-        invoke: (async (query: { _: string }) => {
-          await delay(300);
-          if (query._ === 'requestQrCodeAuthentication') {
-            set({ _: 'authorizationStateWaitOtherDeviceConfirmation', link: 'tg://login?token=demo' });
-            setTimeout(() => set({ _: 'authorizationStateReady' }), 4000);
-          } else if (query._ === 'setAuthenticationPhoneNumber') {
-            set({
-              _: 'authorizationStateWaitCode',
-              code_info: { phone_number: (query as { phone_number?: string }).phone_number ?? '' },
-            });
-          } else if (query._ === 'checkAuthenticationCode') {
-            set({ _: 'authorizationStateReady' });
-          } else {
-            throw new Error(`the demo does not simulate ${query._}`);
-          }
-          return { _: 'ok' };
-        }) as unknown as Td.Invoke,
-        source,
-        logOut: async () => (await delay(300), set({ _: 'authorizationStateClosed' })),
-        close: async () => undefined,
-      };
-      return session;
+    telegram: {
+      app: async () => ({ apiId: 0, apiHash: 'demo' }),
+      newInstance: () => `demo-${++instances}`,
+      start(_app, instance, onAuthorizationState) {
+        const set = (state: object) => onAuthorizationState(state as Td.AuthorizationState);
+        setTimeout(() => set({ _: 'authorizationStateWaitPhoneNumber' }), 500);
+        return {
+          instance,
+          invoke: (async (query: { _: string }) => {
+            await delay(300);
+            if (query._ === 'requestQrCodeAuthentication') {
+              set({ _: 'authorizationStateWaitOtherDeviceConfirmation', link: 'tg://login?token=demo' });
+              setTimeout(() => set({ _: 'authorizationStateReady' }), 4000);
+            } else if (query._ === 'setAuthenticationPhoneNumber') {
+              set({
+                _: 'authorizationStateWaitCode',
+                code_info: { phone_number: (query as { phone_number?: string }).phone_number ?? '' },
+              });
+            } else if (query._ === 'checkAuthenticationCode') {
+              set({ _: 'authorizationStateReady' });
+            } else {
+              throw new Error(`the demo does not simulate ${query._}`);
+            }
+            return { _: 'ok' };
+          }) as unknown as Td.Invoke,
+          source,
+          checkpoint: async () => undefined,
+          logOut: () => delay(300).then(() => undefined),
+          dispose: async () => undefined,
+        };
+      },
+      instances: async () => [],
+      deleteInstance: async () => undefined,
     },
-    eraseTelegram: async () => undefined,
-    async linkSignal(showQrCode) {
-      showQrCode('sgnl://linkdevice?uuid=demo&pub_key=demo');
-      await delay(4000);
-      return deviceFor(signal.linkDevice(aci));
+    signal: {
+      async link(showQrCode, _deviceName, cancel) {
+        showQrCode('sgnl://linkdevice?uuid=demo&pub_key=demo');
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(resolve, 4000);
+          cancel.addEventListener('abort', () => (clearTimeout(timer), reject(new LinkingCancelledError())));
+        });
+        return deviceFor(signal.linkDevice(aci));
+      },
+      restore: (stored) => deviceFor(stored.deviceId),
     },
-    restoreSignal: (stored) => deviceFor(stored.deviceId),
     snapshots,
     migration: () => ({
       clock: systemClock,
@@ -225,23 +237,30 @@ const snapshots: SnapshotStore = {
   clear: async () => void (kept = null),
 };
 
-/** The demo's services as soon as the page loads; each call waits for the setup, and fails with its error. */
+/**
+ * The demo's services as soon as the page loads; each call waits for the setup, and fails with its error. The
+ * workflow asks for the Telegram app identity before anything else, so the setup is done by any later call.
+ */
 function servicesAfter(setup: Promise<AppServices>): AppServices {
   let ready: AppServices | null = null;
   void setup.then((services) => (ready = services));
+  const settled = () => {
+    if (!ready) throw new Error('the demo is still setting up');
+    return ready;
+  };
   return {
-    telegramApp: async () => (await setup).telegramApp(),
-    startTelegram: async (...args) => (await setup).startTelegram(...args),
-    eraseTelegram: async () => undefined,
-    linkSignal: async (...args) => (await setup).linkSignal(...args),
-    restoreSignal: (stored) => {
-      if (!ready) throw new Error('the demo is still setting up');
-      return ready.restoreSignal(stored);
+    telegram: {
+      app: async () => (await setup).telegram.app(),
+      newInstance: () => settled().telegram.newInstance(),
+      start: (...args) => settled().telegram.start(...args),
+      instances: async () => [],
+      deleteInstance: async () => undefined,
     },
-    migration: () => {
-      if (!ready) throw new Error('the demo is still setting up');
-      return ready.migration();
+    signal: {
+      link: async (...args) => (await setup).signal.link(...args),
+      restore: (stored) => settled().signal.restore(stored),
     },
+    migration: () => settled().migration(),
     snapshots,
   };
 }
@@ -250,4 +269,4 @@ const setup = setUp();
 setup.catch((error) => console.error('the demo could not set up', error));
 const workflow = new Workflow(servicesAfter(setup));
 (document.querySelector('migration-app') as MigrationApp).workflow = workflow;
-connectRouter(workflow);
+void workflow.load().then(() => connectRouter(workflow));

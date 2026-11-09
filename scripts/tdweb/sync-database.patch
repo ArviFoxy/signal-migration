@@ -1,0 +1,30 @@
+--- a/src/worker.js
++++ b/src/worker.js
+@@ -803,6 +803,10 @@
+       this.readFilePart(query);
+       return;
+     }
++    if (query['@type'] === 'syncDatabase') {
++      this.syncDatabase(query);
++      return;
++    }
+     if (query['@type'] === 'deleteIdbKey') {
+       this.deleteIdbKey(query);
+       return;
+@@ -812,6 +816,16 @@
+     this.scheduleReceiveSoon();
+   }
+ 
++  // Copies TDLib's database directory to IndexedDB now, then answers with ok. TDLib writes an event to its binlog
++  // file up to 1 ms after the event happens (FLUSH_TIMEOUT in tddb/td/db/binlog/ConcurrentBinlog.cpp), so TDLib's
++  // due timers are run first.
++  async syncDatabase(query) {
++    await new Promise(resolve => setTimeout(resolve, 10));
++    this.receive();
++    await this.tdfs.dbFileSystem.sync(true);
++    this.callback({ '@type': 'ok', '@extra': query['@extra'] });
++  }
++
+   execute(query) {
+     try {
+       const res = this.td_functions.td_execute(JSON.stringify(query));

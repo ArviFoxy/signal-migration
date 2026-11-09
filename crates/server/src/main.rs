@@ -4,7 +4,8 @@
 //! `MODE=demo` serves only the demo's files (STATIC_DIR, built by `node build.mjs --demo`): no tunnel, no index, and
 //! it refuses to start with a Telegram key.
 //! `TELEGRAM_API_ID` and `TELEGRAM_API_HASH` are the Telegram app identity from my.telegram.org; without them the
-//! page cannot log in to Telegram.
+//! page cannot log in to Telegram. `TELEGRAM_TEST_DC=1` makes the page log in to Telegram's test environment, for
+//! development.
 
 use std::env;
 use std::net::SocketAddr;
@@ -19,6 +20,7 @@ fn telegram_app() -> Result<Option<TelegramApp>, Box<dyn std::error::Error>> {
         (Ok(id), Ok(hash)) => Ok(Some(TelegramApp {
             api_id: id.parse()?,
             api_hash: hash,
+            test_dc: env::var("TELEGRAM_TEST_DC").is_ok_and(|value| value == "1"),
         })),
         (Err(_), Err(_)) => Ok(None),
         _ => Err("set both TELEGRAM_API_ID and TELEGRAM_API_HASH, or neither".into()),

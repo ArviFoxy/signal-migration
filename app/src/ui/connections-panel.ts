@@ -25,21 +25,24 @@ const code = (text: string) => html`<code class="rounded bg-segment px-1 py-0.5 
 const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: string; technical: TemplateResult }> = {
   telegram: {
     title: 'Telegram',
-    plain: 'Your browser connects to Telegram directly, encrypted so that only Telegram can read it.',
-    technical: html`TDLib in this page, over a WebSocket to ${code('*.web.telegram.org')}, with MTProto encryption.`,
+    plain: 'Your browser talks to Telegram directly. The connection is encrypted, and only Telegram can read it.',
+    technical: html`Your browser runs TDLib, Telegram's own library. TDLib connects to ${code('*.web.telegram.org')}
+    over a WebSocket and encrypts everything with MTProto, Telegram's protocol.`,
   },
   signal: {
     title: 'Signal',
     plain:
-      'Your browser connects to Signal through a tunnel on this site, end-to-end encrypted so that this site cannot read it.',
-    technical: html`TLS to ${code('*.signal.org')} inside a WebSocket to this site, checked against Signal's own root
-    certificate.`,
+      'Your browser talks to Signal through the migration server, which this website comes from. The connection is encrypted end to end, so the migration server passes it on but cannot read it.',
+    technical: html`A browser cannot connect to Signal's servers directly, because they use certificates from Signal's
+    own certificate authority, which browsers do not trust. So your browser opens a WebSocket to the migration server,
+    which forwards the bytes to Signal's servers. Inside the WebSocket, your browser runs its own TLS connection to
+    ${code('*.signal.org')}, and accepts only certificates signed by Signal's own root certificate.`,
   },
   index: {
     title: 'Sticker pack index',
     plain:
-      'This site keeps a list of packs already on Signal, and receives only the hash and Signal pack ID of each pack that you upload.',
-    technical: html`HTTPS to this site. The list is downloaded and matched on this computer.`,
+      'The migration server, which this website comes from, keeps a list of the packs already on Signal. When you upload a pack, the migration server receives only its hash and its Signal pack ID.',
+    technical: html`Your browser downloads the whole list over HTTPS and looks up your packs on your computer.`,
   },
 };
 

@@ -12,6 +12,7 @@ import {
   generateKyberLastResortPreKey,
   generateSignedPreKey,
   ProvisioningReceiver,
+  storageServiceKeyFromAccountEntropyPool,
   storageServiceKeyFromMasterKey,
 } from '../wasm/signal_migration_wasm';
 import { basicAuthorization, type DeviceCredentials } from './session';
@@ -27,10 +28,21 @@ export type LinkedAccount = {
   credentials: DeviceCredentials;
   /**
    * Decrypts the account's storage service records (installed sticker packs and their order). Derived from the
-   * account's master key, which is discarded right after linking: the migration needs nothing else it protects.
+   * account's keys in the linking message, which are discarded right after linking: the migration needs nothing else
+   * they protect.
    */
   storageServiceKey: Uint8Array;
 };
+
+/**
+ * The storage service key from the linking message. Current phones send the account entropy pool and no master key
+ * (Signal-Android LinkDeviceApi.kt); older ones sent only the master key.
+ */
+export function storageServiceKeyOf(provision: Pick<ProvisionMessage, 'accountEntropyPool' | 'masterKey'>): Uint8Array {
+  if (provision.accountEntropyPool) return storageServiceKeyFromAccountEntropyPool(provision.accountEntropyPool);
+  if (provision.masterKey.length > 0) return storageServiceKeyFromMasterKey(provision.masterKey);
+  throw new Error('the phone sent no account key, so the sticker packs in your Signal account cannot be read');
+}
 
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 const randomHex = (byteCount: number) =>
@@ -40,12 +52,21 @@ const randomInt = (min: number, max: number) => min + (crypto.getRandomValues(ne
 /** Reports progress events that contain no secrets (request paths, close codes). */
 export type LinkEvents = (event: string) => void;
 
+/** The error linking fails with when it was cancelled. */
+export class LinkingCancelledError extends Error {
+  constructor() {
+    super('linking was cancelled');
+  }
+}
+
 /** Waits for the phone to scan the QR code (passed to `showQrCode` as a `sgnl://linkdevice` URL). */
 async function receiveProvisionMessage(
   showQrCode: (url: string) => void,
   onEvent: LinkEvents,
+  cancel: AbortSignal,
 ): Promise<ProvisionMessage> {
   await loadSignalWasm();
+  cancel.throwIfAborted();
   const receiver = new ProvisioningReceiver();
   const socket = await connectChat('/v1/websocket/provisioning/', '/v1/keepalive/provisioning');
   onEvent('linking socket open');
@@ -55,6 +76,12 @@ async function receiveProvisionMessage(
         () => reject(new Error('the QR code was not scanned within 3 minutes')),
         SCAN_TIMEOUT_MS,
       );
+      const onCancel = () => {
+        clearTimeout(timer);
+        reject(new LinkingCancelledError());
+      };
+      if (cancel.aborted) onCancel();
+      cancel.addEventListener('abort', onCancel, { once: true });
       socket.onUnexpectedClose = (code) => {
         clearTimeout(timer);
         onEvent(`linking socket closed, code ${code}`);
@@ -92,16 +119,21 @@ function signedKey(generate: typeof generateSignedPreKey, identityPrivate: Uint8
   return serialized;
 }
 
-/** Links the device and returns its login and the keys the migration needs. */
-/** `deviceName` is read when the phone has scanned the code, so the user can still change it while the code shows. */
+/**
+ * Links the device and returns its login and the keys the migration needs. `deviceName` is read when the phone has
+ * scanned the code, so the user can still change it while the code shows. `cancel` stops waiting for the scan.
+ */
 export async function linkDevice(
   showQrCode: (url: string) => void,
   onEvent: LinkEvents = () => undefined,
   deviceName: () => string = () => DEFAULT_DEVICE_NAME,
+  cancel: AbortSignal = new AbortController().signal,
 ): Promise<LinkedAccount> {
-  const provision = await receiveProvisionMessage(showQrCode, onEvent);
+  const provision = await receiveProvisionMessage(showQrCode, onEvent, cancel);
   onEvent('linking message decrypted');
   try {
+    // Everything that can fail on the message's content is done before Signal registers the device.
+    const storageServiceKey = storageServiceKeyOf(provision);
     const hasPni = provision.pniIdentityKeyPrivate.length > 0 && provision.pni !== '';
     const password = randomHex(16);
     const name = encryptDeviceName(deviceName().trim() || DEFAULT_DEVICE_NAME, provision.aciIdentityKeyPublic);
@@ -137,6 +169,7 @@ export async function linkDevice(
         : undefined,
     };
 
+    cancel.throwIfAborted();
     const socket = await connectChat('/v1/websocket/', '/v1/keepalive');
     try {
       const response = await socket.request('PUT', '/v1/devices/link', {
@@ -147,7 +180,7 @@ export async function linkDevice(
       const { deviceId } = JSON.parse(new TextDecoder().decode(response.body)) as { deviceId: number };
       return {
         credentials: { aci: provision.aci, deviceId, password },
-        storageServiceKey: storageServiceKeyFromMasterKey(provision.masterKey),
+        storageServiceKey,
       };
     } finally {
       socket.close();

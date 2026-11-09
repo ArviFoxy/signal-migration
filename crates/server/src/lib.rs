@@ -19,6 +19,8 @@ use tower_http::services::ServeDir;
 pub struct TelegramApp {
     pub api_id: i32,
     pub api_hash: String,
+    /// Log in to Telegram's test environment (separate servers and accounts, for development) instead.
+    pub test_dc: bool,
 }
 
 /// What the page needs to know about this deployment.

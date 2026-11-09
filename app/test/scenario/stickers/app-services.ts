@@ -1,31 +1,205 @@
-// The workflow's services (app/services.ts) over the scenario world, for testing the workflow: a Telegram login
-// that the test completes by "scanning", the user's linked devices, the migration's simulated services, and a
-// snapshot store that outlives a page, as the browser's storage does across a reload.
+// The workflow's services (app/services.ts) over the scenario world, for testing the workflow.
+//
+// The simulated Telegram behaves like TDLib in the ways the workflow depends on:
+// - Each instance's login lives in the page until it is saved with checkpoint() (or with syncTdlib(), which stands
+//   for tdweb's periodic copy); a reload sees only what was saved.
+// - QR and phone logins follow TDLib's rules: a phone number is refused while a QR code waits, a QR code can be
+//   requested from the phone form.
+// - logOut() answers once Telegram has ended the session; "closing" comes after it, and "closed" never comes.
+// - A stopped instance can still send an update, which the workflow must ignore.
+// The simulated Signal links a device only when the test scans the code, and can be cancelled meanwhile.
+// The Telegram server side (which sessions are active) and the Signal account outlive pages; the browser's storage
+// (Browser) outlives a reload.
 
 import type * as Td from 'tdlib-types';
-import type { AppServices, LinkedDevice, SnapshotStore, TelegramSession } from '../../../src/app/services';
-import type { Snapshot } from '../../../src/app/workflow';
+import type {
+  AppServices,
+  LinkedDevice,
+  SnapshotStore,
+  TelegramServices,
+  TelegramSession,
+} from '../../../src/app/services';
 import { PackIndex } from '../../../src/kinds/stickers/pack-index';
+import { LinkingCancelledError } from '../../../src/signal/link';
 import { storageServiceKeyFromMasterKey } from '../../../src/wasm/signal_migration_wasm';
 import { PageClock } from '../clock';
 import { SimulatedAccount } from '../world';
 import { simulatedConvert, type StickerUser } from './sticker-world';
 
-/** What outlives a page in the user's browser: the snapshot, and whether TDLib keeps a Telegram session. */
+/** A TDLib instance's data: the authorization it holds, and whether it was logging out. */
+type InstanceData = { authorization: string | null; loggingOut: boolean };
+
+/** Telegram's servers, for one user: the active sessions (authorizations) and the code a phone login needs. */
+export class TelegramServer {
+  readonly active = new Set<string>();
+  #next = 0;
+  static readonly CODE = '12345';
+
+  authorize(): string {
+    const authorization = `authorization-${++this.#next}`;
+    this.active.add(authorization);
+    return authorization;
+  }
+}
+
+const servers = new WeakMap<StickerUser, TelegramServer>();
+export const telegramServerOf = (user: StickerUser) => {
+  if (!servers.has(user)) servers.set(user, new TelegramServer());
+  return servers.get(user)!;
+};
+
+/** What outlives a page in the user's browser: the snapshot, and the TDLib instances' saved data. */
 export class Browser {
-  snapshot: Snapshot | null = null;
-  telegramSessionKept = false;
+  snapshot: unknown = null;
+  readonly instances = new Map<string, InstanceData>();
+  /** The instances running in the current page, by name: their live data, which syncTdlib() saves. */
+  readonly running = new Map<string, InstanceData>();
   readonly snapshots: SnapshotStore = {
     load: async () => (this.snapshot ? structuredClone(this.snapshot) : null),
     save: async (snapshot) => void (this.snapshot = structuredClone(snapshot)),
     clear: async () => void (this.snapshot = null),
   };
+
+  /** tdweb's periodic copy of every running instance's database. */
+  syncTdlib(): void {
+    for (const [name, live] of this.running) if (this.instances.has(name)) this.instances.set(name, { ...live });
+  }
+
+  /** Counts the pages opened in this browser; only the newest one runs. */
+  page = 0;
+
+  /** The page is closed: nothing runs any more, and nothing is saved at closing. */
+  closePage(): void {
+    this.running.clear();
+    this.page++;
+  }
 }
 
-/** One page's services; `scanTelegramCode` completes a pending Telegram QR login. */
-export function appServices(user: StickerUser, browser: Browser, options: { leaveAfterWaitOf?: number } = {}) {
+const tdError = (code: number, message: string) => Object.assign(new Error(message), { code });
+
+/** One page's services; the test plays the phone with scanTelegramCode and scanSignalCode. */
+export function appServices(
+  user: StickerUser,
+  browser: Browser,
+  options: { leaveAfterWaitOf?: number; withholdClosing?: boolean } = {},
+) {
   const { world } = user;
-  let pendingLogin: (() => void) | null = null;
+  const server = telegramServerOf(user);
+  let instanceCount = browser.instances.size;
+  let pendingTelegramScan: (() => void) | null = null;
+  let pendingSignalScan: (() => void) | null = null;
+  const started: { instance: string; disposed: boolean }[] = [];
+  const page = browser.page;
+  /** A closed page's work never finishes. */
+  const whileOpen = <T>(action: () => Promise<T>): Promise<T> =>
+    browser.page === page ? action() : new Promise<T>(() => undefined);
+
+  const telegram: TelegramServices = {
+    app: async () => ({ apiId: 1, apiHash: 'simulated' }),
+    newInstance: () => `telegram-${String(++instanceCount).padStart(16, '0')}`,
+    start(_app, instance, onAuthorizationState) {
+      if (!browser.instances.has(instance)) browser.instances.set(instance, { authorization: null, loggingOut: false });
+      const live: InstanceData = { ...browser.instances.get(instance)! };
+      browser.running.set(instance, live);
+      const record = { instance, disposed: false };
+      started.push(record);
+      let auth: Td.AuthorizationState['_'] = 'authorizationStateWaitTdlibParameters';
+      /** The instance runs until it is stopped or its page is closed; after that it does nothing more. */
+      const alive = () => browser.running.get(instance) === live;
+      let lastState: object = { _: 'authorizationStateWaitTdlibParameters' };
+      const set = (state: object) => {
+        if (!alive() && !record.disposed) return;
+        lastState = state;
+        auth = (state as { _: Td.AuthorizationState['_'] })._;
+        onAuthorizationState(state as Td.AuthorizationState);
+      };
+      const later = (action: () => void) => setTimeout(() => alive() && action(), 0);
+      const finishLogout = () =>
+        later(() => {
+          if (live.authorization) server.active.delete(live.authorization);
+          Object.assign(live, { authorization: null, loggingOut: false });
+          if (!options.withholdClosing) later(() => set({ _: 'authorizationStateClosing' }));
+        });
+      later(() => {
+        if (live.loggingOut) {
+          set({ _: 'authorizationStateLoggingOut' });
+          finishLogout();
+        } else if (live.authorization && server.active.has(live.authorization)) {
+          set({ _: 'authorizationStateReady' });
+        } else {
+          live.authorization = null;
+          set({ _: 'authorizationStateWaitPhoneNumber' });
+        }
+      });
+      const signIn = () => {
+        live.authorization = server.authorize();
+        set({ _: 'authorizationStateReady' });
+        return true;
+      };
+      const session: TelegramSession = {
+        instance,
+        invoke: (async (query: { _: string; code?: string }) => {
+          if (record.disposed) throw new Error('the Telegram connection was closed');
+          await new Promise((resolve) => setTimeout(resolve, 0));
+          switch (query._) {
+            case 'requestQrCodeAuthentication':
+              if (auth !== 'authorizationStateWaitPhoneNumber' && auth !== 'authorizationStateWaitCode')
+                throw tdError(400, 'Call to requestQrCodeAuthentication unexpected');
+              set({ _: 'authorizationStateWaitOtherDeviceConfirmation', link: `tg://login?token=${instance}` });
+              pendingTelegramScan = () => auth === 'authorizationStateWaitOtherDeviceConfirmation' && signIn();
+              break;
+            case 'setAuthenticationPhoneNumber':
+              if (auth !== 'authorizationStateWaitPhoneNumber' && auth !== 'authorizationStateWaitCode')
+                throw tdError(400, 'Call to setAuthenticationPhoneNumber unexpected');
+              set({ _: 'authorizationStateWaitCode', code_info: { phone_number: '+1 555 0100' } });
+              break;
+            case 'checkAuthenticationCode':
+              if (auth !== 'authorizationStateWaitCode')
+                throw tdError(400, 'Call to checkAuthenticationCode unexpected');
+              if (query.code !== TelegramServer.CODE) throw tdError(400, 'PHONE_CODE_INVALID');
+              signIn();
+              break;
+            case 'logOut':
+              if (live.loggingOut) throw tdError(400, 'Already logging out');
+              if (live.authorization) {
+                live.loggingOut = true;
+                set({ _: 'authorizationStateLoggingOut' });
+                await new Promise((resolve) => setTimeout(resolve, 0));
+                // A closed page never hears back.
+                if (!alive()) await new Promise(() => undefined);
+                server.active.delete(live.authorization);
+                Object.assign(live, { authorization: null, loggingOut: false });
+                if (!options.withholdClosing) later(() => set({ _: 'authorizationStateClosing' }));
+              }
+              break;
+            default:
+              throw new Error(`not simulated: ${query._}`);
+          }
+          return { _: 'ok' };
+        }) as unknown as Td.Invoke,
+        source: user.stickers,
+        async checkpoint() {
+          if (browser.instances.has(instance)) browser.instances.set(instance, { ...live });
+        },
+        logOut: async () => void (await session.invoke({ _: 'logOut' })),
+        async dispose() {
+          record.disposed = true;
+          browser.running.delete(instance);
+          browser.instances.delete(instance);
+          // Updates still on their way from the stopped client (a refreshed QR code, then "closed"), arriving after
+          // the next client has reported; the workflow must not listen to them any more.
+          const last = lastState;
+          let hops = 5;
+          const arrive = () =>
+            --hops > 0 ? setTimeout(arrive, 0) : (set(last), set({ _: 'authorizationStateClosed' }));
+          setTimeout(arrive, 0);
+        },
+      };
+      return session;
+    },
+    instances: () => whileOpen(async () => [...browser.instances.keys()]),
+    deleteInstance: (instance) => whileOpen(async () => void browser.instances.delete(instance)),
+  };
 
   const deviceFor = (account: SimulatedAccount): LinkedDevice => {
     const device: LinkedDevice = {
@@ -52,55 +226,47 @@ export function appServices(user: StickerUser, browser: Browser, options: { leav
   };
 
   const services: AppServices = {
-    telegramApp: async () => ({ apiId: 1, apiHash: 'simulated' }),
-    async startTelegram(_app, onAuthorizationState, resume) {
-      const set = (state: object) => onAuthorizationState(state as Td.AuthorizationState);
-      if (!resume) browser.telegramSessionKept = false;
-      queueMicrotask(() =>
-        set(
-          browser.telegramSessionKept ? { _: 'authorizationStateReady' } : { _: 'authorizationStateWaitPhoneNumber' },
-        ),
-      );
-      const session: TelegramSession = {
-        invoke: (async (query: { _: string }) => {
-          if (query._ !== 'requestQrCodeAuthentication') throw new Error(`not simulated: ${query._}`);
-          set({ _: 'authorizationStateWaitOtherDeviceConfirmation', link: 'tg://login?token=simulated' });
-          pendingLogin = () => {
-            browser.telegramSessionKept = true;
-            set({ _: 'authorizationStateReady' });
-          };
-          return { _: 'ok' };
-        }) as unknown as Td.Invoke,
-        source: user.stickers,
-        async logOut() {
-          browser.telegramSessionKept = false;
-          set({ _: 'authorizationStateClosed' });
-        },
-        async close() {
-          set({ _: 'authorizationStateClosed' });
-        },
-      };
-      return session;
+    telegram,
+    signal: {
+      async link(showQrCode, _deviceName, cancel) {
+        showQrCode('sgnl://linkdevice?uuid=simulated');
+        await new Promise<void>((resolve, reject) => {
+          pendingSignalScan = resolve;
+          cancel.addEventListener('abort', () => reject(new LinkingCancelledError()), { once: true });
+        });
+        return deviceFor(user.linkDevice());
+      },
+      restore: (stored) =>
+        deviceFor(new SimulatedAccount(world.signal, user.aci, stored.deviceId, stored.storageServiceKey.slice())),
     },
-    eraseTelegram: async () => void (browser.telegramSessionKept = false),
-    async linkSignal(showQrCode) {
-      showQrCode('sgnl://linkdevice?uuid=simulated');
-      return deviceFor(user.linkDevice());
-    },
-    restoreSignal: (stored) =>
-      deviceFor(new SimulatedAccount(world.signal, user.aci, stored.deviceId, stored.storageServiceKey.slice())),
     migration: () => ({
       clock: new PageClock(world.clock, options.leaveAfterWaitOf ?? null),
       convert: simulatedConvert,
       index: new PackIndex(world.index.backend, world.signal.manifestSource, world.index.pageSize),
     }),
-    snapshots: browser.snapshots,
+    snapshots: {
+      load: () => browser.snapshots.load(),
+      save: (snapshot) => whileOpen(() => browser.snapshots.save(snapshot)),
+      clear: () => whileOpen(() => browser.snapshots.clear()),
+    },
   };
   return {
     services,
+    server,
+    /** Every TDLib instance this page started, and whether it was stopped. */
+    started,
+    /** The phone scans the Telegram QR code on screen; false when none is waiting. */
     scanTelegramCode: () => {
-      pendingLogin?.();
-      pendingLogin = null;
+      const scan = pendingTelegramScan;
+      pendingTelegramScan = null;
+      return scan?.() ?? false;
+    },
+    /** The phone scans the Signal QR code on screen; false when none is waiting. */
+    scanSignalCode: () => {
+      const scan = pendingSignalScan;
+      pendingSignalScan = null;
+      scan?.();
+      return scan !== null;
     },
     /** The key that decrypts the account's whole storage, which the page must never keep. */
     masterKey: user.masterKey,

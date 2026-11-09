@@ -15,7 +15,16 @@ export class LightElement extends LitElement {
   }
 }
 
-export const STEP_LABELS = ['What to move', 'Telegram', 'Sticker packs', 'Signal', 'Review', 'Migrate'];
+export const STEP_LABELS = [
+  'What to move',
+  'Telegram login',
+  'Select sticker packs',
+  'Signal login',
+  'Review',
+  'Migrate',
+  // Not a screen of its own: the migration screen's final state, once both logins are ended.
+  'Done and logged out',
+];
 
 export const primaryButton =
   'inline-flex min-h-11 cursor-pointer items-center justify-center rounded-[10px] bg-accent px-6 text-[15px] font-semibold text-white hover:bg-accent-strong disabled:cursor-default disabled:opacity-50';
@@ -70,20 +79,6 @@ const icon = (paths: TemplateResult, size = 22, colour = 'currentColor', strokeW
 
 export const icons = {
   check: (size = 14) => icon(svg`<path d="M5 12l5 5L20 7"></path>`, size, 'currentColor', 3),
-  download: () =>
-    icon(svg`<path d="M12 3v12"></path><path d="M7 10l5 5 5-5"></path><path d="M4 20h16"></path>`, 22, '#3F3CBB'),
-  link: () =>
-    icon(
-      svg`<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1"></path><path d="M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"></path>`,
-      22,
-      '#3F3CBB',
-    ),
-  database: () =>
-    icon(
-      svg`<ellipse cx="12" cy="6" rx="7" ry="3"></ellipse><path d="M5 6v6c0 1.7 3.1 3 7 3s7-1.3 7-3V6"></path><path d="M5 12v6c0 1.7 3.1 3 7 3s7-1.3 7-3v-6"></path>`,
-      22,
-      '#3F3CBB',
-    ),
   computer: () =>
     icon(svg`<rect x="4" y="5" width="16" height="11" rx="2"></rect><path d="M2 19h20"></path>`, 22, '#1B1B1F'),
   servers: () =>

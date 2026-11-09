@@ -3,7 +3,7 @@
 // of the window and the actions at the bottom while the grid scrolls.
 
 import { html, nothing } from 'lit';
-import { customElement, state } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import {
   icons,
   primaryButton,
@@ -47,12 +47,14 @@ function packStatus(entry: PackEntry) {
 
 @customElement('sticker-packs-step')
 export class StickerPacksStep extends MigrationView {
+  /** Reading the packs failed, and can be tried again. */
+  @property({ attribute: false }) canTryAgain = false;
   @state() private filter: Filter = 'all';
   @state() private search = '';
 
   private visible(): PackEntry[] {
     const query = this.search.trim().toLowerCase();
-    return this.migration.entries.filter((entry) => {
+    return (this.migration?.entries ?? []).filter((entry) => {
       if (this.filter === 'signal' && !isOnSignal(entry.state)) return false;
       if (this.filter === 'upload' && (isOnSignal(entry.state) || entry.state === 'checking')) return false;
       return query === '' || entry.pack.title.toLowerCase().includes(query);
@@ -110,7 +112,8 @@ export class StickerPacksStep extends MigrationView {
   }
 
   render() {
-    const { entries, readProgress } = this.migration;
+    const entries = this.migration?.entries ?? [];
+    const readProgress = this.migration?.readProgress ?? null;
     const reading = entries.length === 0;
     const checking = entries.filter((entry) => entry.state === 'checking').length;
     const onSignal = entries.filter((entry) => isOnSignal(entry.state)).length;
@@ -138,7 +141,15 @@ export class StickerPacksStep extends MigrationView {
             </div>`
           : nothing
       }
-      ${stickyFooter(html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>`)}`;
+      ${stickyFooter(
+        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button> ${
+            this.canTryAgain
+              ? html`<button type="button" class=${primaryButton} @click=${() => this.emit('try-again')}>
+                  Try again
+                </button>`
+              : nothing
+          }`,
+      )}`;
     }
     return html`${stepHeader(3, 'Sticker packs', 'Choose the packs to add to your Signal.')}
     ${stickyBar(

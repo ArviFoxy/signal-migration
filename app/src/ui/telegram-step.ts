@@ -1,10 +1,11 @@
 // Step 2: logging in to Telegram, by scanning a QR code with Telegram on the phone, or with the phone number, the
-// code Telegram sends and the Two-Step Verification password if the account has one. Each screen follows TDLib's authorization state.
+// code Telegram sends and the Two-Step Verification password if the account has one. It shows the login machine's
+// state (app/telegram-login.ts) and sends it the user's input; the machine decides everything else.
 
-import { html, nothing } from 'lit';
+import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import QRCode from 'qrcode';
-import type * as Td from 'tdlib-types';
+import type { LoginQuery, TelegramLogin } from '../app/telegram-login';
 import {
   connectionArrow,
   connectionEnd,
@@ -18,75 +19,50 @@ import {
   stepHeader,
   stickyFooter,
 } from './layout';
-import type { TelegramSession } from '../app/services';
-
-type Query = Parameters<TelegramSession['invoke']>[0];
-
 @customElement('telegram-step')
 export class TelegramStep extends LightElement {
-  @property({ attribute: false }) session: TelegramSession | null = null;
-  @property({ attribute: false }) authState: Td.AuthorizationState | null = null;
-  @state() private mode: 'qr' | 'phone' = 'qr';
-  @state() private qrCode: string | null = null;
-  @state() private error: string | null = null;
-  @state() private sending = false;
+  @property({ attribute: false }) login!: TelegramLogin;
+  /** The QR code image, drawn from the link it shows. */
+  @state() private qrImage: { link: string; url: string } | null = null;
   @state() private showPassword = false;
-  #qrLink: string | null = null;
-  #qrRequestedFor: TelegramSession | null = null;
+  #onChange = () => this.requestUpdate();
+
+  protected willUpdate(changed: PropertyValues<this>): void {
+    if (changed.has('login')) {
+      (changed.get('login') as TelegramLogin | undefined)?.removeEventListener('change', this.#onChange);
+      this.login.addEventListener('change', this.#onChange);
+    }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.login?.removeEventListener('change', this.#onChange);
+  }
+
+  /** The QR code's link, while TDLib waits for it to be scanned. */
+  private get qrLink(): string | null {
+    const state = this.login.state;
+    return state.kind === 'login' && state.auth._ === 'authorizationStateWaitOtherDeviceConfirmation'
+      ? state.auth.link
+      : null;
+  }
 
   protected updated(): void {
-    const authState = this.authState;
-    if (
-      authState?._ === 'authorizationStateWaitPhoneNumber' &&
-      this.mode === 'qr' &&
-      this.session &&
-      this.#qrRequestedFor !== this.session
-    ) {
-      this.#qrRequestedFor = this.session;
-      void this.send({ _: 'requestQrCodeAuthentication', other_user_ids: [] });
-    }
-    if (authState?._ === 'authorizationStateWaitOtherDeviceConfirmation' && authState.link !== this.#qrLink) {
-      this.#qrLink = authState.link;
-      void QRCode.toDataURL(authState.link, { margin: 1, width: 224 }).then((url) => (this.qrCode = url));
+    const link = this.qrLink;
+    if (link && this.qrImage?.link !== link) {
+      void QRCode.toDataURL(link, { margin: 1, width: 224 }).then((url) => {
+        if (this.qrLink === link) this.qrImage = { link, url };
+      });
     }
   }
 
-  /** Sends one login request; a refusal (wrong code, wrong password) is shown and the state stays. */
-  private async send(query: Query): Promise<void> {
-    if (!this.session) return;
-    this.sending = true;
-    this.error = null;
-    try {
-      await this.session.invoke(query);
-    } catch (error) {
-      this.error = error instanceof Error ? error.message : String(error);
-    } finally {
-      this.sending = false;
-    }
-  }
-
-  private submit(event: SubmitEvent, build: (value: string) => Query): void {
+  private submit(event: SubmitEvent, build: (value: string) => LoginQuery): void {
     event.preventDefault();
     const input = (event.target as HTMLFormElement).querySelector('input')!;
-    void this.send(build(input.value.trim()));
+    void this.login.submit(build(input.value.trim()));
   }
 
-  /** TDLib cannot switch from a QR login to a phone login, so the login starts again. */
-  private usePhone(): void {
-    this.mode = 'phone';
-    this.qrCode = null;
-    this.#qrLink = null;
-    if (this.authState?._ !== 'authorizationStateWaitPhoneNumber') this.emit('restart-telegram');
-  }
-
-  private useQr(): void {
-    this.mode = 'qr';
-    this.#qrRequestedFor = null;
-    if (this.authState?._ !== 'authorizationStateWaitPhoneNumber') this.emit('restart-telegram');
-    else this.requestUpdate();
-  }
-
-  private form(label: string, type: string, autocomplete: string, build: (value: string) => Query) {
+  private form(label: string, type: string, autocomplete: string, build: (value: string) => LoginQuery) {
     return html`<form
       class="flex max-w-md flex-wrap items-end gap-3"
       @submit=${(event: SubmitEvent) => this.submit(event, build)}
@@ -102,7 +78,7 @@ export class TelegramStep extends LightElement {
                   autocomplete=${autocomplete}
                   placeholder="••••••••"
                   required
-                  ?disabled=${this.sending}
+                  ?disabled=${this.login.sending}
                   class="min-h-11 w-full rounded-[10px] bg-panel pr-11 pl-10 text-[15px] tracking-wide ring-1 ring-line-strong ring-inset placeholder:text-line-strong focus:bg-white focus:ring-2 focus:ring-accent focus:outline-none"
                 />
                 <button
@@ -119,62 +95,75 @@ export class TelegramStep extends LightElement {
                 type=${type}
                 autocomplete=${autocomplete}
                 required
-                ?disabled=${this.sending}
+                ?disabled=${this.login.sending}
                 class="min-h-11 rounded-[10px] px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
               />`
         }
       </label>
-      <button type="submit" class=${primaryButton} ?disabled=${this.sending}>Continue</button>
+      <button type="submit" class=${primaryButton} ?disabled=${this.login.sending}>Continue</button>
     </form>`;
   }
 
   private body() {
-    const authState = this.authState;
+    const login = this.login;
+    const state = login.state;
+    if (state.kind === 'off') {
+      return login.error
+        ? html`<button type="button" class="${secondaryButton} self-start" @click=${() => login.retry()}>
+            Try again
+          </button>`
+        : html`<p class="text-muted">${state.signedOut ? 'Signed out of Telegram.' : 'Not connected.'}</p>`;
+    }
+    if (state.kind === 'stopping') return html`<p class="text-muted">Signing out of Telegram…</p>`;
+    if (state.kind === 'ready')
+      return html`<p class="flex items-center gap-2 font-semibold text-accent">
+        ${icons.check(18)} Signed in to Telegram
+      </p>`;
+    const auth = state.kind === 'login' ? state.auth : null;
     if (
-      this.mode === 'qr' &&
-      (authState === null ||
-        authState._ === 'authorizationStateWaitTdlibParameters' ||
-        authState._ === 'authorizationStateWaitPhoneNumber' ||
-        authState._ === 'authorizationStateWaitOtherDeviceConfirmation')
+      login.method === 'qr' &&
+      (auth === null ||
+        auth._ === 'authorizationStateWaitPhoneNumber' ||
+        auth._ === 'authorizationStateWaitOtherDeviceConfirmation')
     ) {
+      const link = this.qrLink;
       return html`<div class="flex flex-wrap items-center gap-10">
-        ${qrBox(authState?._ === 'authorizationStateWaitOtherDeviceConfirmation' ? this.qrCode : null, 'QR code for Telegram sign-in')}
+        ${qrBox(link && this.qrImage?.link === link ? this.qrImage.url : null, 'QR code for Telegram sign-in')}
         ${instructions(
           [
             'Open Telegram on your phone',
             'Settings › Devices › Link Desktop Device',
             'Point the camera at this code',
-            'If your account has a Two-Step Verification password, enter it on this page after scanning',
+            'If your account has a Two-Step Verification password, enter it here after scanning',
           ],
-          html`<button type="button" class=${linkButton} @click=${this.usePhone}>
+          html`<button type="button" class=${linkButton} @click=${() => login.useMethod('phone')}>
             Sign in with phone number instead
           </button>`,
         )}
       </div>`;
     }
-    switch (authState?._) {
+    switch (auth?._) {
       case undefined:
-      case 'authorizationStateWaitTdlibParameters':
-        return html`<p class="text-muted">Starting Telegram…</p>`;
+        return html`<p class="text-muted">Connecting to Telegram…</p>`;
       case 'authorizationStateWaitPhoneNumber':
         return html`${this.form('Phone number, in international format', 'tel', 'tel', (phone_number) => ({ _: 'setAuthenticationPhoneNumber', phone_number }))}
           <p class="text-sm text-muted">
             After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
             has one.
           </p>
-          <button type="button" class="${linkButton} self-start" @click=${this.useQr}>
+          <button type="button" class="${linkButton} self-start" @click=${() => login.useMethod('qr')}>
             Sign in with a QR code instead
           </button>`;
       case 'authorizationStateWaitCode':
         return this.form(
-          `Code Telegram sent${authState.code_info.phone_number ? ` to ${authState.code_info.phone_number}` : ''}`,
+          `Code Telegram sent${auth.code_info.phone_number ? ` to ${auth.code_info.phone_number}` : ''}`,
           'text',
           'one-time-code',
           (code) => ({ _: 'checkAuthenticationCode', code }),
         );
       case 'authorizationStateWaitEmailCode':
         return this.form(
-          `Code Telegram sent to ${authState.code_info.email_address_pattern}`,
+          `Code Telegram sent to ${auth.code_info.email_address_pattern}`,
           'text',
           'one-time-code',
           (code) => ({
@@ -190,28 +179,26 @@ export class TelegramStep extends LightElement {
           <p class="text-sm text-muted">
             The extra password set in Telegram under Settings › Privacy and Security › Two-Step Verification.
           </p>
-          ${authState.password_hint ? html`<p class="text-sm text-muted">Hint: ${authState.password_hint}</p>` : nothing}`;
-      case 'authorizationStateReady':
-        return html`<p class="flex items-center gap-2 font-semibold text-accent">
-          ${icons.check(18)} Signed in to Telegram
-        </p>`;
-      case 'authorizationStateLoggingOut':
-      case 'authorizationStateClosing':
-      case 'authorizationStateClosed':
-        return html`<p class="text-muted">Signed out of Telegram.</p>`;
+          ${auth.password_hint ? html`<p class="text-sm text-muted">Hint: ${auth.password_hint}</p>` : nothing}`;
       default:
         return html`<p>
-          This account needs a step this page does not support (${authState?._}). Sign in once in a Telegram app, then
+          This account needs a login step that is not supported here (${auth?._}). Sign in once in a Telegram app, then
           try again.
         </p>`;
     }
   }
 
   render() {
-    const ready = this.authState?._ === 'authorizationStateReady';
-    return html`${stepHeader(2, 'Connect Telegram', this.mode === 'qr' ? 'Scan the code with the Telegram app on your phone.' : 'Sign in with your phone number.')}
+    const login = this.login;
+    const ready = login.state.kind === 'ready';
+    const description = ready
+      ? 'Telegram is connected.'
+      : login.method === 'qr'
+        ? 'Scan the code with the Telegram app on your phone.'
+        : 'Sign in with your phone number.';
+    return html`${stepHeader(2, 'Connect Telegram', description)}
       <div class="flex flex-col gap-4">
-        ${this.body()} ${this.error ? html`<p class="text-danger" role="alert">${this.error}</p>` : nothing}
+        ${this.body()} ${login.error ? html`<p class="text-danger" role="alert">${login.error}</p>` : nothing}
       </div>
       <figure class="flex flex-col gap-3 rounded-xl bg-panel p-[18px] ring-1 ring-line ring-inset">
         <div class="flex flex-wrap items-center gap-3 md:flex-nowrap">

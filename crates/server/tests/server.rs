@@ -283,6 +283,7 @@ async fn config_carries_the_telegram_app_identity() {
         telegram: Some(TelegramApp {
             api_id: 12345,
             api_hash: "0123456789abcdef".into(),
+            test_dc: false,
         }),
     };
     let server = start_with_client_config(RelayTargets::signal(), client).await;
@@ -294,7 +295,10 @@ async fn config_carries_the_telegram_app_identity() {
         .text()
         .await
         .unwrap();
-    assert_eq!(body, r#"{"telegram":{"apiId":12345,"apiHash":"0123456789abcdef"}}"#);
+    assert_eq!(
+        body,
+        r#"{"telegram":{"apiId":12345,"apiHash":"0123456789abcdef","testDc":false}}"#
+    );
 }
 
 /// Detects: browsers downloading the uncompressed WebAssembly (15 MB for TDLib) although a compressed copy exists, or

@@ -1,6 +1,6 @@
 // The temporary linked device for one migration: linked by QR code, logged in, unlinked at the end.
 // Its login and the storage service key (`stored`) are kept by the workflow until the migration is done or the
-// user clears it; the account's master key is never kept.
+// user clears it; the account's master key and entropy pool are never kept.
 
 import { httpsRequest } from './http-client';
 import { type LinkEvents, linkDevice, type LinkedAccount } from './link';
@@ -47,13 +47,14 @@ export class SignalConnection implements SignalAccount {
     return { ...this.#account.credentials, storageServiceKey: this.#account.storageServiceKey.slice() };
   }
 
-  /** Shows a QR code through `showQrCode` and waits until the phone has linked this device. */
+  /** Shows a QR code through `showQrCode` and waits until the phone has linked this device, or `cancel`. */
   static async link(
     showQrCode: (url: string) => void,
     deviceName: () => string,
+    cancel: AbortSignal,
     onEvent?: LinkEvents,
   ): Promise<SignalConnection> {
-    return new SignalConnection(await linkDevice(showQrCode, onEvent, deviceName));
+    return new SignalConnection(await linkDevice(showQrCode, onEvent, deviceName, cancel));
   }
 
   get deviceId(): number {
@@ -105,14 +106,14 @@ export class SignalConnection implements SignalAccount {
     );
   }
 
-  /** Removes this device from the account and forgets its login. */
+  /**
+   * Removes this device from the account and forgets its login. If Signal does not confirm, the device stays linked
+   * and usable, and the error is thrown.
+   */
   async unlink(): Promise<void> {
     if (this.#removed) return;
-    try {
-      await (await this.session()).unlinkSelf();
-    } finally {
-      this.#session = null;
-      this.#markRemoved();
-    }
+    await (await this.session()).unlinkSelf();
+    this.#session = null;
+    this.#markRemoved();
   }
 }

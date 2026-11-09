@@ -5,9 +5,10 @@
 // accounts, served by the server in demo mode on its own port (crates/server, MODE=demo). The app's build never
 // contains the demo.
 //
-// TDLib's web client (tdweb, built by scripts/build-tdweb.sh) is bundled from its dist/tdweb.js. That file starts a
-// worker by a file name relative to the page, and the worker loads its second part and TDLib's WebAssembly module
-// the same way, so those files are copied to the root of dist/.
+// TDLib's web client (tdweb) is bundled from ../build/tdweb/dist/tdweb.js, which scripts/build-tdweb-js.sh builds
+// with this project's patches; the "tdweb" package in node_modules provides only its types. tdweb.js starts a worker
+// by a file name relative to the page, and the worker loads its second part and TDLib's WebAssembly module the same
+// way, so those files are copied to the root of dist/.
 import { execFileSync } from 'node:child_process';
 import { build } from 'esbuild';
 import { createHash } from 'node:crypto';
@@ -15,7 +16,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { brotliCompressSync, constants as zlibConstants, gzipSync } from 'node:zlib';
 
-const tdwebDist = '../third_party/td/example/web/tdweb/dist';
+const tdwebDist = '../build/tdweb/dist';
 const demo = process.argv.includes('--demo');
 const outdir = demo ? 'dist-demo' : 'dist';
 const entries = [demo ? 'demo/demo.ts' : 'src/main.ts', 'src/kinds/stickers/apng-worker.ts', 'src/fonts.css'];
@@ -32,6 +33,7 @@ await build({
   target: 'es2022',
   outdir,
   sourcemap: true,
+  alias: { tdweb: path.resolve(tdwebDist, 'tdweb.js') },
 });
 execFileSync('node_modules/.bin/tailwindcss', ['--input', 'src/styles.css', '--output', `${outdir}/styles.css`], {
   stdio: 'inherit',
