@@ -1,0 +1,3 @@
+# Formatting for both Rust crates; rustfmt reads this file from a parent directory of each source file.
+max_width = 120
+style_edition = "2024"

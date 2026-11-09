@@ -26,8 +26,16 @@ pub fn parse_response(buffer: &[u8], ended: bool) -> Result<Option<ParsedRespons
         httparse::Status::Partial => return Ok(None),
     };
     let status = response.code.ok_or("response has no status code")?;
-    let headers: Vec<(String, String)> =
-        response.headers.iter().map(|h| (h.name.to_ascii_lowercase(), String::from_utf8_lossy(h.value).into_owned())).collect();
+    let headers: Vec<(String, String)> = response
+        .headers
+        .iter()
+        .map(|h| {
+            (
+                h.name.to_ascii_lowercase(),
+                String::from_utf8_lossy(h.value).into_owned(),
+            )
+        })
+        .collect();
     let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
     let rest = &buffer[head_len..];
 
@@ -35,10 +43,11 @@ pub fn parse_response(buffer: &[u8], ended: bool) -> Result<Option<ParsedRespons
         let mut body = Vec::new();
         let mut offset = 0;
         loop {
-            let (size_len, size) = match httparse::parse_chunk_size(&rest[offset..]).map_err(|_| "malformed chunk size")? {
-                httparse::Status::Complete(parsed) => parsed,
-                httparse::Status::Partial => return Ok(None),
-            };
+            let (size_len, size) =
+                match httparse::parse_chunk_size(&rest[offset..]).map_err(|_| "malformed chunk size")? {
+                    httparse::Status::Complete(parsed) => parsed,
+                    httparse::Status::Partial => return Ok(None),
+                };
             let size = usize::try_from(size).map_err(|_| "chunk too large")?;
             let data_start = offset + size_len;
             if size == 0 {
@@ -76,9 +85,18 @@ pub struct TlsHttpRequest {
 impl TlsHttpRequest {
     /// Starts TLS to `host` and queues the request; `headers` are "Name: value". Uses `Connection: close`.
     #[wasm_bindgen(constructor)]
-    pub fn new(host: &str, method: &str, path: &str, headers: Vec<String>, body: &[u8]) -> Result<TlsHttpRequest, JsError> {
+    pub fn new(
+        host: &str,
+        method: &str,
+        path: &str,
+        headers: Vec<String>,
+        body: &[u8],
+    ) -> Result<TlsHttpRequest, JsError> {
         let mut connection = connect(host).map_err(js_error)?;
-        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n", body.len());
+        let mut head = format!(
+            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
+            body.len()
+        );
         for header in headers {
             head.push_str(&header);
             head.push_str("\r\n");
@@ -86,7 +104,12 @@ impl TlsHttpRequest {
         head.push_str("\r\n");
         connection.writer().write_all(head.as_bytes()).map_err(js_error)?;
         connection.writer().write_all(body).map_err(js_error)?;
-        let mut request = TlsHttpRequest { connection, transport: Transport::default(), received: Vec::new(), response: None };
+        let mut request = TlsHttpRequest {
+            connection,
+            transport: Transport::default(),
+            received: Vec::new(),
+            response: None,
+        };
         request.pump(false)?;
         Ok(request)
     }
@@ -120,7 +143,12 @@ impl TlsHttpRequest {
 
     pub fn header(&self, name: &str) -> Option<String> {
         let name = name.to_ascii_lowercase();
-        self.response.as_ref()?.headers.iter().find(|(n, _)| *n == name).map(|(_, v)| v.clone())
+        self.response
+            .as_ref()?
+            .headers
+            .iter()
+            .find(|(n, _)| *n == name)
+            .map(|(_, v)| v.clone())
     }
 
     pub fn body(&self) -> Vec<u8> {
@@ -171,28 +199,57 @@ mod tests {
     // Detects: losing or duplicating data across chunk boundaries in chunked transfer coding.
     #[test]
     fn joins_a_chunked_body() {
-        let response = parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n", false).unwrap().unwrap();
-        assert_eq!((response.status, response.body.as_slice()), (200, b"Wikipedia".as_slice()));
+        let response = parse_response(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n",
+            false,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            (response.status, response.body.as_slice()),
+            (200, b"Wikipedia".as_slice())
+        );
     }
 
     // Detects: returning a truncated body as if complete.
     #[test]
     fn waits_for_the_rest_of_a_content_length_body() {
-        assert_eq!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello", false).unwrap(), None);
-        let response = parse_response(b"HTTP/1.1 409 Conflict\r\nContent-Length: 10\r\n\r\nhelloworld", false).unwrap().unwrap();
-        assert_eq!((response.status, response.body.as_slice()), (409, b"helloworld".as_slice()));
+        assert_eq!(
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello", false).unwrap(),
+            None
+        );
+        let response = parse_response(b"HTTP/1.1 409 Conflict\r\nContent-Length: 10\r\n\r\nhelloworld", false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (response.status, response.body.as_slice()),
+            (409, b"helloworld".as_slice())
+        );
     }
 
     // Detects: hanging forever on a body delimited only by the end of the connection.
     #[test]
     fn ends_an_undelimited_body_at_the_end_of_the_stream() {
         assert_eq!(parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", false).unwrap(), None);
-        assert_eq!(parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", true).unwrap().unwrap().body, b"partial");
+        assert_eq!(
+            parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", true)
+                .unwrap()
+                .unwrap()
+                .body,
+            b"partial"
+        );
     }
 
     // Detects: treating an incomplete chunked body as complete.
     #[test]
     fn waits_for_the_terminating_chunk() {
-        assert_eq!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n", false).unwrap(), None);
+        assert_eq!(
+            parse_response(
+                b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n",
+                false
+            )
+            .unwrap(),
+            None
+        );
     }
 }

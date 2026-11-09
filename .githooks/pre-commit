@@ -1,0 +1,6 @@
+#!/bin/sh
+# Checks formatting before each commit: Prettier for the web app, rustfmt for both Rust crates.
+# `npm run format` in app/ fixes what it reports. `npm install` in app/ enables this hook (core.hooksPath).
+set -e
+cd "$(git rev-parse --show-toplevel)/app"
+npm run --silent format:check

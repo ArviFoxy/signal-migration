@@ -48,15 +48,25 @@ impl TlsWebSocket {
         let fields = request.headers_mut();
         fields.insert("Sec-WebSocket-Key", generate_key().parse().map_err(js_error)?);
         for header in headers {
-            let (name, value) = header.split_once(':').ok_or_else(|| JsError::new("a header must be \"Name: value\""))?;
-            fields.insert(tungstenite::http::HeaderName::try_from(name.trim()).map_err(js_error)?, value.trim().parse().map_err(js_error)?);
+            let (name, value) = header
+                .split_once(':')
+                .ok_or_else(|| JsError::new("a header must be \"Name: value\""))?;
+            fields.insert(
+                tungstenite::http::HeaderName::try_from(name.trim()).map_err(js_error)?,
+                value.trim().parse().map_err(js_error)?,
+            );
         }
         let state = match tungstenite::client::client(request, stream) {
             Ok((socket, _)) => State::Open(socket),
             Err(HandshakeError::Interrupted(mid)) => State::Handshaking(mid),
             Err(HandshakeError::Failure(error)) => return Err(js_error(error)),
         };
-        Ok(TlsWebSocket { transport, state, messages: Vec::new(), close_code: None })
+        Ok(TlsWebSocket {
+            transport,
+            state,
+            messages: Vec::new(),
+            close_code: None,
+        })
     }
 
     /// Feeds ciphertext from the tunnel and advances the handshake and message reading.
@@ -75,7 +85,10 @@ impl TlsWebSocket {
     /// Binary messages received since the last call.
     #[wasm_bindgen(js_name = takeMessages)]
     pub fn take_messages(&mut self) -> js_sys::Array {
-        std::mem::take(&mut self.messages).into_iter().map(|m| js_sys::Uint8Array::from(m.as_slice())).collect()
+        std::mem::take(&mut self.messages)
+            .into_iter()
+            .map(|m| js_sys::Uint8Array::from(m.as_slice()))
+            .collect()
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<(), JsError> {
@@ -91,7 +104,10 @@ impl TlsWebSocket {
 
     pub fn close(&mut self, code: u16) {
         if let State::Open(socket) = &mut self.state {
-            let _ = socket.close(Some(CloseFrame { code: CloseCode::from(code), reason: "".into() }));
+            let _ = socket.close(Some(CloseFrame {
+                code: CloseCode::from(code),
+                reason: "".into(),
+            }));
             let _ = socket.flush();
         }
         self.state = State::Closed;

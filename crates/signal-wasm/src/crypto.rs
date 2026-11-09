@@ -18,7 +18,9 @@ use libsignal_account_keys::{AccountEntropyPool, SvrKey};
 use rand::TryRngCore;
 use rand::rngs::OsRng;
 use sha2::Sha256;
-use signal_crypto::{Aes256GcmDecryption, Aes256GcmEncryption, CryptographicMac, aes_256_cbc_decrypt, aes_256_cbc_encrypt};
+use signal_crypto::{
+    Aes256GcmDecryption, Aes256GcmEncryption, CryptographicMac, aes_256_cbc_decrypt, aes_256_cbc_encrypt,
+};
 use subtle::ConstantTimeEq;
 use wasm_bindgen::prelude::*;
 
@@ -32,7 +34,9 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 
 fn random_bytes<const N: usize>() -> [u8; N] {
     let mut bytes = [0u8; N];
-    OsRng.try_fill_bytes(&mut bytes).expect("the browser provides randomness");
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("the browser provides randomness");
     bytes
 }
 
@@ -67,7 +71,9 @@ pub fn storage_record_key(storage_service_key: &[u8], record_ikm: &[u8], record_
     }
     let info = [b"20240801_SIGNAL_STORAGE_SERVICE_ITEM_".as_slice(), record_id].concat();
     let mut key = vec![0u8; 32];
-    Hkdf::<Sha256>::new(None, record_ikm).expand(&info, &mut key).expect("32 bytes is a valid HKDF output length");
+    Hkdf::<Sha256>::new(None, record_ikm)
+        .expand(&info, &mut key)
+        .expect("32 bytes is a valid HKDF output length");
     key
 }
 
@@ -90,14 +96,21 @@ pub fn decrypt_storage_blob(key: &[u8], blob: &[u8]) -> Result<Vec<u8>, JsError>
     let mut decryption = Aes256GcmDecryption::new(key, nonce, &[]).map_err(js_error)?;
     let mut buffer = ciphertext.to_vec();
     decryption.decrypt(&mut buffer);
-    decryption.verify_tag(tag).map_err(|_| JsError::new("storage blob failed authentication: wrong key or altered data"))?;
+    decryption
+        .verify_tag(tag)
+        .map_err(|_| JsError::new("storage blob failed authentication: wrong key or altered data"))?;
     Ok(buffer)
 }
 
 fn sticker_keys(pack_key: &[u8]) -> ([u8; 32], [u8; 32]) {
     let mut derived = [0u8; 64];
-    Hkdf::<Sha256>::new(None, pack_key).expand(b"Sticker Pack", &mut derived).expect("64 bytes is a valid HKDF output length");
-    (derived[..32].try_into().expect("32 bytes"), derived[32..].try_into().expect("32 bytes"))
+    Hkdf::<Sha256>::new(None, pack_key)
+        .expand(b"Sticker Pack", &mut derived)
+        .expect("64 bytes is a valid HKDF output length");
+    (
+        derived[..32].try_into().expect("32 bytes"),
+        derived[32..].try_into().expect("32 bytes"),
+    )
 }
 
 #[wasm_bindgen(js_name = encryptStickerFile)]

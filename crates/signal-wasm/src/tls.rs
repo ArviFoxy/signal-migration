@@ -23,7 +23,9 @@ fn config() -> Arc<ClientConfig> {
         .get_or_init(|| {
             let mut roots = RootCertStore::empty();
             for der in SIGNAL_ROOTS {
-                roots.add(CertificateDer::from(der)).expect("libsignal's pinned roots parse");
+                roots
+                    .add(CertificateDer::from(der))
+                    .expect("libsignal's pinned roots parse");
             }
             let mut config = ClientConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
                 .with_safe_default_protocol_versions()

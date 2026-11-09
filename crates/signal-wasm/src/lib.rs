@@ -32,7 +32,9 @@ pub struct ProvisioningReceiver {
 impl ProvisioningReceiver {
     #[wasm_bindgen(constructor)]
     pub fn new() -> ProvisioningReceiver {
-        ProvisioningReceiver { state: RecvProvisionCiphertextState::generate(&mut OsRng.unwrap_err()) }
+        ProvisioningReceiver {
+            state: RecvProvisionCiphertextState::generate(&mut OsRng.unwrap_err()),
+        }
     }
 
     /// The 33-byte public key (type byte included) for the `pub_key` parameter of the QR code.
@@ -65,19 +67,39 @@ pub fn generate_signed_pre_key(identity_private_key: &[u8], key_id: u32) -> Resu
     let identity = PrivateKey::deserialize(identity_private_key).map_err(js_error)?;
     let rng = &mut OsRng.unwrap_err();
     let public_key = KeyPair::generate(rng).public_key.serialize().to_vec();
-    let signature = identity.calculate_signature(&public_key, rng).map_err(js_error)?.to_vec();
-    Ok(SignedPublicPreKey { key_id, public_key, signature })
+    let signature = identity
+        .calculate_signature(&public_key, rng)
+        .map_err(js_error)?
+        .to_vec();
+    Ok(SignedPublicPreKey {
+        key_id,
+        public_key,
+        signature,
+    })
 }
 
 /// Generates a Kyber-1024 last-resort prekey and signs its public key with the identity key.
 /// The private half is discarded, as for [`generate_signed_pre_key`].
 #[wasm_bindgen(js_name = generateKyberLastResortPreKey)]
-pub fn generate_kyber_last_resort_pre_key(identity_private_key: &[u8], key_id: u32) -> Result<SignedPublicPreKey, JsError> {
+pub fn generate_kyber_last_resort_pre_key(
+    identity_private_key: &[u8],
+    key_id: u32,
+) -> Result<SignedPublicPreKey, JsError> {
     let identity = PrivateKey::deserialize(identity_private_key).map_err(js_error)?;
     let rng = &mut OsRng.unwrap_err();
-    let public_key = kem::KeyPair::generate(kem::KeyType::Kyber1024, rng).public_key.serialize().to_vec();
-    let signature = identity.calculate_signature(&public_key, rng).map_err(js_error)?.to_vec();
-    Ok(SignedPublicPreKey { key_id, public_key, signature })
+    let public_key = kem::KeyPair::generate(kem::KeyType::Kyber1024, rng)
+        .public_key
+        .serialize()
+        .to_vec();
+    let signature = identity
+        .calculate_signature(&public_key, rng)
+        .map_err(js_error)?
+        .to_vec();
+    Ok(SignedPublicPreKey {
+        key_id,
+        public_key,
+        signature,
+    })
 }
 
 /// A device name encrypted to the account's identity key, as the three fields of Signal's `DeviceName` message.
@@ -96,7 +118,10 @@ pub struct EncryptedDeviceName {
 pub fn encrypt_device_name(name: &str, identity_public_key: &[u8]) -> Result<EncryptedDeviceName, JsError> {
     let identity_public = PublicKey::deserialize(identity_public_key).map_err(js_error)?;
     let ephemeral = KeyPair::generate(&mut OsRng.unwrap_err());
-    let master_secret = ephemeral.private_key.calculate_agreement(&identity_public).map_err(js_error)?;
+    let master_secret = ephemeral
+        .private_key
+        .calculate_agreement(&identity_public)
+        .map_err(js_error)?;
 
     let plaintext = name.as_bytes();
     let synthetic_iv = hmac_sha256(&hmac_sha256(&master_secret, b"auth"), plaintext)[..16].to_vec();
@@ -105,7 +130,13 @@ pub fn encrypt_device_name(name: &str, identity_public_key: &[u8]) -> Result<Enc
     // Desktop uses AES-256-CTR with a 16-byte zero counter block; libsignal's Aes256Ctr32 with a 12-byte zero
     // nonce and counter 0 produces the same keystream for names shorter than 2^32 blocks.
     let mut ciphertext = plaintext.to_vec();
-    signal_crypto::Aes256Ctr32::from_key(&cipher_key, &[0u8; 12], 0).map_err(js_error)?.process(&mut ciphertext);
+    signal_crypto::Aes256Ctr32::from_key(&cipher_key, &[0u8; 12], 0)
+        .map_err(js_error)?
+        .process(&mut ciphertext);
 
-    Ok(EncryptedDeviceName { ephemeral_public: ephemeral.public_key.serialize().to_vec(), synthetic_iv, ciphertext })
+    Ok(EncryptedDeviceName {
+        ephemeral_public: ephemeral.public_key.serialize().to_vec(),
+        synthetic_iv,
+        ciphertext,
+    })
 }
