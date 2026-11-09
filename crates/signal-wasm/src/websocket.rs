@@ -31,6 +31,8 @@ pub struct TlsWebSocket {
     state: State,
     messages: Vec<Vec<u8>>,
     close_code: Option<u16>,
+    /// The HTTP status of the server's answer when it refused the WebSocket upgrade.
+    refused_status: Option<u16>,
 }
 
 fn is_would_block(error: &tungstenite::Error) -> bool {
@@ -66,7 +68,14 @@ impl TlsWebSocket {
             state,
             messages: Vec::new(),
             close_code: None,
+            refused_status: None,
         })
+    }
+
+    /// The HTTP status with which the server refused the WebSocket upgrade, if it did.
+    #[wasm_bindgen(getter, js_name = refusedStatus)]
+    pub fn refused_status(&self) -> Option<u16> {
+        self.refused_status
     }
 
     /// Feeds ciphertext from the tunnel and advances the handshake and message reading.
@@ -133,7 +142,12 @@ impl TlsWebSocket {
                         self.state = State::Handshaking(mid);
                         return Ok(());
                     }
-                    Err(HandshakeError::Failure(error)) => return Err(js_error(error)),
+                    Err(HandshakeError::Failure(error)) => {
+                        if let tungstenite::Error::Http(response) = &error {
+                            self.refused_status = Some(response.status().as_u16());
+                        }
+                        return Err(js_error(error));
+                    }
                 },
                 State::Open(mut socket) => {
                     let result = loop {

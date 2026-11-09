@@ -24,6 +24,17 @@ export interface MessageChannel {
   onClose: (code: number, reason: string) => void;
 }
 
+/** The server answered the WebSocket upgrade with an HTTP error instead of opening the connection. */
+export class HandshakeRefusedError extends Error {
+  constructor(
+    host: string,
+    path: string,
+    readonly status: number,
+  ) {
+    super(`${host} refused the WebSocket to ${path} with HTTP ${status}`);
+  }
+}
+
 /** Opens a WebSocket to `host`'s `path` with extra handshake `headers` ("Name: value"), through the relay. */
 export async function openTunnelWebSocket(host: string, path: string, headers: string[]): Promise<MessageChannel> {
   await loadSignalWasm();
@@ -49,9 +60,11 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
     const finish = (code: number, reason: string) => {
       if (closed) return;
       closed = true;
+      const refusedStatus = socket.refusedStatus;
       link.close();
       socket.free();
       if (opened) channel.onClose(code, reason);
+      else if (refusedStatus !== undefined) reject(new HandshakeRefusedError(host, path, refusedStatus));
       else reject(new Error(`WebSocket to ${host}${path} did not open: ${reason}`));
     };
     const link = new RelayLink(

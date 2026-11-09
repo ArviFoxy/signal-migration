@@ -7,7 +7,7 @@ import { httpsRequest } from './http-client';
 import { type LinkEvents, linkDevice, type LinkedAccount } from './link';
 import { fetchLatestStorageMessage, installStickerPacksMessage, OwnDevices } from './own-devices';
 import { SignalSession } from './session';
-import { SocketClosedError } from './socket';
+import { HandshakeRefusedError, SocketClosedError } from './socket';
 import { StorageClient } from './storage';
 import type { ChatChannel, SignalAccount } from './transport';
 
@@ -25,6 +25,11 @@ export type StoredDevice = {
 
 /** The server closes a removed device's connection with this code. */
 const DEVICE_REMOVED = 4401;
+/**
+ * The server refuses a login it does not know (a removed device) at the WebSocket upgrade with this status
+ * (Signal-Server WebSocketResourceProviderFactory, InvalidCredentialsException).
+ */
+const LOGIN_REFUSED = 403;
 
 export class DeviceRemovedError extends Error {
   constructor() {
@@ -116,17 +121,27 @@ export class SignalConnection implements SignalAccount {
     this.onUnlinked();
   }
 
-  /** The logged-in connection, opened again if it closed. */
+  /**
+   * The logged-in connection, opened again if it closed. A device removed while no connection was open (from the
+   * phone while the page was closed) is refused at login, and counts as removed.
+   */
   async session(): Promise<SignalSession> {
     if (this.#removed) throw new DeviceRemovedError();
     if (!this.#session) {
-      const opening = SignalSession.open(this.#account.credentials).then((session) => {
-        session.onUnexpectedClose = (code) => {
-          this.#session = null;
-          if (code === DEVICE_REMOVED) this.#markRemoved();
-        };
-        return session;
-      });
+      const opening = SignalSession.open(this.#account.credentials).then(
+        (session) => {
+          session.onUnexpectedClose = (code) => {
+            this.#session = null;
+            if (code === DEVICE_REMOVED) this.#markRemoved();
+          };
+          return session;
+        },
+        (error) => {
+          if (!(error instanceof HandshakeRefusedError && error.status === LOGIN_REFUSED)) throw error;
+          this.#markRemoved();
+          throw new DeviceRemovedError();
+        },
+      );
       this.#session = opening;
       opening.catch(() => (this.#session = null));
     }
@@ -155,7 +170,12 @@ export class SignalConnection implements SignalAccount {
    */
   async unlink(): Promise<void> {
     if (this.#removed) return;
-    await (await this.session()).unlinkSelf();
+    try {
+      await (await this.session()).unlinkSelf();
+    } catch (error) {
+      // Already removed: what unlinking is for has happened.
+      if (!(error instanceof DeviceRemovedError)) throw error;
+    }
     this.#session = null;
     this.#markRemoved();
   }
