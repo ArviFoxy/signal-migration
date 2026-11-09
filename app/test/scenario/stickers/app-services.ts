@@ -7,6 +7,8 @@
 //   requested from the phone form.
 // - logOut() answers once Telegram has ended the session; "closing" comes after it, and "closed" never comes.
 // - A stopped instance can still send an update, which the workflow must ignore.
+// - TDLib can stop after an internal error (crash()). With a login saved in the browser, the client restarts it and
+//   the session goes on (telegram/client.ts); without one, the client stops and answers nothing more.
 // The simulated Signal links a device only when the test scans the code, and can be cancelled meanwhile.
 // The Telegram server side (which sessions are active) and the Signal account outlive pages; the browser's storage
 // (Browser) outlives a reload.
@@ -81,14 +83,19 @@ const tdError = (code: number, message: string) => Object.assign(new Error(messa
 export function appServices(
   user: StickerUser,
   browser: Browser,
-  options: { leaveAfterWaitOf?: number; withholdClosing?: boolean } = {},
+  options: {
+    leaveAfterWaitOf?: number;
+    withholdClosing?: boolean;
+    /** TDLib starts but never reports a login state. */
+    silentTelegram?: boolean;
+  } = {},
 ) {
   const { world } = user;
   const server = telegramServerOf(user);
   let instanceCount = browser.instances.size;
   let pendingTelegramScan: (() => void) | null = null;
   let pendingSignalScan: (() => void) | null = null;
-  const started: { instance: string; disposed: boolean }[] = [];
+  const started: { instance: string; disposed: boolean; crash: () => void }[] = [];
   const page = browser.page;
   /** A closed page's work never finishes. */
   const whileOpen = <T>(action: () => Promise<T>): Promise<T> =>
@@ -97,15 +104,24 @@ export function appServices(
   const telegram: TelegramServices = {
     app: async () => ({ apiId: 1, apiHash: 'simulated' }),
     newInstance: () => `telegram-${String(++instanceCount).padStart(16, '0')}`,
-    start(_app, instance, onAuthorizationState) {
+    start(_app, instance, onAuthorizationState, onFatalError) {
       if (!browser.instances.has(instance)) browser.instances.set(instance, { authorization: null, loggingOut: false });
       const live: InstanceData = { ...browser.instances.get(instance)! };
       browser.running.set(instance, live);
-      const record = { instance, disposed: false };
+      let crashed = false;
+      const record = {
+        instance,
+        disposed: false,
+        crash() {
+          const restarted = browser.instances.get(instance)?.authorization != null;
+          if (!restarted) crashed = true;
+          onFatalError('Aborted()', restarted);
+        },
+      };
       started.push(record);
       let auth: Td.AuthorizationState['_'] = 'authorizationStateWaitTdlibParameters';
       /** The instance runs until it is stopped or its page is closed; after that it does nothing more. */
-      const alive = () => browser.running.get(instance) === live;
+      const alive = () => browser.running.get(instance) === live && !crashed;
       let lastState: object = { _: 'authorizationStateWaitTdlibParameters' };
       const set = (state: object) => {
         if (!alive() && !record.disposed) return;
@@ -121,6 +137,7 @@ export function appServices(
           if (!options.withholdClosing) later(() => set({ _: 'authorizationStateClosing' }));
         });
       later(() => {
+        if (options.silentTelegram) return;
         if (live.loggingOut) {
           set({ _: 'authorizationStateLoggingOut' });
           finishLogout();
@@ -139,14 +156,15 @@ export function appServices(
       const session: TelegramSession = {
         instance,
         invoke: (async (query: { _: string; code?: string }) => {
-          if (record.disposed) throw new Error('the Telegram connection was closed');
+          if (record.disposed || crashed) throw new Error('the Telegram connection was closed');
           await new Promise((resolve) => setTimeout(resolve, 0));
           switch (query._) {
             case 'requestQrCodeAuthentication':
               if (auth !== 'authorizationStateWaitPhoneNumber' && auth !== 'authorizationStateWaitCode')
                 throw tdError(400, 'Call to requestQrCodeAuthentication unexpected');
               set({ _: 'authorizationStateWaitOtherDeviceConfirmation', link: `tg://login?token=${instance}` });
-              pendingTelegramScan = () => auth === 'authorizationStateWaitOtherDeviceConfirmation' && signIn();
+              pendingTelegramScan = () =>
+                alive() && auth === 'authorizationStateWaitOtherDeviceConfirmation' && signIn();
               break;
             case 'setAuthenticationPhoneNumber':
               if (auth !== 'authorizationStateWaitPhoneNumber' && auth !== 'authorizationStateWaitCode')

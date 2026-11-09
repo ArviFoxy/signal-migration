@@ -143,6 +143,83 @@ describe('the workflow', () => {
     await until(() => second.workflow.step === 'signal', 'the Signal step');
   });
 
+  // Detects: a restart of TDLib after an internal error stopping or restarting the migration, asking to sign in
+  // again, or leaving packs out; and the user not being told.
+  it('goes on with the migration when TDLib restarts after an internal error', async () => {
+    const world = new StickerWorld();
+    const alice = world.user(['A', 'B', 'C'].map((title) => world.pack(title)));
+    const browser = new Browser();
+    const page = await openPage(alice, browser);
+    await signIn(page);
+    await link(page);
+    page.workflow.startMigration();
+    await until(
+      () => page.workflow.stickers?.entries.some((entry) => entry.state === 'in-signal') ?? false,
+      'the first pack in Signal',
+    );
+    const states: string[] = [];
+    page.workflow.addEventListener('change', () => {
+      if (page.workflow.phase.kind === 'migrating') states.push(page.workflow.telegram.state.kind);
+    });
+    page.started.at(-1)!.crash();
+    await migrate(page);
+    expect(page.workflow.telegram.notice).toBe(
+      "Telegram's library stopped after an internal error and was restarted. (TDLib: Aborted())",
+    );
+    expect(new Set(states)).toEqual(new Set(['ready']));
+    expect(page.started.length).toBe(1);
+    expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(3);
+  });
+
+  // Detects: a TDLib that stopped during the login left on screen with a QR code that can never complete.
+  it('starts a new login when TDLib stops during the login', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const page = await openPage(alice, browser);
+    page.workflow.goTo('packs');
+    await until(
+      () =>
+        page.workflow.telegram.state.kind === 'login' &&
+        page.workflow.telegram.state.auth._ === 'authorizationStateWaitOtherDeviceConfirmation',
+      'the QR code',
+    );
+    const stopped = page.workflow.telegram.instance!;
+    page.started.at(-1)!.crash();
+    await until(() => page.scanTelegramCode(), 'a new QR code to scan');
+    await until(() => page.workflow.step === 'signal', 'the Signal step');
+    expect(page.workflow.telegram.instance).not.toBe(stopped);
+    expect(browser.instances.has(stopped)).toBe(false);
+    expect(page.workflow.telegram.notice).toBe(
+      "Telegram's library stopped after an internal error. (TDLib: Aborted())",
+    );
+  });
+
+  // Detects: "Disconnect and clear" waiting forever for a TDLib that stopped before it reported anything, with the
+  // start page showing "Connecting" and nothing on the page to get out.
+  it('finishes a clear when TDLib stops before reporting anything', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    first.workflow.goTo('packs');
+    await until(() => first.workflow.telegram.state.kind === 'login', 'the login');
+    await settle(first);
+    browser.closePage();
+
+    const second = await openPage(alice, browser, { silentTelegram: true });
+    await until(() => second.workflow.telegram.state.kind === 'starting', 'TDLib starting');
+    const clearing = second.workflow.clear();
+    // The clear reaches the wait for TDLib's first report before TDLib stops.
+    for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(second.workflow.phase.kind).toBe('clearing');
+    second.started.at(-1)!.crash();
+    await clearing;
+    expect(second.workflow.phase).toEqual({ kind: 'setup', step: 'start' });
+    expect(browser.instances.size).toBe(0);
+  });
+
   // Detects: a deselected pack coming back selected after a reload, and being migrated against the user's choice.
   it('keeps the selection across a reload', async () => {
     const world = new StickerWorld();

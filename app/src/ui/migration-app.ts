@@ -274,11 +274,14 @@ export class MigrationApp extends LightElement {
     }
   }
 
-  /** The newest failure: background work's, or an account's when its step is not on screen. */
+  /** The newest failure: background work's, TDLib's, or an account's when its step is not on screen. */
   private notice(): string | null {
     const w = this.workflow;
     return (
-      w.error ?? (w.step !== 'telegram' ? w.telegram.error : null) ?? (w.step !== 'signal' ? w.signal.error : null)
+      w.error ??
+      w.telegram.notice ??
+      (w.step !== 'telegram' ? w.telegram.error : null) ??
+      (w.step !== 'signal' ? w.signal.error : null)
     );
   }
 

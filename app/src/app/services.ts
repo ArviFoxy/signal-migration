@@ -1,6 +1,6 @@
 // What the workflow needs from the outside world, as one object: the server's configuration, a Telegram login, a
 // linked Signal device, the migration's services, and where the workflow keeps what it needs to resume. The app
-// uses the real ones below; tests and the demo pass simulated ones.
+// uses the real ones below; tests and fixtures pass simulated ones.
 
 import { createStore, del, get, set } from 'idb-keyval';
 import type * as Td from 'tdlib-types';
@@ -39,11 +39,16 @@ export type TelegramServices = {
   /** The Telegram app identity, or null when the server has none configured. */
   app(): Promise<TelegramApp | null>;
   newInstance(): string;
-  /** Starts TDLib on an instance, new or kept from an earlier visit; `onAuthorizationState` gets each login state. */
+  /**
+   * Starts TDLib on an instance, new or kept from an earlier visit; `onAuthorizationState` gets each login state.
+   * `onFatalError` gets TDLib's message when it stopped after an internal error, and whether it was restarted with the
+   * saved login; when it was not, the session has ended.
+   */
   start(
     app: TelegramApp,
     instance: string,
     onAuthorizationState: (state: Td.AuthorizationState) => void,
+    onFatalError: (error: string, restarted: boolean) => void,
   ): TelegramSession;
   /** The instances that have data in this browser. */
   instances(): Promise<string[]>;
@@ -97,8 +102,8 @@ export const realServices: AppServices = {
       return ((await response.json()) as { telegram: TelegramApp | null }).telegram;
     },
     newInstance: newTelegramInstance,
-    start(app, instance, onAuthorizationState) {
-      const client = new TelegramClient(instance, app, onAuthorizationState);
+    start(app, instance, onAuthorizationState, onFatalError) {
+      const client = new TelegramClient(instance, app, onAuthorizationState, onFatalError);
       return {
         instance,
         invoke: client.invoke,

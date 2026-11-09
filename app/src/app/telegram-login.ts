@@ -73,6 +73,8 @@ export class TelegramLogin extends EventTarget {
   method: LoginMethod = 'qr';
   /** Why the last operation failed (a wrong code, no network), until the next one starts. */
   error: string | null = null;
+  /** What happened to TDLib that the user should know, until dismissed. */
+  notice: string | null = null;
   /** While a login request (phone number, code, password) is being answered. */
   sending = false;
   /** The current client; updates from any other are ignored. */
@@ -145,7 +147,12 @@ export class TelegramLogin extends EventTarget {
     this.#endingByItself = false;
     this.#auth = null;
     this.#reported = new Promise((resolve) => (this.#markReported = resolve));
-    const client: TelegramSession = this.services.start(app, instance, (auth) => this.#onUpdate(client, auth));
+    const client: TelegramSession = this.services.start(
+      app,
+      instance,
+      (auth) => this.#onUpdate(client, auth),
+      (error, restarted) => this.#onFatalError(client, error, restarted),
+    );
     this.#client = client;
     this.#set({ kind: 'starting' });
   }
@@ -228,16 +235,36 @@ export class TelegramLogin extends EventTarget {
         this.#set({ kind: 'stopping' });
       }
     } else if (ENDED_STATES.has(auth._)) {
-      void this.#enqueue(() => this.#ended(client));
+      void this.#enqueue(() => this.#ended(client, true));
     }
   }
 
-  /** The session ended without this page asking it to (from another device, or by a kept instance's logout). */
-  async #ended(client: TelegramSession): Promise<void> {
+  /**
+   * TDLib stopped after an internal error. With a saved login, the client restarted it and the login goes on.
+   * Without one, the client has stopped and the unfinished login ends; a stop waiting for its first report goes on,
+   * and the workflow starts a new login where it starts one.
+   */
+  #onFatalError(client: TelegramSession, error: string, restarted: boolean): void {
+    if (client !== this.#client) return;
+    this.notice = restarted
+      ? `Telegram's library stopped after an internal error and was restarted. (TDLib: ${error})`
+      : `Telegram's library stopped after an internal error. (TDLib: ${error})`;
+    if (!restarted) {
+      this.#markReported();
+      void this.#enqueue(() => this.#ended(client, false));
+    }
+    this.#changed();
+  }
+
+  /**
+   * The client ended without this page asking it to: the session ended (from another device, or by a kept
+   * instance's logout), or TDLib stopped before a login was saved.
+   */
+  async #ended(client: TelegramSession, signedOut: boolean): Promise<void> {
     if (client !== this.#client) return;
     this.#client = null;
     await this.keep(null);
-    this.#set({ kind: 'off', signedOut: true });
+    this.#set({ kind: 'off', signedOut });
     await this.#dispose(client);
   }
 

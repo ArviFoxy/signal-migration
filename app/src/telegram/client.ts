@@ -2,12 +2,21 @@
 // in scripts/tdweb).
 //
 // The page talks to Telegram directly; nothing goes through our server. Each login gets its own TDLib instance,
-// named "telegram-<random>", with two IndexedDB databases: TDLib's database directory, which holds the login, and
-// the downloaded files. The workflow keeps the name of the current instance, so that a reload continues its login.
+// named "telegram-<random>". An instance has three IndexedDB databases: TDLib's database directory, which holds the
+// login; the downloaded files; and our own copy of the login. The workflow keeps the name of the current instance, so
+// that a reload continues its login.
 //
 // Nothing here waits for TDLib to report that it closed, and nothing is saved when the page closes, because a page
-// can be closed at any moment. The login is saved to IndexedDB right after TDLib reports it (checkpoint). An instance
-// is removed by stopping its worker and deleting its databases.
+// can be closed at any moment. The login is saved right after TDLib reports it (checkpoint): tdweb copies TDLib's
+// database to IndexedDB, and the login file is then copied into our own database. Every start of an instance first
+// writes that copy back, so the login does not depend on what TDLib wrote to its database since. An instance is
+// removed by stopping its worker and deleting its databases.
+//
+// TDLib can stop after an internal error (tdweb then sends updateFatalError and answers nothing more). A client with
+// a saved login restarts TDLib on the same instance from the copy, and those listening see no change in the login:
+// requests sent meanwhile wait for the restart, and requests TDLib had not answered fail with TelegramRestartedError,
+// so that the caller can send them again. TDLib numbers files anew in every run (`run`), so a file number from an
+// earlier run must be looked up again (kinds/stickers/telegram-packs.ts).
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
@@ -23,11 +32,23 @@ const randomHex = (byteCount: number) =>
 
 export const newTelegramInstance = () => `telegram-${randomHex(8)}`;
 
-/** tdweb's IndexedDB databases for an instance: downloaded files under its name, the database directory under its path. */
-const databasesOf = (instance: string) => [instance, `/${instance}/dbfs`];
+// tdweb keeps TDLib's database directory in IndexedDB through Emscripten's IDBFS (library_idbfs.js): one database
+// named after the directory, version 21, with one object store "FILE_DATA" indexed by "timestamp", holding each file
+// under its full path as { timestamp, mode, contents }.
+const IDBFS_VERSION = 21;
+const IDBFS_STORE = 'FILE_DATA';
+/** The file of TDLib's database directory that holds the login (with TDLib's other databases off, the only one). */
+const LOGIN_FILE = 'td.binlog';
+
+const tdlibDatabaseOf = (instance: string) => `/${instance}/dbfs`;
+const loginCopyDatabaseOf = (instance: string) => `/${instance}/login`;
+
+/** An instance's databases: the downloaded files under its name, TDLib's database, our copy of the login. */
+const databasesOf = (instance: string) => [instance, tdlibDatabaseOf(instance), loginCopyDatabaseOf(instance)];
 
 /** An instance's name from one of its database names; also matches the single instance "telegram" of older versions. */
-const instanceOf = (database: string) => /^\/?(telegram(?:-[0-9a-f]{16})?)(?:\/dbfs)?$/.exec(database)?.[1] ?? null;
+const instanceOf = (database: string) =>
+  /^\/?(telegram(?:-[0-9a-f]{16})?)(?:\/dbfs|\/login)?$/.exec(database)?.[1] ?? null;
 
 /**
  * Deletes a database. While a connection to it is still open (a worker that was just stopped), the browser reports
@@ -51,6 +72,94 @@ export async function telegramInstancesInBrowser(): Promise<string[]> {
   const names = (await indexedDB.databases()).map((database) => instanceOf(database.name ?? ''));
   return [...new Set(names.filter((name) => name !== null))];
 }
+
+function result<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+function committed(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
+function openDatabase(name: string, version: number, create: (database: IDBDatabase) => void): Promise<IDBDatabase> {
+  const request = indexedDB.open(name, version);
+  request.onupgradeneeded = () => create(request.result);
+  return result(request);
+}
+
+/** Opens TDLib's database as IDBFS does, creating it the same way when it does not exist. */
+function openTdlibDatabase(instance: string): Promise<IDBDatabase> {
+  return openDatabase(tdlibDatabaseOf(instance), IDBFS_VERSION, (database) =>
+    database.createObjectStore(IDBFS_STORE).createIndex('timestamp', 'timestamp', { unique: false }),
+  );
+}
+
+const openLoginCopyDatabase = (instance: string) =>
+  openDatabase(loginCopyDatabaseOf(instance), 1, (database) => database.createObjectStore('files'));
+
+/** Our own copy of an instance's login: the login file of TDLib's database, as IDBFS keeps it. */
+export interface LoginCopies {
+  /** Copies the login file from TDLib's database in IndexedDB into our own database. */
+  save(instance: string): Promise<void>;
+  /** Writes our copy back into TDLib's database, before TDLib starts; false when there is no copy. */
+  restore(instance: string): Promise<boolean>;
+}
+
+export const indexedDbLoginCopies: LoginCopies = {
+  async save(instance) {
+    const tdlib = await openTdlibDatabase(instance);
+    let file: unknown;
+    try {
+      const store = tdlib.transaction(IDBFS_STORE).objectStore(IDBFS_STORE);
+      file = await result(store.get(`${tdlibDatabaseOf(instance)}/${LOGIN_FILE}`));
+    } finally {
+      tdlib.close();
+    }
+    if (!file) throw new Error('saving the Telegram login in this browser failed');
+    const copies = await openLoginCopyDatabase(instance);
+    try {
+      const transaction = copies.transaction('files', 'readwrite');
+      transaction.objectStore('files').put(file, LOGIN_FILE);
+      await committed(transaction);
+    } finally {
+      copies.close();
+    }
+  },
+
+  async restore(instance) {
+    // Opening a database creates it, so whether a copy exists is read from the list of databases.
+    const name = loginCopyDatabaseOf(instance);
+    if (!(await indexedDB.databases()).some((database) => database.name === name)) return false;
+    const copies = await openLoginCopyDatabase(instance);
+    let file: unknown;
+    try {
+      file = await result(copies.transaction('files').objectStore('files').get(LOGIN_FILE));
+    } finally {
+      copies.close();
+    }
+    if (!file) return false;
+    const tdlib = await openTdlibDatabase(instance);
+    try {
+      const transaction = tdlib.transaction(IDBFS_STORE, 'readwrite');
+      const store = transaction.objectStore(IDBFS_STORE);
+      const path = `${tdlibDatabaseOf(instance)}/${LOGIN_FILE}`;
+      store.put(file, path);
+      // A rewrite of the login file that TDLib had not finished (Binlog::do_reindex in third_party/td).
+      store.delete(`${path}.new`);
+      await committed(transaction);
+    } finally {
+      tdlib.close();
+    }
+    return true;
+  },
+};
 
 /**
  * tdweb names an object's type in the field '@type'; the generated types (tdl-install-types) name it '_'.
@@ -77,64 +186,171 @@ export class TelegramError extends Error {
   }
 }
 
+/** A request TDLib did not answer because it stopped after an internal error; it can be sent again. */
+export class TelegramRestartedError extends Error {
+  constructor() {
+    super('the Telegram connection was closed');
+  }
+}
+
 /** The parts of tdweb's client that it does not declare: its worker and the file reader's database connection. */
 type TdwebInternals = { worker?: Worker; fileManager?: { idb?: Promise<IDBDatabase> } };
 
+/** How long each restart after an internal error waits; a restart that fails again before signing in waits longer. */
+const RESTART_DELAYS_MS = [0, 1_000, 5_000, 30_000];
+
+const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
 export class TelegramClient {
-  #client: TdClientType;
+  /** TDLib in its current run. */
+  #td: TdClientType | null = null;
+  /** How many times TDLib was started in this client; file numbers are valid only in the run that gave them. */
+  #run = 0;
+  /** Fails the requests sent to the current run when it stops. */
+  #runEnded: Promise<never> = new Promise<never>(() => undefined);
+  #endRun: (error: Error) => void = () => undefined;
+  /** Resolves once the current run takes requests: after a restart, once TDLib has reported its login state. */
+  #usable: Promise<void>;
+  /** Fails every request once the client has stopped for good. */
   #stopped: Promise<never>;
   #stop: (error: Error) => void = () => undefined;
+  #isStopped = false;
+  /** Our copy of the login exists, so TDLib can be restarted without losing it. */
+  #hasLoginCopy = false;
+  /** The login state last passed on; a restart that signs in again does not pass on "ready" a second time. */
+  #lastReported: Td.AuthorizationState['_'] | null = null;
+  #failedRestarts = 0;
 
-  /** Starts TDLib on `instance`: a new one, or one whose login an earlier visit kept. */
+  /**
+   * Starts TDLib on `instance`: a new one, or one whose login an earlier visit kept. `onFatalError` gets TDLib's
+   * error message, and whether TDLib was restarted with the login; when it was not, this client has stopped.
+   */
   constructor(
     readonly instance: string,
-    app: TelegramApp,
-    onAuthorizationState: (state: Td.AuthorizationState) => void,
+    private readonly app: TelegramApp,
+    private readonly onAuthorizationState: (state: Td.AuthorizationState) => void,
+    private readonly onFatalError: (error: string, restarted: boolean) => void,
+    private readonly loginCopies: LoginCopies = indexedDbLoginCopies,
   ) {
     this.#stopped = new Promise<never>((_, reject) => (this.#stop = reject));
     this.#stopped.catch(() => undefined);
-    this.#client = new TdClient({
-      instanceName: instance,
+    this.#usable = this.#startRun(0);
+  }
+
+  get run(): number {
+    return this.#run;
+  }
+
+  /** Writes our copy of the login back and starts TDLib; after a restart, waits until TDLib reports its state. */
+  async #startRun(delayMs: number): Promise<void> {
+    if (delayMs > 0) await wait(delayMs);
+    if (this.#isStopped) return;
+    // Without a copy (a new login, or one whose copy could not be read), TDLib's own database is used.
+    if (await this.loginCopies.restore(this.instance).catch(() => false)) this.#hasLoginCopy = true;
+    if (this.#isStopped) return;
+    const run = ++this.#run;
+    this.#runEnded = new Promise<never>((_, reject) => (this.#endRun = reject));
+    this.#runEnded.catch(() => undefined);
+    let markReported: () => void = () => undefined;
+    const reported = new Promise<void>((resolve) => (markReported = resolve));
+    this.#td = new TdClient({
+      instanceName: this.instance,
       useDatabase: false,
       jsLogVerbosityLevel: 'error',
       logVerbosityLevel: 1,
-      onUpdate: (raw) => {
-        const update = fromTdweb(raw) as Td.Update;
-        if (update._ !== 'updateAuthorizationState') return;
-        const state = update.authorization_state;
-        if (state._ === 'authorizationStateWaitTdlibParameters') void this.#sendParameters(app);
-        onAuthorizationState(state);
-      },
+      onUpdate: (raw) => this.#onUpdate(run, fromTdweb(raw), markReported),
     });
+    if (run > 1) await Promise.race([reported, this.#stopped]);
   }
 
-  async #sendParameters(app: TelegramApp): Promise<void> {
-    await this.invoke({
-      _: 'setTdlibParameters',
-      use_test_dc: app.testDc ?? false,
-      // tdweb sets the directories and turns the databases on or off from its own options.
-      database_directory: '',
-      files_directory: '',
-      database_encryption_key: '',
-      use_file_database: false,
-      use_chat_info_database: false,
-      use_message_database: false,
-      use_secret_chats: false,
-      api_id: app.apiId,
-      api_hash: app.apiHash,
-      system_language_code: navigator.language,
-      device_model: 'Web browser',
-      system_version: '',
-      application_version: 'Signal migration',
-    });
+  #onUpdate(run: number, update: { _: string }, markReported: () => void): void {
+    if (run !== this.#run || this.#isStopped) return;
+    if (update._ === 'updateFatalError') {
+      const error = (update as { error?: unknown }).error;
+      this.#onFatal(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    if (update._ !== 'updateAuthorizationState') return;
+    const state = (update as Td.updateAuthorizationState).authorization_state;
+    if (state._ === 'authorizationStateWaitTdlibParameters') {
+      void this.#sendParameters(this.#td!);
+      // After a restart, those listening keep the state TDLib had before it stopped.
+      if (run > 1) return;
+    } else {
+      markReported();
+    }
+    if (state._ === 'authorizationStateReady') this.#failedRestarts = 0;
+    if (state._ === 'authorizationStateReady' && this.#lastReported === 'authorizationStateReady') return;
+    this.#lastReported = state._;
+    this.onAuthorizationState(state);
   }
 
   /**
-   * Sends one request to tdweb; fails at once if the client was stopped. tdweb rejects a failed request with TDLib's
-   * error object, which is turned into a TelegramError here.
+   * TDLib stopped: restarts it when it holds a login (from our copy, or, for a login saved before copies were kept,
+   * from TDLib's own database), and otherwise stops this client. A stopped client's waiting requests fail with the
+   * ordinary error, since sending them again cannot succeed.
    */
-  #send(query: TdObject): Promise<TdObject> {
-    return Promise.race([this.#client.send(query), this.#stopped]).catch((error: unknown) => {
+  #onFatal(error: string): void {
+    const restarted = this.#hasLoginCopy || this.#lastReported === 'authorizationStateReady';
+    if (!restarted) {
+      this.#isStopped = true;
+      this.#stop(new Error('the Telegram connection was closed'));
+    }
+    this.#endRun(new TelegramRestartedError());
+    void this.#terminateWorker();
+    if (restarted) {
+      const delay = RESTART_DELAYS_MS[Math.min(this.#failedRestarts++, RESTART_DELAYS_MS.length - 1)];
+      this.#usable = this.#startRun(delay);
+    }
+    this.onFatalError(error, restarted);
+  }
+
+  /** Stops the current run's worker; resolves once its file reader's database connection is closed. */
+  async #terminateWorker(): Promise<void> {
+    const internals = this.#td as unknown as TdwebInternals | null;
+    internals?.worker?.terminate();
+    (await internals?.fileManager?.idb?.catch(() => undefined))?.close();
+  }
+
+  async #sendParameters(td: TdClientType): Promise<void> {
+    const app = this.app;
+    await td
+      .send(
+        toTdweb({
+          _: 'setTdlibParameters',
+          use_test_dc: app.testDc ?? false,
+          // tdweb sets the directories and turns the databases on or off from its own options.
+          database_directory: '',
+          files_directory: '',
+          database_encryption_key: '',
+          use_file_database: false,
+          use_chat_info_database: false,
+          use_message_database: false,
+          use_secret_chats: false,
+          api_id: app.apiId,
+          api_hash: app.apiHash,
+          system_language_code: navigator.language,
+          device_model: 'Web browser',
+          system_version: '',
+          application_version: 'Signal migration',
+        }),
+      )
+      .catch(() => undefined);
+  }
+
+  /**
+   * Sends one request to TDLib's current run, once it takes requests. Fails at once if the client has stopped, and
+   * with TelegramRestartedError if TDLib stops before answering. tdweb rejects a failed request with TDLib's error
+   * object, which is turned into a TelegramError here.
+   */
+  async #send(query: TdObject): Promise<TdObject> {
+    let usable: Promise<void>;
+    do {
+      usable = this.#usable;
+      // A stopped client comes first: its last run may have ended before TDLib started.
+      await Promise.race([this.#stopped, usable]);
+    } while (usable !== this.#usable);
+    return Promise.race([this.#stopped, this.#runEnded, this.#td!.send(query)]).catch((error: unknown) => {
       const tdError = error as { '@type'?: string; code?: number; message?: string } | null;
       if (tdError?.['@type'] === 'error')
         throw new TelegramError(tdError.code ?? 0, tdError.message ?? 'unknown error');
@@ -153,8 +369,8 @@ export class TelegramClient {
   };
 
   /**
-   * Downloads a file and returns its bytes, then deletes the downloaded copy. A download that receives nothing for
-   * a minute is cancelled (download.ts).
+   * Downloads a file and returns its bytes, then deletes the downloaded copy. `fileId` is a number of the current
+   * run. A download that receives nothing for a minute is cancelled (download.ts).
    */
   async readFile(fileId: number): Promise<Uint8Array> {
     await downloadWithStallLimit(this.invoke, fileId);
@@ -169,26 +385,38 @@ export class TelegramClient {
     return bytes;
   }
 
-  /** Copies TDLib's database, with the login, to IndexedDB now (the "syncDatabase" request of our tdweb patch). */
+  /**
+   * Saves the login in this browser now: tdweb copies TDLib's database to IndexedDB (the "syncDatabase" request of
+   * our tdweb patch), then the login file is copied into our own database.
+   */
   async checkpoint(): Promise<void> {
     const result = await this.#send({ '@type': 'syncDatabase' });
     if (result['@type'] !== 'ok') throw new Error('saving the Telegram login in this browser failed');
+    await this.loginCopies.save(this.instance);
+    this.#hasLoginCopy = true;
   }
 
   /**
    * Ends the session on Telegram's side. TDLib answers once Telegram has answered the logout request and TDLib has
-   * destroyed its keys (AuthManager::on_log_out_result in third_party/td).
+   * destroyed its keys (AuthManager::on_log_out_result in third_party/td). A logout that a restart cut off is sent
+   * again.
    */
   async logOut(): Promise<void> {
-    await this.invoke({ _: 'logOut' });
+    for (;;) {
+      try {
+        await this.invoke({ _: 'logOut' });
+        return;
+      } catch (error) {
+        if (!(error instanceof TelegramRestartedError)) throw error;
+      }
+    }
   }
 
   /** Stops TDLib's worker now and deletes the instance's databases. Requests still waiting fail. */
   async dispose(): Promise<void> {
+    this.#isStopped = true;
     this.#stop(new Error('the Telegram connection was closed'));
-    const internals = this.#client as unknown as TdwebInternals;
-    internals.worker?.terminate();
-    (await internals.fileManager?.idb?.catch(() => undefined))?.close();
+    await this.#terminateWorker();
     await deleteTelegramInstance(this.instance);
   }
 }

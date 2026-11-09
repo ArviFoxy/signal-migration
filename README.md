@@ -72,7 +72,8 @@ animated PNG, at a lower size and frame rate where needed to fit 300 KiB (`app/s
 
 IndexedDB holds, until the migration ends or the user clears it:
 
-- TDLib's database with the Telegram session, saved right after sign-in;
+- TDLib's database with the Telegram session, saved right after sign-in, and a copy of its login file in a
+  database of the app's own, which is written back each time TDLib starts;
 - the linked device's password, storage service key, account identity key pair and registration ID;
 - the selection and progress, so that a reload continues.
 

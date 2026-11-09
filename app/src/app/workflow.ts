@@ -481,6 +481,7 @@ export class Workflow extends EventTarget {
   dismissError(): void {
     this.error = null;
     this.telegram.error = null;
+    this.telegram.notice = null;
     this.signal.error = null;
     this.#onChange();
   }
