@@ -1,42 +1,14 @@
 <!doctype html>
 <html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Telegram stickers to Signal</title>
-<style>
-  :root {
-    color-scheme: light dark;
-    --text: #1b1b1f;
-    --muted: #5e5e66;
-    --surface: #ffffff;
-    --background: #f4f4f1;
-    --border: #d9d9d4;
-    --accent: #3a3ab8;
-    --on-accent: #ffffff;
-    --ok: #2e9d5b;
-    --ok-text: #237a46;
-    --error: #b3261e;
-  }
-  @media (prefers-color-scheme: dark) {
-    :root {
-      --text: #e8e8ea;
-      --muted: #a2a2ab;
-      --surface: #1f1f24;
-      --background: #141417;
-      --border: #3a3a42;
-      --accent: #9a9cff;
-      --on-accent: #12122a;
-      --ok: #4cc27c;
-      --ok-text: #6fd497;
-      --error: #ff8a80;
-    }
-  }
-  body { margin: 0; background: var(--background); }
-</style>
-</head>
-<body>
-<migration-app></migration-app>
-<script type="module" src="./main.js"></script>
-</body>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Telegram stickers to Signal</title>
+    <link rel="stylesheet" href="./fonts.css" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="m-0">
+    <migration-app></migration-app>
+    <script type="module" src="./main.js"></script>
+  </body>
 </html>

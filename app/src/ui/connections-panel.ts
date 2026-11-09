@@ -1,83 +1,78 @@
-// What the page is connected to right now, in the bottom-left corner, with a way to disconnect each.
+// The connections panel at the bottom of the step list: what the page is connected to right now, with a way to
+// disconnect each, and what the sticker pack index receives.
 
-import { css, html, LitElement, nothing } from 'lit';
+import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { shared } from './styles';
+import { icons, LightElement } from './layout';
+
+export type ConnectionState = 'off' | 'wait' | 'on' | 'ended';
+export type Connection = { state: ConnectionState; status: string; action?: { label: string; event: string } };
+
+const DOTS: Record<ConnectionState, string> = {
+  on: 'bg-accent',
+  wait: 'bg-white ring-2 ring-upload ring-inset',
+  ended: 'bg-ended',
+  off: 'bg-white ring-1 ring-line-strong ring-inset',
+};
 
 @customElement('connections-panel')
-export class ConnectionsPanel extends LitElement {
-  static styles = [
-    shared,
-    css`
-      :host {
-        position: fixed;
-        left: 16px;
-        bottom: 16px;
-        z-index: 10;
-        max-width: calc(100vw - 32px);
-      }
-      .badges {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 8px;
-      }
-      .badge {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        min-height: 32px;
-        padding: 0 4px 0 12px;
-        border-radius: 16px;
-        background: var(--surface);
-        box-shadow: 0 0 0 1px var(--border), 0 2px 8px rgb(0 0 0 / 0.08);
-        font-size: 13px;
-      }
-      .badge.info {
-        padding-right: 12px;
-        cursor: pointer;
-      }
-      .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 50%;
-        background: var(--ok);
-      }
-      .detail {
-        margin-top: 8px;
-        max-width: 360px;
-        font-size: 13px;
-      }
-    `,
-  ];
-
-  /** The Telegram account's display name, or null when not logged in. */
-  @property({ attribute: false }) telegram: string | null = null;
-  /** The linked Signal device's ID, or null when not linked. */
-  @property({ attribute: false }) signalDevice: number | null = null;
+export class ConnectionsPanel extends LightElement {
+  @property({ attribute: false }) telegram!: Connection;
+  @property({ attribute: false }) signal!: Connection;
+  @property({ attribute: false }) index!: Connection;
   @state() private showIndexDetail = false;
 
-  private request(name: string): void {
-    this.dispatchEvent(new CustomEvent(name, { bubbles: true, composed: true }));
+  private row(name: string, connection: Connection, info = false) {
+    return html`<li
+      class="flex min-h-[52px] items-center gap-2.5 rounded-[10px] bg-white py-1 pr-1.5 pl-3 ring-1 ring-line ring-inset"
+    >
+      <span class="size-2.5 flex-none rounded-full ${DOTS[connection.state]}"></span>
+      <span class="flex min-w-0 flex-1 flex-col">
+        <span class="text-[13px] font-semibold">${name}</span>
+        <span class="text-xs text-muted">${connection.status}</span>
+      </span>
+      ${
+        connection.action && connection.state === 'on'
+          ? html`<button
+              type="button"
+              class="min-h-11 cursor-pointer rounded-lg px-3 text-[13px] font-semibold text-danger hover:bg-panel"
+              @click=${() => this.emit(connection.action!.event)}
+            >
+              ${connection.action.label}
+            </button>`
+          : nothing
+      }
+      ${
+        info
+          ? html`<button
+              type="button"
+              aria-label="What the sticker pack index receives"
+              aria-expanded=${this.showIndexDetail}
+              class="flex size-11 cursor-pointer items-center justify-center rounded-lg hover:bg-panel"
+              @click=${() => (this.showIndexDetail = !this.showIndexDetail)}
+            >
+              ${icons.info()}
+            </button>`
+          : nothing
+      }
+    </li>`;
   }
 
   render() {
-    return html`<div class="badges">
-        ${this.telegram !== null
-          ? html`<span class="badge"><span class="dot"></span>Telegram: ${this.telegram}<button class="secondary small" @click=${() => this.request('telegram-log-out')}>Log out</button></span>`
-          : nothing}
-        ${this.signalDevice !== null
-          ? html`<span class="badge"><span class="dot"></span>Signal: linked device ${this.signalDevice}<button class="secondary small" @click=${() => this.request('signal-unlink')}>Unlink</button></span>`
-          : nothing}
-        <span class="badge info" role="button" tabindex="0" aria-expanded=${this.showIndexDetail} @click=${() => (this.showIndexDetail = !this.showIndexDetail)}>
-          <span class="dot"></span>Sticker pack index
-        </span>
-      </div>
-      ${this.showIndexDetail
-        ? html`<div class="card detail">
-            This site's server keeps a list of sticker packs already uploaded to Signal. Of your packs it receives only a hash
-            of each one this page uploads, to find packs someone already uploaded; the list is downloaded and matched in this
-            page. Your connection to Signal also passes through the server, encrypted so that only Signal can read it.
-          </div>`
-        : nothing}`;
+    return html`<section aria-labelledby="connections-heading" class="flex flex-col gap-2.5">
+      <h2 id="connections-heading" class="text-xs font-semibold tracking-[0.04em] text-muted uppercase">Connections</h2>
+      <ul class="flex flex-col gap-2">
+        ${this.row('Telegram', this.telegram)} ${this.row('Signal', this.signal)}
+        ${this.row('Sticker pack index', this.index, true)}
+      </ul>
+      ${
+        this.showIndexDetail
+          ? html`<p class="rounded-[10px] bg-white p-3 text-xs ring-1 ring-line ring-inset">
+              This site's server keeps a list of sticker packs that are already on Signal, to find packs that someone
+              already uploaded. For each pack that you upload, it receives only the pack's hash and its Signal pack ID.
+            </p>`
+          : nothing
+      }
+    </section>`;
   }
 }

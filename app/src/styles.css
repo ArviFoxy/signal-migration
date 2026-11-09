@@ -1,0 +1,27 @@
+/* The app's styles: Tailwind, with the colours and fonts of the approved design. */
+@import 'tailwindcss';
+@source "./";
+
+@theme {
+  --font-sans: 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --font-display: 'Space Grotesk', 'Inter', ui-sans-serif, system-ui, sans-serif;
+  --color-ink: #1b1b1f;
+  --color-muted: #5b5f6a;
+  --color-page: #f4f4f1;
+  --color-panel: #fafaf8;
+  --color-line: #ecece8;
+  --color-line-strong: #c9cbd1;
+  --color-card-line: #e4e4e0;
+  --color-segment: #f1f1ee;
+  --color-accent: #3f3cbb;
+  --color-accent-strong: #2b2990;
+  --color-accent-soft: #f5f5fd;
+  --color-accent-chip: #e6e6fa;
+  --color-accent-chip-text: #2f2d96;
+  --color-upload: #c96a1b;
+  --color-upload-soft: #fdf3e8;
+  --color-upload-chip: #fcebd9;
+  --color-upload-text: #8a4a0f;
+  --color-ended: #8a8d96;
+  --color-danger: #a12a1e;
+}

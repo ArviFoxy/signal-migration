@@ -1,0 +1,6 @@
+dist/
+node_modules/
+src/gen/
+src/wasm/
+test/fixtures/
+package-lock.json
