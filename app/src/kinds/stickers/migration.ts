@@ -476,7 +476,10 @@ export class StickerMigration extends EventTarget {
     const files = this.#originals.get(entry)!;
     const converted = await step(
       'converting',
-      (i) => this.#services.convert(files[i], stickers[i].format),
+      (i) =>
+        this.#services.convert(files[i], stickers[i].format).catch((error: unknown) => {
+          throw new Error(`sticker ${i + 1} (${stickers[i].format}): ${message(error)}`);
+        }),
       CONCURRENT_CONVERSIONS,
     );
     entry.conversion = summarize(converted);

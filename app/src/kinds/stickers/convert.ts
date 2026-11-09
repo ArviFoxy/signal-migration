@@ -10,6 +10,7 @@
 // until the file fits the size limit.
 
 import lottie from 'lottie-web/build/player/lottie_light_canvas';
+import { withTimeLimit } from '../../core/time-limit';
 import type { StickerFormat } from './telegram-packs';
 import { MAX_STICKER_BYTES } from './upload';
 
@@ -37,6 +38,9 @@ export type ConvertedSticker = {
 /** Converts one Telegram sticker file; the app uses convertSticker, tests a simulated conversion. */
 export type ConvertSticker = (file: Uint8Array, format: StickerFormat) => Promise<ConvertedSticker>;
 
+/** The step a conversion is at, so that a conversion that stops can say where. */
+type Step = { now: string };
+
 /** An animation that can be drawn at a given square size and frame rate, as RGBA frames. */
 type Animation = {
   duration: number;
@@ -47,29 +51,45 @@ type Animation = {
 
 let worker: Worker | null = null;
 let nextRequest = 0;
-const pending = new Map<number, (png: ArrayBuffer) => void>();
+const pending = new Map<number, { resolve: (png: ArrayBuffer) => void; reject: (error: Error) => void }>();
+
+/** Stops the encoder worker and fails every encoding waiting for it; the next encoding starts a new worker. */
+function stopWorker(error: Error): void {
+  worker?.terminate();
+  worker = null;
+  for (const request of pending.values()) request.reject(error);
+  pending.clear();
+}
 
 function encodeApng(frames: ArrayBuffer[], size: number, frameRate: number): Promise<Uint8Array> {
   if (!worker) {
     worker = new Worker('/apng-worker.js', { type: 'module' });
     worker.onmessage = (event: MessageEvent<{ id: number; png: ArrayBuffer }>) => {
-      pending.get(event.data.id)?.(event.data.png);
+      pending.get(event.data.id)?.resolve(event.data.png);
       pending.delete(event.data.id);
     };
+    worker.onerror = (event) => stopWorker(new ConversionError(`the animation encoder failed: ${event.message}`));
   }
   const id = nextRequest++;
   const delays = frames.map(() => Math.round(1000 / frameRate));
-  return new Promise((resolve) => {
-    pending.set(id, (png) => resolve(new Uint8Array(png)));
+  return new Promise((resolve, reject) => {
+    pending.set(id, { resolve: (png) => resolve(new Uint8Array(png)), reject });
     worker!.postMessage({ id, frames, width: size, height: size, delays, colours: PALETTE_COLOURS }, frames);
   });
 }
 
 /**
+ * How long one sticker may take to convert. A large animated sticker takes several seconds, over a few attempts at
+ * smaller sizes; a conversion still running after this waits for something that will not come (an animation or
+ * video that never reports being loaded, an encoder that stopped answering).
+ */
+export const CONVERSION_TIME_LIMIT_MS = 120_000;
+
+/**
  * Encodes at the largest size and frame rate that fits. The file size is predicted as proportional to the number
  * of pixels over all frames; each attempt that comes out too large corrects the factor.
  */
-async function encodeToFit(animation: Animation): Promise<ConvertedSticker> {
+async function encodeToFit(animation: Animation, step: Step): Promise<ConvertedSticker> {
   const sourceRate = Math.min(animation.sourceFrameRate ?? MAX_FRAME_RATE, MAX_FRAME_RATE);
   const frameCount = (rate: number) => Math.max(1, Math.round(animation.duration * rate));
   const lowerRates = FRAME_RATES.filter((rate) => rate <= sourceRate);
@@ -81,11 +101,9 @@ async function encodeToFit(animation: Animation): Promise<ConvertedSticker> {
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
     const candidate = candidates.find((c) => c.pixels * bytesPerPixel <= MAX_STICKER_BYTES * PREDICTION_MARGIN);
     if (!candidate) break;
-    const png = await encodeApng(
-      await animation.render(candidate.size, candidate.rate),
-      candidate.size,
-      candidate.rate,
-    );
+    const frames = await animation.render(candidate.size, candidate.rate);
+    step.now = `encoding ${frames.length} frames at ${candidate.size} px, ${candidate.rate} fps (attempt ${attempt + 1})`;
+    const png = await encodeApng(frames, candidate.size, candidate.rate);
     if (png.length <= MAX_STICKER_BYTES) {
       return {
         image: png,
@@ -109,7 +127,8 @@ function newCanvas(size: number): { canvas: HTMLCanvasElement; context: CanvasRe
   return { canvas, context };
 }
 
-async function lottieAnimation(tgs: Uint8Array): Promise<Animation> {
+async function lottieAnimation(tgs: Uint8Array, step: Step): Promise<Animation> {
+  step.now = 'unpacking the animation';
   const json = await new Response(
     new Blob([tgs as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream('gzip')),
   ).text();
@@ -129,11 +148,13 @@ async function lottieAnimation(tgs: Uint8Array): Promise<Animation> {
         animationData: structuredClone(data),
         rendererSettings: { context, clearCanvas: true },
       });
+      step.now = `waiting for the animation to load, at ${size} px`;
       if (!animation.isLoaded)
         await new Promise<void>((resolve) => animation.addEventListener('DOMLoaded', () => resolve()));
       const frames: ArrayBuffer[] = [];
       const count = Math.max(1, Math.round((totalFrames / data.fr) * frameRate));
       for (let k = 0; k < count; k++) {
+        step.now = `drawing frame ${k + 1} of ${count} at ${size} px`;
         animation.goToAndStop(Math.min((k * data.fr) / frameRate, totalFrames - 1), true);
         frames.push(context.getImageData(0, 0, size, size).data.buffer);
       }
@@ -161,17 +182,19 @@ function waitFor(video: HTMLVideoElement, event: string): Promise<void> {
   });
 }
 
-async function videoAnimation(webm: Uint8Array): Promise<Animation> {
+async function videoAnimation(webm: Uint8Array, step: Step): Promise<Animation> {
   const url = URL.createObjectURL(new Blob([webm as Uint8Array<ArrayBuffer>], { type: 'video/webm' }));
   const video = document.createElement('video');
   video.muted = true;
   video.playsInline = true;
   video.preload = 'auto';
+  step.now = 'waiting for the video to load';
   const loaded = waitFor(video, 'loadeddata');
   video.src = url;
   await loaded;
   const seek = async (time: number) => {
     if (Math.abs(video.currentTime - time) < 1e-6) return;
+    step.now = `seeking the video to ${time === 1e9 ? 'its end, to learn its length' : `${time.toFixed(2)} s`}`;
     const seeked = waitFor(video, 'seeked');
     video.currentTime = time;
     await seeked;
@@ -219,16 +242,27 @@ async function reencodeWebp(webp: Uint8Array): Promise<Uint8Array> {
 }
 
 /** The file to upload to Signal for one Telegram sticker file. */
-export const convertSticker: ConvertSticker = async (file, format) => {
+export const convertSticker: ConvertSticker = (file, format) => {
+  const step: Step = { now: 'starting' };
+  return withTimeLimit(convert(file, format, step), CONVERSION_TIME_LIMIT_MS, () => {
+    const error = new ConversionError(
+      `converting took longer than ${CONVERSION_TIME_LIMIT_MS / 1000} seconds, at: ${step.now}`,
+    );
+    stopWorker(error);
+    return error;
+  });
+};
+
+async function convert(file: Uint8Array, format: StickerFormat, step: Step): Promise<ConvertedSticker> {
   if (format === 'webp') {
     return file.length <= MAX_STICKER_BYTES
       ? { image: file, animation: null, reencoded: false }
       : { image: await reencodeWebp(file), animation: null, reencoded: true };
   }
-  const animation = format === 'tgs' ? await lottieAnimation(file) : await videoAnimation(file);
+  const animation = format === 'tgs' ? await lottieAnimation(file, step) : await videoAnimation(file, step);
   try {
-    return await encodeToFit(animation);
+    return await encodeToFit(animation, step);
   } finally {
     animation.close();
   }
-};
+}
