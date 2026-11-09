@@ -6,19 +6,20 @@
 # or a file system. Output: build/webm-decoder/webm-decoder.js and webm-decoder.wasm, which app/build.mjs bundles
 # into the app as the module "webm-decoder" (declared in app/src/kinds/stickers/webm-decoder.d.ts).
 #
-# FFmpeg and libvpx are fetched at the versions pinned below into build/webm-decoder/src, and built into
-# build/webm-decoder/prefix; a library already built there is not built again. Emscripten is installed at its
-# pinned version into build/emsdk-webm, unless EMSDK is set.
+# FFmpeg and libvpx are fetched at the versions pinned below and built into a folder under build/webm-decoder named
+# after the three versions, so that changing one builds everything again; a library already built there is not
+# built again. Emscripten is installed at its pinned version into build/emsdk-webm, unless EMSDK is set.
 set -euo pipefail
 
-FFMPEG_TAG=n7.1.5
+FFMPEG_TAG=n9.0.2
 LIBVPX_TAG=v1.17.0
-EMSCRIPTEN_VERSION=4.0.23
+EMSCRIPTEN_VERSION=7.0.0
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 out=$repo/build/webm-decoder
-src=$out/src
-prefix=$out/prefix
+work=$out/ffmpeg-$FFMPEG_TAG-libvpx-$LIBVPX_TAG-emscripten-$EMSCRIPTEN_VERSION
+src=$work/src
+prefix=$work/prefix
 mkdir -p "$src" "$prefix"
 
 if [ -z "${EMSDK:-}" ]; then

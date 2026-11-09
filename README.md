@@ -91,7 +91,7 @@ You need Node.js, Rust (rustup picks the version from `rust-toolchain.toml`) and
 git clone --recurse-submodules https://github.com/ArviFoxy/signal-migration
 cd signal-migration
 scripts/build-tdweb.sh          # TDLib; slow, needed once. Installs Emscripten 3.1.1 under build/ unless EMSDK is set
-scripts/build-webm-decoder.sh   # the WebM decoder; a few minutes, needed once. Installs Emscripten 4.0.23 under build/
+scripts/build-webm-decoder.sh   # the WebM decoder; a few minutes, needed once. Installs Emscripten 7.0.0 under build/
 cd app && npm install && npm run build
 cd ../crates/server && cargo build --release
 ```

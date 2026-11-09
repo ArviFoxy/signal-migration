@@ -39,7 +39,7 @@ await build({
   outdir,
   sourcemap: true,
   alias: { tdweb: path.resolve(tdwebDist, 'tdweb.js'), 'webm-decoder': path.resolve(webmDecoder, 'webm-decoder.js') },
-  external: ['module', 'fs', 'path', 'url'],
+  external: ['node:*'],
 });
 execFileSync('node_modules/.bin/tailwindcss', ['--input', 'src/styles.css', '--output', `${outdir}/styles.css`], {
   stdio: 'inherit',
