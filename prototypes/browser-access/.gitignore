@@ -2,3 +2,4 @@ node_modules/
 public/main.js
 src/gen/
 src/wasm/
+public/*.wasm

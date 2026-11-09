@@ -7,6 +7,8 @@ inputs:
   - directory: ../../third_party/Signal-Desktop/protos
     paths:
       - ../../third_party/Signal-Desktop/protos/Stickers.proto
+      - ../../third_party/Signal-Desktop/protos/DeviceMessages.proto
+      - ../../third_party/Signal-Desktop/protos/DeviceName.proto
 plugins:
   - local: protoc-gen-es
     out: src/gen

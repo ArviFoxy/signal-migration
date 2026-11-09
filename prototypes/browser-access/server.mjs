@@ -10,7 +10,7 @@ import path from 'node:path';
 const HOST = process.env.HOST ?? '127.0.0.1';
 const PORT = Number(process.env.PORT ?? 8080);
 const ROOT = path.join(path.dirname(new URL(import.meta.url).pathname), 'public');
-const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8' };
+const TYPES = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.wasm': 'application/wasm' };
 
 function handle(request, response) {
   const url = new URL(request.url ?? '/', 'http://localhost');

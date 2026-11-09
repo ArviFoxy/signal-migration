@@ -1,3 +1,4 @@
+import { runLinkCycle } from './link';
 import { probeProvisioningSocket, REFLECTORS } from './provisioning';
 import { fetchManifest } from './sticker';
 
@@ -28,8 +29,25 @@ async function runProvisioningTest(): Promise<void> {
   }
 }
 
+async function runLinkTest(): Promise<void> {
+  const qr = element<HTMLImageElement>('link-qr');
+  try {
+    await runLinkCycle({
+      report: (line) => report('out-link', line),
+      showQrCode: (dataUrl) => {
+        qr.hidden = dataUrl === null;
+        qr.src = dataUrl ?? '';
+      },
+    });
+  } catch (error) {
+    qr.hidden = true;
+    report('out-link', `link cycle: FAILED ${error}`);
+  }
+}
+
 element('run-sticker').addEventListener('click', () => void runStickerTest());
 element('run-provisioning').addEventListener('click', () => void runProvisioningTest());
+element('run-link').addEventListener('click', () => void runLinkTest());
 
 // "?run=all" runs every test on load, for headless browsers.
 if (new URLSearchParams(location.search).get('run') === 'all') {
