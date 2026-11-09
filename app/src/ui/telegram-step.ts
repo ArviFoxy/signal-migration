@@ -115,7 +115,12 @@ export class TelegramStep extends LightElement {
       return html`<div class="flex flex-wrap items-center gap-10">
         ${qrBox(authState?._ === 'authorizationStateWaitOtherDeviceConfirmation' ? this.qrCode : null, 'QR code for Telegram sign-in')}
         ${instructions(
-          ['Open Telegram on your phone', 'Settings › Devices › Link Desktop Device', 'Point the camera at this code'],
+          [
+            'Open Telegram on your phone',
+            'Settings › Devices › Link Desktop Device',
+            'Point the camera at this code',
+            'If your account has a Two-Step Verification password, enter it on this page after scanning',
+          ],
           html`<button type="button" class=${linkButton} @click=${this.usePhone}>
             Sign in with phone number instead
           </button>`,
@@ -128,6 +133,10 @@ export class TelegramStep extends LightElement {
         return html`<p class="text-muted">Starting Telegram…</p>`;
       case 'authorizationStateWaitPhoneNumber':
         return html`${this.form('Phone number, in international format', 'tel', 'tel', (phone_number) => ({ _: 'setAuthenticationPhoneNumber', phone_number }))}
+          <p class="text-sm text-muted">
+            After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
+            has one.
+          </p>
           <button type="button" class="${linkButton} self-start" @click=${this.useQr}>
             Sign in with a QR code instead
           </button>`;
