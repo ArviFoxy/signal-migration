@@ -58,8 +58,8 @@ export type PackEntry = {
   state: PackState;
   packId: Uint8Array | null;
   /**
-   * The pack's key in Signal, once known: from the account's storage when installed, the first version's key when
-   * the pack was uploaded by it, or computed from the downloaded stickers (identity.ts contentPackKey).
+   * The pack's key in Signal, once known: from the account's storage when installed, or computed from the
+   * downloaded stickers (identity.ts contentPackKey).
    */
   packKey: Uint8Array | null;
   /** Up to four preview images for the pack list. */
@@ -247,10 +247,7 @@ export class StickerMigration extends EventTarget {
     this.#lookup ??= (async () => {
       await this.#services.index.refresh();
       await forEachConcurrently(this.entries, CONCURRENT_VERIFICATIONS, async (entry) => {
-        const { lookupKey, legacyPackKey } = entry.identity;
-        const legacy = await this.#services.index.find(lookupKey, legacyPackKey);
-        if (legacy) Object.assign(entry, { packId: legacy, packKey: legacyPackKey });
-        entry.state = legacy || this.#services.index.candidates(lookupKey).length > 0 ? 'available' : 'to-upload';
+        entry.state = this.#services.index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
         this.#changed();
       });
     })();
@@ -291,11 +288,9 @@ export class StickerMigration extends EventTarget {
   async readSignal(signal: SignalAccount): Promise<void> {
     const { packs } = await (await signal.storage()).readStickerPacks();
     for (const entry of this.entries) {
-      // Installed under the first version's key, or as one of the uploads the index lists for this pack.
+      // Installed as one of the uploads the index lists for this pack.
       const candidates = new Set(this.#services.index.candidates(entry.identity.lookupKey).map(toHex));
-      const installed = packs.find(
-        (stored) => sameBytes(stored.packKey, entry.identity.legacyPackKey) || candidates.has(toHex(stored.packId)),
-      );
+      const installed = packs.find((stored) => candidates.has(toHex(stored.packId)));
       if (installed)
         Object.assign(entry, { state: 'in-signal', packId: installed.packId, packKey: installed.packKey, error: null });
     }
@@ -489,19 +484,14 @@ export class StickerMigration extends EventTarget {
 
   /** Migrates one pack that is not installed. Returns false when someone else holds its claim. */
   async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<boolean> {
-    const { lookupKey, legacyPackKey } = entry.identity;
+    const { lookupKey } = entry.identity;
     // Someone may have uploaded the pack since the index was read.
     entry.state = 'checking';
     this.#changed();
     await this.#services.index.refresh();
-    entry.packId = await this.#services.index.find(lookupKey, legacyPackKey);
-    if (entry.packId) {
-      entry.packKey = legacyPackKey;
-    } else {
-      // The pack key comes from the stickers themselves, so they are downloaded before the index is asked.
-      await this.#download(telegram, entry);
-      entry.packId = await this.#services.index.find(lookupKey, entry.packKey!);
-    }
+    // The pack key comes from the stickers themselves, so they are downloaded before the index is asked.
+    await this.#download(telegram, entry);
+    entry.packId = await this.#services.index.find(lookupKey, entry.packKey!);
     if (!entry.packId) {
       if (!(await this.#claim(entry))) return false;
       this.#plannedInstalls.delete(entry);

@@ -89,19 +89,6 @@ describe('sharing uploads between users', () => {
     expect(world.readStickers(installed.packId, installed.packKey)).toHaveLength(a.stickers.length);
   });
 
-  // Detects: packs uploaded by the first version of the app (under the key derived from the pack's identity)
-  // uploaded again under the content key, or downloaded for nothing: their key needs no stickers.
-  it('installs a pack the first version uploaded without downloading or uploading it', async () => {
-    const world = new StickerWorld();
-    const a = world.pack('A');
-    await world.migrateElsewhere(a, { firstVersion: true });
-    const bob = world.user([a]);
-    await bob.visit();
-    expect(await bob.installedTitles()).toEqual(['A']);
-    expect(world.signal.packsUploaded.get(bob.aci) ?? 0).toBe(0);
-    expect(bob.stickers.stickerReads('A')).toBe(0);
-  });
-
   // Detects: a pack the user already has installed, from an upload the index lists, downloaded or uploaded again:
   // its key is in the user's account, so the stickers are not needed.
   it('recognizes an installed pack from the index without downloading it', async () => {

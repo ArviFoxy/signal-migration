@@ -288,13 +288,10 @@ export class StickerWorld extends World {
     return { packId, packKey };
   }
 
-  /**
-   * Another user migrating a Telegram pack: uploads it under the key derived from its content and adds it to the
-   * index. With `firstVersion`, as the first version of the app did: under the key derived from its identity.
-   */
-  async migrateElsewhere(spec: PackSpec, options: { firstVersion?: boolean } = {}): Promise<Uint8Array> {
+  /** Another user migrating a Telegram pack: uploads it under the key derived from its content and adds it to the index. */
+  async migrateElsewhere(spec: PackSpec): Promise<Uint8Array> {
     const identity = await packIdentity(spec);
-    const packKey = options.firstVersion ? identity.legacyPackKey : await packKeyOf(spec);
+    const packKey = await packKeyOf(spec);
     const stickers = await Promise.all(
       spec.stickers.map(async (sticker) => ({
         image: (await simulatedConvert(sticker.bytes, sticker.format)).image,

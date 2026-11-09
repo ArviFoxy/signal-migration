@@ -9,8 +9,6 @@
 //   sticker's Telegram file identifier and emoji, in pack order, which are known before anything is downloaded. HKDF
 //   under its own label makes it independent of every key: the index learns no pack key, and which Telegram pack an
 //   entry belongs to only if it already has that pack.
-// - `legacyPackKey` is the pack key the first version of this app used, derived from the identity rather than the
-//   content. It only recognizes packs that version uploaded; new uploads never use it.
 //
 // When the owner changes the pack on Telegram, its identity and content change, and the changed pack is migrated as
 // a new Signal pack.
@@ -19,12 +17,11 @@ const encoder = new TextEncoder();
 const IDENTITY_DOMAIN = 'signal-migration sticker pack v1';
 const CONTENT_DOMAIN = 'signal-migration sticker pack content v2';
 const PACK_KEY_LABEL = 'signal-migration pack key v2';
-const LEGACY_PACK_KEY_LABEL = 'signal-migration pack key v1';
 const LOOKUP_KEY_LABEL = 'signal-migration sticker-pack lookup v1';
 
 export type PackSource = { title: string; stickers: { uniqueId: string; emoji: string }[] };
 export type PackContent = { title: string; stickers: { file: Uint8Array; emoji: string }[] };
-export type PackIdentity = { sourceId: Uint8Array; lookupKey: Uint8Array; legacyPackKey: Uint8Array };
+export type PackIdentity = { sourceId: Uint8Array; lookupKey: Uint8Array };
 
 /** The domain label, then each field prefixed with its length, so that different packs never encode the same. */
 function encodeFields(domain: string, title: string, stickers: Uint8Array[][]): Uint8Array {
@@ -79,11 +76,7 @@ async function hkdf(inputKey: Uint8Array, label: string): Promise<Uint8Array> {
 
 export async function packIdentity(source: PackSource): Promise<PackIdentity> {
   const sourceId = await sha256(encodePackSource(source));
-  return {
-    sourceId,
-    lookupKey: await hkdf(sourceId, LOOKUP_KEY_LABEL),
-    legacyPackKey: await hkdf(sourceId, LEGACY_PACK_KEY_LABEL),
-  };
+  return { sourceId, lookupKey: await hkdf(sourceId, LOOKUP_KEY_LABEL) };
 }
 
 /** The Signal pack key of a pack, from its content: the title and every sticker's original file and emoji. */

@@ -35,14 +35,13 @@ const source: PackSource = {
 };
 
 describe('packIdentity', () => {
-  // Detects: a change to the encoding or the derivation labels, which would give every pack a new identity and make
-  // all earlier uploads, including those under the first version's key, unfindable.
-  it('derives the lookup key and the first version’s key with SHA-256 and HKDF-SHA256 under their labels', async () => {
+  // Detects: a change to the encoding or the derivation label, which would give every pack a new identity and make
+  // all earlier uploads unfindable.
+  it('derives the lookup key with SHA-256 and HKDF-SHA256 under its label', async () => {
     const sourceId = createHash('sha256').update(referenceEncoding(source)).digest();
     const derive = (label: string) => Buffer.from(hkdfSync('sha256', sourceId, Buffer.alloc(0), label, 32));
     const identity = await packIdentity(source);
     expect(Buffer.from(identity.sourceId)).toEqual(sourceId);
-    expect(Buffer.from(identity.legacyPackKey)).toEqual(derive('signal-migration pack key v1'));
     expect(Buffer.from(identity.lookupKey)).toEqual(derive('signal-migration sticker-pack lookup v1'));
   });
 
