@@ -258,7 +258,7 @@ export class StickerMigrateStep extends MigrationView {
       >
         ${svg`<path d=${arrow} stroke-linecap="round" stroke-linejoin="round"></path>`}
       </svg>
-      Current pack
+      Current task
     </button>`;
   }
 
