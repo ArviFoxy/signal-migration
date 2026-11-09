@@ -432,6 +432,13 @@ export class TelegramClient {
     return untilNotRestarted(async () => void (await this.invoke({ _: 'logOut' })));
   }
 
+  /** Stops TDLib's worker now and keeps the instance's databases, for TDLib to start on them again. */
+  terminate(): void {
+    this.#isStopped = true;
+    this.#stop(new Error('the Telegram connection was closed'));
+    void this.#terminateWorker();
+  }
+
   /** Stops TDLib's worker now and deletes the instance's databases. Requests still waiting fail. */
   async dispose(): Promise<void> {
     this.#isStopped = true;

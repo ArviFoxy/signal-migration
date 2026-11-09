@@ -88,6 +88,16 @@ export function appServices(
     withholdClosing?: boolean;
     /** TDLib starts but never reports a login state. */
     silentTelegram?: boolean;
+    /** Telegram never answers a logout (no network, for example). */
+    logOutNever?: boolean;
+    /** Signal never answers an unlink. */
+    unlinkNever?: boolean;
+    /** How many times reading the migration server's configuration fails. */
+    appFailures?: number;
+    /** How many times reading the record from the browser fails. */
+    loadFailures?: number;
+    /** Writing the record to the browser fails. */
+    saveFails?: boolean;
   } = {},
 ) {
   const { world } = user;
@@ -95,14 +105,26 @@ export function appServices(
   let instanceCount = browser.instances.size;
   let pendingTelegramScan: (() => void) | null = null;
   let pendingSignalScan: (() => void) | null = null;
-  const started: { instance: string; disposed: boolean; crash: () => void }[] = [];
+  const started: {
+    instance: string;
+    disposed: boolean;
+    crash: () => void;
+    report: (state: Td.AuthorizationState['_']) => void;
+  }[] = [];
+  let appFailures = options.appFailures ?? 0;
+  let loadFailures = options.loadFailures ?? 0;
+  /** The connections to Signal devices this page made, by device ID. */
+  const devices = new Map<number, LinkedDevice>();
   const page = browser.page;
   /** A closed page's work never finishes. */
   const whileOpen = <T>(action: () => Promise<T>): Promise<T> =>
     browser.page === page ? action() : new Promise<T>(() => undefined);
 
   const telegram: TelegramServices = {
-    app: async () => ({ apiId: 1, apiHash: 'simulated' }),
+    app: async () => {
+      if (appFailures-- > 0) throw new Error("reading the migration server's configuration answered 503");
+      return { apiId: 1, apiHash: 'simulated' };
+    },
     newInstance: () => `telegram-${String(++instanceCount).padStart(16, '0')}`,
     start(_app, instance, onAuthorizationState, onFatalError) {
       if (!browser.instances.has(instance)) browser.instances.set(instance, { authorization: null, loggingOut: false });
@@ -117,6 +139,8 @@ export function appServices(
           if (!restarted) crashed = true;
           onFatalError('Aborted()', restarted);
         },
+        /** TDLib reports `state` by itself. */
+        report: (state: Td.AuthorizationState['_']) => set({ _: state }),
       };
       started.push(record);
       let auth: Td.AuthorizationState['_'] = 'authorizationStateWaitTdlibParameters';
@@ -178,6 +202,7 @@ export function appServices(
               signIn();
               break;
             case 'logOut':
+              if (options.logOutNever) await new Promise(() => undefined);
               if (live.loggingOut) throw tdError(400, 'Already logging out');
               if (live.authorization) {
                 live.loggingOut = true;
@@ -200,10 +225,9 @@ export function appServices(
           if (browser.instances.has(instance)) browser.instances.set(instance, { ...live });
         },
         logOut: async () => void (await session.invoke({ _: 'logOut' })),
-        async dispose() {
+        terminate() {
           record.disposed = true;
-          browser.running.delete(instance);
-          browser.instances.delete(instance);
+          if (browser.running.get(instance) === live) browser.running.delete(instance);
           // Updates still on their way from the stopped client (a refreshed QR code, then "closed"), arriving after
           // the next client has reported; the workflow must not listen to them any more.
           const last = lastState;
@@ -211,6 +235,10 @@ export function appServices(
           const arrive = () =>
             --hops > 0 ? setTimeout(arrive, 0) : (set(last), set({ _: 'authorizationStateClosed' }));
           setTimeout(arrive, 0);
+        },
+        async dispose() {
+          session.terminate();
+          browser.instances.delete(instance);
         },
       };
       return session;
@@ -240,6 +268,7 @@ export function appServices(
       storage: () => account.storage(),
       announceStickerPacks: (packs) => account.announceStickerPacks(packs),
       async unlink() {
+        if (options.unlinkNever) await new Promise(() => undefined);
         if (world.signal.failUnlinks > 0) {
           world.signal.failUnlinks--;
           throw new Error('the connection to Signal closed');
@@ -248,6 +277,7 @@ export function appServices(
         device.onUnlinked();
       },
     };
+    devices.set(device.deviceId, device);
     return device;
   };
 
@@ -271,16 +301,24 @@ export function appServices(
       index: new PackIndex(world.index.backend, world.signal.manifestSource, world.index.pageSize),
     }),
     snapshots: {
-      load: () => browser.snapshots.load(),
-      save: (snapshot) => whileOpen(() => browser.snapshots.save(snapshot)),
+      load: async () => {
+        if (loadFailures-- > 0) throw new Error('the database is blocked');
+        return browser.snapshots.load();
+      },
+      save: async (record) => {
+        if (options.saveFails) throw new Error('the quota is exceeded');
+        return whileOpen(() => browser.snapshots.save(record));
+      },
       clear: () => whileOpen(() => browser.snapshots.clear()),
     },
+    lock: async () => true,
   };
   return {
     services,
     server,
     /** Every TDLib instance this page started, and whether it was stopped. */
     started,
+    devices,
     /** The phone scans the Telegram QR code on screen; false when none is waiting. */
     scanTelegramCode: () => {
       const scan = pendingTelegramScan;

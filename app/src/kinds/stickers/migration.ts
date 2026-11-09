@@ -105,6 +105,19 @@ function signalOrder(a: StoredStickerPack, b: StoredStickerPack): number {
   return a.position - b.position || (toHex(a.packId) < toHex(b.packId) ? -1 : 1);
 }
 
+/**
+ * `work`, or an AbortError as soon as `cancel` fires. The work itself is not stopped: a request already sent finishes
+ * on its own, and its result is no longer awaited.
+ */
+function untilCancelled<T>(work: Promise<T>, cancel: AbortSignal): Promise<T> {
+  if (cancel.aborted) return Promise.reject(cancel.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancel.reason);
+    cancel.addEventListener('abort', onAbort, { once: true });
+    work.then(resolve, reject).finally(() => cancel.removeEventListener('abort', onAbort));
+  });
+}
+
 async function forEachConcurrently<T>(items: T[], limit: number, action: (item: T) => Promise<void>): Promise<void> {
   let next = 0;
   const work = async () => {
@@ -552,15 +565,19 @@ export class StickerMigration extends EventTarget {
     return true;
   }
 
-  async #waitWhilePaused(): Promise<void> {
-    while (this.#paused) await new Promise<void>((resolve) => (this.#resume = resolve));
+  async #waitWhilePaused(cancel: AbortSignal): Promise<void> {
+    while (this.#paused) await untilCancelled(new Promise<void>((resolve) => (this.#resume = resolve)), cancel);
   }
 
   /**
    * Installs every selected pack: first those already uploaded, in one write, then the rest pack by pack, reading
    * their stickers from `telegram`.
    */
-  async run(signal: SignalAccount, telegram: TelegramSource): Promise<void> {
+  async run(
+    signal: SignalAccount,
+    telegram: TelegramSource,
+    cancel: AbortSignal = new AbortController().signal,
+  ): Promise<void> {
     const { clock } = this.#services;
     Object.assign(this, { phase: 'running', stopReason: null });
     this.#changed();
@@ -600,17 +617,21 @@ export class StickerMigration extends EventTarget {
     this.#changed();
     const recheckAt = new Map<PackEntry, number>();
     while (queue.length > 0) {
-      await this.#waitWhilePaused();
+      await this.#waitWhilePaused(cancel);
+      cancel.throwIfAborted();
       if (!signal.isLinked) break;
       const index = queue.findIndex((entry) => (recheckAt.get(entry) ?? 0) <= clock.now());
       if (index < 0) {
-        await clock.sleep(Math.min(...queue.map((entry) => recheckAt.get(entry)!)) - clock.now());
+        await untilCancelled(
+          clock.sleep(Math.min(...queue.map((entry) => recheckAt.get(entry)!)) - clock.now()),
+          cancel,
+        );
         continue;
       }
       const [entry] = queue.splice(index, 1);
       entry.error = null;
       try {
-        if (await this.#migrateOne(signal, telegram, entry)) {
+        if (await untilCancelled(this.#migrateOne(signal, telegram, entry), cancel)) {
           await this.#announce(signal, [entry], false);
         } else {
           entry.state = 'claimed-elsewhere';
@@ -618,6 +639,8 @@ export class StickerMigration extends EventTarget {
           queue.push(entry);
         }
       } catch (error) {
+        // A cancelled run leaves the pack as it was; the next run takes it up again.
+        if (cancel.aborted) throw error;
         if (error instanceof RateLimitedError) {
           entry.state = 'to-upload';
           queue.unshift(entry);
@@ -630,20 +653,23 @@ export class StickerMigration extends EventTarget {
           this.#changed();
           // While waiting, the next pack is downloaded and converted. If that fails, it is tried again in its turn.
           const next = queue.find((other) => other !== entry && other.state === 'to-upload' && !other.prepared);
-          await Promise.all([
-            clock.sleep(this.uploadAllowedAt - clock.now()),
-            next &&
-              this.#prepare(telegram, next).then(
-                () => {
-                  next.state = 'to-upload';
-                  this.#changed();
-                },
-                () => {
-                  Object.assign(next, { state: 'to-upload', progress: null });
-                  this.#changed();
-                },
-              ),
-          ]);
+          await untilCancelled(
+            Promise.all([
+              clock.sleep(this.uploadAllowedAt - clock.now()),
+              next &&
+                this.#prepare(telegram, next).then(
+                  () => {
+                    next.state = 'to-upload';
+                    this.#changed();
+                  },
+                  () => {
+                    Object.assign(next, { state: 'to-upload', progress: null });
+                    this.#changed();
+                  },
+                ),
+            ]),
+            cancel,
+          );
           this.uploadAllowedAt = null;
         } else {
           Object.assign(entry, { state: 'failed', error: message(error), progress: null });

@@ -7,8 +7,8 @@
 
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import type { SignalState } from '../app/signal-link';
-import type { TelegramState } from '../app/telegram-login';
+import type { SignalState, UnlinkReason } from '../app/machine/signal';
+import type { TelegramState } from '../app/machine/telegram';
 import { STEPS, type Workflow } from '../app/workflow';
 import '../kinds/stickers/ui/migrate-step';
 import '../kinds/stickers/ui/packs-step';
@@ -21,10 +21,15 @@ import './telegram-step';
 
 const TELEGRAM_STATUS: Record<TelegramState['kind'], [ConnectionState, string]> = {
   off: ['off', 'Not connected'],
+  creating: ['wait', 'Connecting'],
   starting: ['wait', 'Connecting'],
   login: ['wait', 'Waiting for sign-in'],
-  ready: ['on', 'Signed in'],
-  stopping: ['wait', 'Signing out'],
+  saving: ['on', 'Signed in'],
+  'signed-in': ['on', 'Signed in'],
+  'signing-out': ['wait', 'Signing out'],
+  'ending-by-itself': ['wait', 'Signing out'],
+  stopped: ['off', 'Not connected'],
+  deleting: ['wait', 'Signing out'],
 };
 
 const SIGNAL_STATUS: Record<SignalState['kind'], [ConnectionState, string]> = {
@@ -34,7 +39,7 @@ const SIGNAL_STATUS: Record<SignalState['kind'], [ConnectionState, string]> = {
   unlinking: ['wait', 'Unlinking'],
 };
 
-const UNLINKED = {
+const UNLINKED: Partial<Record<UnlinkReason, string>> = {
   'by-user': 'Unlinked',
   'from-phone': 'Unlinked from the phone',
   'at-finish': 'Unlinked automatically',
@@ -68,8 +73,11 @@ export class MigrationApp extends LightElement {
     const signal = w.signal.state;
     let [telegramState, telegramStatus] = TELEGRAM_STATUS[telegram.kind];
     if (telegram.kind === 'off' && telegram.signedOut) [telegramState, telegramStatus] = ['ended', 'Signed out'];
+    // Giving up an unfinished login (switching to the phone number, for example) is not signing out.
+    if (telegram.kind === 'deleting' && !telegram.signedOut) [telegramState, telegramStatus] = ['wait', 'Connecting'];
     let [signalState, signalStatus] = SIGNAL_STATUS[signal.kind];
-    if (signal.kind === 'off' && signal.unlinked) [signalState, signalStatus] = ['ended', UNLINKED[signal.unlinked]];
+    const unlinked = signal.kind === 'off' && signal.unlinked ? UNLINKED[signal.unlinked] : undefined;
+    if (unlinked) [signalState, signalStatus] = ['ended', unlinked];
     const added = w.stickers?.addedToIndex ?? 0;
     const contacted = w.stickers !== null && w.stickers.entries.length > 0;
     return {
@@ -80,7 +88,7 @@ export class MigrationApp extends LightElement {
       },
       signal: { state: signalState, status: signalStatus, action: { label: 'Unlink', event: 'signal-unlink' } },
       index: {
-        state: !contacted ? 'off' : w.phase.kind === 'finished' ? 'ended' : 'on',
+        state: !contacted ? 'off' : w.state.kind === 'done' ? 'ended' : 'on',
         status: !contacted
           ? 'Not contacted'
           : added > 0
@@ -138,12 +146,12 @@ export class MigrationApp extends LightElement {
 
   /** The entry of the step list that is current: the last one ("Done and logged out") once the migration finished. */
   private currentEntry(): number {
-    return this.workflow.phase.kind === 'finished' ? STEP_LABELS.length - 1 : STEPS.indexOf(this.workflow.step);
+    return this.workflow.state.kind === 'done' ? STEP_LABELS.length - 1 : STEPS.indexOf(this.workflow.step);
   }
 
   private nav() {
     const current = this.currentEntry();
-    const finished = this.workflow.phase.kind === 'finished';
+    const finished = this.workflow.state.kind === 'done';
     return html`<nav
       aria-label="Migration steps"
       class="hidden w-[272px] flex-none flex-col gap-7 border-r border-line bg-panel px-7 py-8 lg:flex"
@@ -214,7 +222,7 @@ export class MigrationApp extends LightElement {
           <button
             type="button"
             class=${primaryButton}
-            ?disabled=${w.phase.kind !== 'setup'}
+            ?disabled=${w.state.kind !== 'setup'}
             @click=${() => w.goTo('packs')}
           >
             Start
@@ -222,9 +230,69 @@ export class MigrationApp extends LightElement {
       )}`;
   }
 
+  /** Another tab runs the migration. */
+  private elsewhere() {
+    return stepHeader(null, 'The migration is open in another tab', 'Close it to continue here.');
+  }
+
+  /** The record could not be read. */
+  private loadFailed(error: string) {
+    return html`<div class="flex flex-col items-start gap-3 pt-8 lg:pt-0">
+      <p class="text-danger" role="alert">${error}</p>
+      <button type="button" class=${secondaryButton} @click=${() => this.workflow.retryLoad()}>Try again</button>
+    </div>`;
+  }
+
+  /** Signing out of Telegram or unlinking Signal failed at the end, or during a clear. */
+  private endFailed(telegramError: string | null, signalError: string | null) {
+    const w = this.workflow;
+    const part = (error: string, explanation: string, forget: () => void) =>
+      html`<section class="flex flex-col items-start gap-2">
+        <p class="text-danger" role="alert">${error}</p>
+        <button type="button" class=${secondaryButton} @click=${forget}>Forget it</button>
+        <p class="text-sm text-muted">${explanation}</p>
+      </section>`;
+    return html`<h1 class="font-display text-[34px] font-semibold tracking-[-0.01em]">
+        Not everything could be logged out
+      </h1>
+      ${
+        telegramError
+          ? part(
+              telegramError,
+              'This deletes the Telegram login from your browser without ending it. End the session in Telegram under Settings › Devices.',
+              () => w.forget('telegram'),
+            )
+          : nothing
+      }
+      ${
+        signalError
+          ? part(
+              signalError,
+              'This deletes the Signal device from your browser without unlinking it. Remove it in Signal under Settings › Linked devices.',
+              () => w.forget('signal'),
+            )
+          : nothing
+      }
+      ${stickyFooter(
+        html`<span></span>
+          <button type="button" class=${primaryButton} @click=${() => w.retryEnd()}>Try again</button>`,
+      )}`;
+  }
+
   private content() {
     const w = this.workflow;
-    if (w.phase.kind === 'loading') return nothing;
+    const state = w.state;
+    switch (state.kind) {
+      case 'locking':
+      case 'loading':
+        return nothing;
+      case 'elsewhere':
+        return this.elsewhere();
+      case 'load-failed':
+        return this.loadFailed(state.error);
+      case 'end-failed':
+        return this.endFailed(state.telegramError, state.signalError);
+    }
     switch (w.step) {
       case 'start':
         return this.startStep();
@@ -265,8 +333,8 @@ export class MigrationApp extends LightElement {
         return html`<sticker-migrate-step
           class="contents"
           .migration=${w.stickers}
-          .finished=${w.phase.kind === 'finished'}
-          .ending=${w.phase.kind === 'finishing'}
+          .finished=${w.state.kind === 'done'}
+          .ending=${w.state.kind === 'ending'}
           @retry=${() => w.tryAgain()}
           @finish=${() => w.finish()}
           @restart=${() => w.startOver()}
@@ -274,14 +342,18 @@ export class MigrationApp extends LightElement {
     }
   }
 
-  /** The newest failure: background work's, TDLib's, or an account's when its step is not on screen. */
+  /**
+   * The newest failure: background work's, TDLib's, or, during the setup and the migration, an account's when its
+   * step is not on screen. The end shows the accounts' failures on its own screen.
+   */
   private notice(): string | null {
     const w = this.workflow;
+    const accounts = w.state.kind === 'setup' || w.state.kind === 'migrating';
     return (
       w.error ??
-      w.telegram.notice ??
-      (w.step !== 'telegram' ? w.telegram.error : null) ??
-      (w.step !== 'signal' ? w.signal.error : null)
+      w.notice ??
+      (accounts && w.step !== 'telegram' ? w.telegram.error : null) ??
+      (accounts && w.step !== 'signal' ? w.signal.error : null)
     );
   }
 

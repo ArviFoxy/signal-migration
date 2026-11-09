@@ -1,11 +1,14 @@
-// Fixtures for looking at each screen without accounts. Each one builds the real workflow with inert services and
-// puts it straight into one state: no change event fires while a fixture is set up, so the workflow starts no
-// background work. `?f=<name>` picks the fixture; fixtures/screens.mjs screenshots them all. Built only with
+// Fixtures for looking at each screen without accounts. Each one builds the real workflow and puts it straight into
+// one state of the app's state machine. The workflow is not started, so no work runs. `?f=<name>` picks the fixture; fixtures/screens.mjs screenshots them all. Built only with
 // `node build.mjs --fixtures`, never served.
 
 import type * as Td from 'tdlib-types';
-import type { AppServices, LinkedDevice, TelegramSession } from '../src/app/services';
-import { type SetupStep, Workflow } from '../src/app/workflow';
+import type { AppState, SetupStep } from '../src/app/machine/app';
+import type { Session } from '../src/app/machine/app/state';
+import type { SignalState } from '../src/app/machine/signal';
+import type { TelegramState } from '../src/app/machine/telegram';
+import type { AppServices, StoredDevice } from '../src/app/services';
+import { Workflow } from '../src/app/workflow';
 import { type PackEntry, type PackState, StickerMigration } from '../src/kinds/stickers/migration';
 import type { PackIndex } from '../src/kinds/stickers/pack-index';
 import type { StickerFormat } from '../src/kinds/stickers/telegram-packs';
@@ -14,39 +17,34 @@ import '../src/ui/migration-app';
 
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
 
-const session: TelegramSession = {
-  instance: 'fixture',
-  invoke: never as unknown as Td.Invoke,
-  source: { readPacks: never, readFile: never },
-  checkpoint: never,
-  logOut: never,
-  dispose: never,
-};
+const device: StoredDevice = { aci: 'fixture', deviceId: 3, password: '', storageServiceKey: new Uint8Array(32) };
 
-const device: LinkedDevice = {
-  deviceId: 3,
-  https: never,
-  stored: { aci: 'fixture', deviceId: 3, password: '', storageServiceKey: new Uint8Array(32) },
-  onUnlinked: () => undefined,
-  isLinked: true,
-  withChat: never,
-  storage: never,
-  announceStickerPacks: never,
-  unlink: never,
-};
-
-const services: AppServices = {
-  telegram: {
-    app: never,
-    newInstance: () => 'fixture',
-    start: () => session,
-    instances: async () => [],
-    deleteInstance: async () => undefined,
-  },
-  signal: { link: never, restore: () => device },
+// No work runs in a fixture (the workflow is not started), so the services are never called.
+const services = {
   migration: () => ({ clock: { now: () => Date.now(), sleep: never }, convert: never, index: {} as PackIndex }),
-  snapshots: { load: async () => null, save: async () => undefined, clear: async () => undefined },
+} as unknown as AppServices;
+
+const signedIn: TelegramState = { kind: 'signed-in', method: 'qr', instance: 'fixture', attempt: 1, error: null };
+const notConnected: TelegramState = { kind: 'off', method: 'qr', signedOut: false, error: null };
+const linked: SignalState = { kind: 'linked', deviceName: 'Sticker migration', device, error: null, unlinks: 0 };
+const notLinked: SignalState = {
+  kind: 'off',
+  deviceName: 'Sticker migration',
+  unlinked: null,
+  error: null,
+  attempts: 0,
 };
+
+const session = (parts: Partial<Session> = {}): Session => ({
+  telegram: notConnected,
+  signal: notLinked,
+  packs: { kind: 'none' },
+  deselected: [],
+  notice: null,
+  ...parts,
+});
+
+const setup = (step: SetupStep, parts: Partial<Session> = {}): AppState => ({ ...session(parts), kind: 'setup', step });
 
 const TITLES = [
   'Fox Friends',
@@ -122,126 +120,192 @@ async function packs(count: number, withPreviews: boolean): Promise<PackEntry[]>
 }
 
 type Fixture = {
-  /** Puts the workflow into the fixture's state. */
-  set(workflow: Workflow): Promise<void> | void;
+  /** The state the fixture shows. */
+  state(): Promise<AppState> | AppState;
   /** One step the user takes once the screen shows (a scroll, for example). */
   then?(app: MigrationApp): void;
 };
 
-const signedIn = (w: Workflow) => (w.telegram.state = { kind: 'ready', session });
-const linked = (w: Workflow) => (w.signal.state = { kind: 'linked', device });
-const setup = (w: Workflow, step: SetupStep) => (w.phase = { kind: 'setup', step });
-
-async function withPacks(w: Workflow, count: number, withPreviews = false): Promise<StickerMigration> {
+async function withPacks(count: number, withPreviews = false): Promise<StickerMigration> {
   const migration = new StickerMigration(services.migration());
   migration.entries = await packs(count, withPreviews);
   migration.lookedUp = true;
-  migration.signalReadFrom = device;
-  w.stickers = migration;
   return migration;
 }
 
+const read = (migration: StickerMigration): Session['packs'] => ({
+  kind: 'read',
+  instance: 'fixture',
+  attempt: 1,
+  migration,
+  signalRead: device.deviceId,
+  signalError: null,
+  signalAttempt: 0,
+});
+
 /** The migration of 170 packs, `done` of them in Signal, the next one uploading. */
-async function migrating(w: Workflow, done: number): Promise<StickerMigration> {
-  signedIn(w);
-  linked(w);
-  w.phase = { kind: 'migrating' };
-  const migration = await withPacks(w, 170);
+async function migrating(done: number): Promise<{ state: AppState; migration: StickerMigration }> {
+  const migration = await withPacks(170);
   migration.phase = 'running';
   migration.entries.forEach((entry, rank) => {
     if (rank < done) entry.state = 'in-signal';
     else if (rank % 3 === 1) entry.state = 'available';
   });
-  return migration;
+  const state: AppState = {
+    ...session({ telegram: signedIn, signal: linked, packs: read(migration) }),
+    kind: 'migrating',
+    run: { attempt: 1, status: 'running', error: null },
+  };
+  return { state, migration };
 }
 
 const FIXTURES: Record<string, Fixture> = {
-  start: { set: (w) => setup(w, 'start') },
+  start: { state: () => setup('start') },
   'telegram-qr': {
-    set(w) {
-      setup(w, 'packs');
-      w.telegram.state = {
-        kind: 'login',
-        auth: { _: 'authorizationStateWaitOtherDeviceConfirmation', link: 'tg://login?token=fixture' },
-      };
-    },
+    state: () =>
+      setup('packs', {
+        telegram: {
+          kind: 'login',
+          method: 'qr',
+          instance: 'fixture',
+          attempt: 1,
+          auth: { _: 'authorizationStateWaitOtherDeviceConfirmation', link: 'tg://login?token=fixture' },
+          request: null,
+          sent: 1,
+          qrRequested: true,
+          error: null,
+        },
+      }),
   },
   'telegram-password': {
-    set(w) {
-      setup(w, 'packs');
-      w.telegram.method = 'phone';
-      w.telegram.state = {
-        kind: 'login',
-        auth: {
-          _: 'authorizationStateWaitPassword',
-          password_hint: 'the usual one',
-          has_recovery_email_address: false,
-          has_passport_data: false,
-          recovery_email_address_pattern: '',
-        } as Td.AuthorizationState,
-      };
-      w.telegram.error = 'PASSWORD_HASH_INVALID';
-    },
+    state: () =>
+      setup('packs', {
+        telegram: {
+          kind: 'login',
+          method: 'phone',
+          instance: 'fixture',
+          attempt: 1,
+          auth: {
+            _: 'authorizationStateWaitPassword',
+            password_hint: 'the usual one',
+            has_recovery_email_address: false,
+            has_passport_data: false,
+            recovery_email_address_pattern: '',
+          } as Td.AuthorizationState,
+          request: null,
+          sent: 3,
+          qrRequested: false,
+          error: 'PASSWORD_HASH_INVALID',
+        },
+      }),
+  },
+  'telegram-stopped': {
+    state: () =>
+      setup('packs', {
+        telegram: {
+          kind: 'stopped',
+          method: 'qr',
+          instance: 'fixture',
+          attempt: 1,
+          error: "Telegram's library did not start within 60 seconds.",
+        },
+      }),
   },
   'signal-qr': {
-    set(w) {
-      setup(w, 'packs');
-      signedIn(w);
-      w.signal.state = { kind: 'linking', qrUrl: 'sgnl://linkdevice?uuid=fixture&pub_key=fixture' };
-    },
+    state: () =>
+      setup('packs', {
+        telegram: signedIn,
+        signal: {
+          kind: 'linking',
+          deviceName: 'Sticker migration',
+          attempt: 1,
+          qrUrl: 'sgnl://linkdevice?uuid=fixture&pub_key=fixture',
+        },
+      }),
   },
   'packs-170': {
-    async set(w) {
-      setup(w, 'packs');
-      signedIn(w);
-      linked(w);
-      const migration = await withPacks(w, 170, true);
+    async state() {
+      const migration = await withPacks(170, true);
       migration.entries.forEach((entry, rank) => {
         if (rank % 3 === 1) entry.state = 'available';
         if (rank % 11 === 5) entry.state = 'in-signal';
         if (rank % 13 === 7) entry.selected = false;
       });
+      return setup('packs', { telegram: signedIn, signal: linked, packs: read(migration) });
     },
   },
   'review-170': {
-    async set(w) {
-      setup(w, 'review');
-      signedIn(w);
-      linked(w);
-      const migration = await withPacks(w, 170);
+    async state() {
+      const migration = await withPacks(170);
       migration.entries.forEach((entry, rank) => rank % 3 === 1 && (entry.state = 'available'));
+      return setup('review', { telegram: signedIn, signal: linked, packs: read(migration) });
     },
   },
   'migrate-uploading': {
-    async set(w) {
-      const migration = await migrating(w, 40);
+    async state() {
+      const { state, migration } = await migrating(40);
       Object.assign(migration.entries[40], { state: 'uploading', progress: { done: 12, total: 20 } });
+      return state;
     },
   },
   'migrate-waiting': {
-    async set(w) {
-      const migration = await migrating(w, 50);
+    async state() {
+      const { state, migration } = await migrating(50);
       migration.uploadAllowedAt = Date.now() + 43 * 60_000 + 12_000;
       Object.assign(migration.entries[51], { state: 'downloading', progress: { done: 5, total: 18 } });
+      return state;
     },
   },
   'migrate-scrolled-away': {
-    async set(w) {
-      const migration = await migrating(w, 40);
+    async state() {
+      const { state, migration } = await migrating(40);
       Object.assign(migration.entries[40], { state: 'uploading', progress: { done: 12, total: 20 } });
+      return state;
     },
     then(app) {
       app.querySelector('ul[aria-label="Packs"]')!.scrollTop = 0;
     },
   },
   'migrate-finished': {
-    async set(w) {
-      const migration = await migrating(w, 170);
+    async state() {
+      const { migration } = await migrating(170);
       migration.phase = 'done';
-      w.phase = { kind: 'finished' };
-      w.telegram.state = { kind: 'off', signedOut: true };
-      w.signal.state = { kind: 'off', unlinked: 'at-finish' };
+      return {
+        ...session({
+          telegram: { kind: 'off', method: 'qr', signedOut: true, error: null },
+          signal: { ...notLinked, unlinked: 'at-finish' },
+          packs: read(migration),
+        }),
+        kind: 'done',
+      };
     },
+  },
+  'end-failed': {
+    async state() {
+      const { migration } = await migrating(170);
+      return {
+        ...session({
+          telegram: {
+            ...signedIn,
+            error: 'Signing out of Telegram failed: Telegram did not answer within 60 seconds.',
+          },
+          signal: { ...linked, error: 'Unlinking Signal failed: Signal did not answer within 60 seconds.' },
+          packs: read(migration),
+        }),
+        kind: 'end-failed',
+        reason: 'finish',
+        telegramError: 'Signing out of Telegram failed: Telegram did not answer within 60 seconds.',
+        signalError: 'Unlinking Signal failed: Signal did not answer within 60 seconds.',
+      };
+    },
+  },
+  elsewhere: { state: () => ({ kind: 'elsewhere' }) },
+  'load-failed': {
+    state: () => ({
+      kind: 'load-failed',
+      error: 'Your browser could not read the saved migration: the database is blocked',
+      attempt: 1,
+    }),
   },
 };
 
@@ -259,7 +323,7 @@ const name = new URLSearchParams(location.search).get('f') ?? 'start';
 const fixture = FIXTURES[name];
 const app = document.querySelector('migration-app') as MigrationApp;
 const workflow = new Workflow(services);
-await fixture.set(workflow);
+workflow.state = await fixture.state();
 app.workflow = workflow;
 await app.updateComplete;
 await document.fonts.ready;

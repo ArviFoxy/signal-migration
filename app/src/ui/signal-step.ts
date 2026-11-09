@@ -4,7 +4,7 @@
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import QRCode from 'qrcode';
-import type { SignalLink } from '../app/signal-link';
+import type { SignalView } from '../app/workflow';
 import {
   connectionArrow,
   connectionEnd,
@@ -20,14 +20,14 @@ import {
 
 @customElement('signal-step')
 export class SignalStep extends LightElement {
-  @property({ attribute: false }) link!: SignalLink;
+  @property({ attribute: false }) link!: SignalView;
   /** The QR code image, drawn from the link it shows. */
   @state() private qrImage: { url: string; image: string } | null = null;
   #onChange = () => this.requestUpdate();
 
   protected willUpdate(changed: PropertyValues<this>): void {
     if (changed.has('link')) {
-      (changed.get('link') as SignalLink | undefined)?.removeEventListener('change', this.#onChange);
+      (changed.get('link') as SignalView | undefined)?.removeEventListener('change', this.#onChange);
       this.link.addEventListener('change', this.#onChange);
     }
   }

@@ -19,7 +19,7 @@ import {
   TelegramClient,
   telegramInstancesInBrowser,
 } from '../telegram/client';
-import type { Snapshot } from './workflow';
+import type { Record } from './machine/record';
 
 export type { StoredDevice };
 
@@ -32,6 +32,8 @@ export interface TelegramSession {
   checkpoint(): Promise<void>;
   /** Ends the session on Telegram's side; resolves once Telegram has answered. */
   logOut(): Promise<void>;
+  /** Stops TDLib now and keeps what the instance stored in this browser, for TDLib to start on it again. */
+  terminate(): void;
   /** Stops the instance now and deletes what it stored in this browser. */
   dispose(): Promise<void>;
 }
@@ -71,10 +73,10 @@ export type SignalServices = {
   restore(stored: StoredDevice): LinkedDevice;
 };
 
-/** Where the workflow keeps its snapshot between visits. */
+/** Where the app keeps its record between visits (machine/record.ts). */
 export interface SnapshotStore {
   load(): Promise<unknown>;
-  save(snapshot: Snapshot): Promise<void>;
+  save(record: Record): Promise<void>;
   clear(): Promise<void>;
 }
 
@@ -83,16 +85,32 @@ export type AppServices = {
   signal: SignalServices;
   migration(): MigrationServices;
   snapshots: SnapshotStore;
+  /**
+   * Takes the lock that lets one tab run the migration, held until the page closes. Resolves true once held; with
+   * `wait` false, resolves false at once when another tab holds it.
+   */
+  lock(wait: boolean): Promise<boolean>;
 };
 
-/** The snapshot in this site's own IndexedDB database. */
+/** The record in this site's own IndexedDB database. */
 function indexedDbSnapshots(): SnapshotStore {
   const store = createStore('signal-migration', 'workflow');
   return {
     load: async () => (await get<unknown>('snapshot', store)) ?? null,
-    save: (snapshot) => set('snapshot', snapshot, store),
+    save: (record) => set('snapshot', record, store),
     clear: () => del('snapshot', store),
   };
+}
+
+/** The Web Locks API lock "signal-migration": a tab holds it while its page is open. */
+function browserLock(wait: boolean): Promise<boolean> {
+  return new Promise((resolve) => {
+    void navigator.locks.request('signal-migration', { ifAvailable: !wait }, (lock) => {
+      resolve(lock !== null);
+      // Held for as long as the page lives.
+      return lock ? new Promise<void>(() => undefined) : undefined;
+    });
+  });
 }
 
 export const realServices: AppServices = {
@@ -111,6 +129,7 @@ export const realServices: AppServices = {
         source: telegramSource(client),
         checkpoint: () => client.checkpoint(),
         logOut: () => client.logOut(),
+        terminate: () => client.terminate(),
         dispose: () => client.dispose(),
       };
     },
@@ -123,4 +142,5 @@ export const realServices: AppServices = {
   },
   migration: () => ({ clock: systemClock, convert: convertSticker, index: new PackIndex() }),
   snapshots: indexedDbSnapshots(),
+  lock: browserLock,
 };

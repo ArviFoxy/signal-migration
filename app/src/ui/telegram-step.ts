@@ -5,7 +5,8 @@
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import QRCode from 'qrcode';
-import type { LoginQuery, TelegramLogin } from '../app/telegram-login';
+import type { LoginQuery } from '../app/machine/telegram';
+import type { TelegramView } from '../app/workflow';
 import {
   connectionArrow,
   connectionEnd,
@@ -21,7 +22,7 @@ import {
 } from './layout';
 @customElement('telegram-step')
 export class TelegramStep extends LightElement {
-  @property({ attribute: false }) login!: TelegramLogin;
+  @property({ attribute: false }) login!: TelegramView;
   /** The QR code image, drawn from the link it shows. */
   @state() private qrImage: { link: string; url: string } | null = null;
   @state() private showPassword = false;
@@ -29,7 +30,7 @@ export class TelegramStep extends LightElement {
 
   protected willUpdate(changed: PropertyValues<this>): void {
     if (changed.has('login')) {
-      (changed.get('login') as TelegramLogin | undefined)?.removeEventListener('change', this.#onChange);
+      (changed.get('login') as TelegramView | undefined)?.removeEventListener('change', this.#onChange);
       this.login.addEventListener('change', this.#onChange);
     }
   }
@@ -59,7 +60,7 @@ export class TelegramStep extends LightElement {
   private submit(event: SubmitEvent, build: (value: string) => LoginQuery): void {
     event.preventDefault();
     const input = (event.target as HTMLFormElement).querySelector('input')!;
-    void this.login.submit(build(input.value.trim()));
+    this.login.submit(build(input.value.trim()));
   }
 
   private form(label: string, type: string, autocomplete: string, build: (value: string) => LoginQuery) {
@@ -107,15 +108,22 @@ export class TelegramStep extends LightElement {
   private body() {
     const login = this.login;
     const state = login.state;
-    if (state.kind === 'off') {
+    if (state.kind === 'off' || state.kind === 'stopped') {
       return login.error
         ? html`<button type="button" class="${secondaryButton} self-start" @click=${() => login.retry()}>
             Try again
           </button>`
-        : html`<p class="text-muted">${state.signedOut ? 'Signed out of Telegram.' : 'Not connected.'}</p>`;
+        : html`<p class="text-muted">
+            ${state.kind === 'off' && state.signedOut ? 'Signed out of Telegram.' : 'Not connected.'}
+          </p>`;
     }
-    if (state.kind === 'stopping') return html`<p class="text-muted">Signing out of Telegram…</p>`;
-    if (state.kind === 'ready')
+    if (
+      state.kind === 'signing-out' ||
+      state.kind === 'ending-by-itself' ||
+      (state.kind === 'deleting' && state.signedOut)
+    )
+      return html`<p class="text-muted">Signing out of Telegram…</p>`;
+    if (state.kind === 'saving' || state.kind === 'signed-in')
       return html`<p class="flex items-center gap-2 font-semibold text-accent">
         ${icons.check(18)} Signed in to Telegram
       </p>`;
@@ -190,7 +198,7 @@ export class TelegramStep extends LightElement {
 
   render() {
     const login = this.login;
-    const ready = login.state.kind === 'ready';
+    const ready = login.state.kind === 'signed-in';
     const description = ready
       ? 'Telegram is connected.'
       : login.method === 'qr'

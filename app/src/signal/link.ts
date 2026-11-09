@@ -17,10 +17,11 @@ import {
 } from '../wasm/signal_migration_wasm';
 import { basicAuthorization, type DeviceCredentials } from './session';
 import { connectChat } from './socket';
+import { DEFAULT_DEVICE_NAME } from './device-name';
 import { loadSignalWasm } from './wasm';
 
-/** The linked device's name, as the user sees it in Signal's list of linked devices, unless they choose another. */
-export const DEFAULT_DEVICE_NAME = 'Sticker migration';
+export { DEFAULT_DEVICE_NAME };
+
 const SCAN_TIMEOUT_MS = 180_000;
 
 /** What the migration keeps from linking, in memory only, until it unlinks. */

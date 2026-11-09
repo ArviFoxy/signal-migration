@@ -13,13 +13,16 @@ export function withTimeLimit<T>(work: Promise<T>, ms: number, expire: () => Err
 /** Who a request went to. */
 export type Party = 'Telegram' | 'Signal' | 'The migration server';
 
+/** The message for a request that got no answer within its time limit. */
+export const noAnswer = (party: Party, seconds: number) => `${party} did not answer within ${seconds} seconds.`;
+
 /** A request that got no answer within its time limit. */
 export class NoAnswerError extends Error {
   constructor(
     readonly party: Party,
     readonly seconds: number,
   ) {
-    super(`${party} did not answer within ${seconds} seconds.`);
+    super(noAnswer(party, seconds));
   }
 }
 

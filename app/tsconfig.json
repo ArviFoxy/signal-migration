@@ -10,5 +10,5 @@
     "useDefineForClassFields": false,
     "skipLibCheck": true
   },
-  "include": ["demo", "src", "test"]
+  "include": ["fixtures", "src", "test"]
 }

@@ -17,7 +17,7 @@ const stepOf = (hash: string): Step | null => {
 };
 
 /** What the user asked for: the step asked for in setup, or the phase. */
-const requestOf = (workflow: Workflow) => (workflow.phase.kind === 'setup' ? workflow.phase.step : workflow.phase.kind);
+const requestOf = (workflow: Workflow) => (workflow.state.kind === 'setup' ? workflow.state.step : workflow.state.kind);
 
 export function connectRouter(workflow: Workflow): void {
   let shown: Step = workflow.step;

@@ -2,6 +2,7 @@
 // world, with reloads and closed pages in between. Each test names the failure it exists to catch.
 
 import { describe, expect, it } from 'vitest';
+import { isSession } from '../src/app/machine/app';
 import { Workflow } from '../src/app/workflow';
 import { appServices, Browser, TelegramServer } from './scenario/stickers/app-services';
 import { StickerWorld, type StickerUser } from './scenario/stickers/sticker-world';
@@ -29,7 +30,8 @@ async function settle(page: Page): Promise<void> {
 async function openPage(user: StickerUser, browser: Browser, options: Parameters<typeof appServices>[2] = {}) {
   const page = appServices(user, browser, options);
   const workflow = new Workflow(page.services);
-  await workflow.load();
+  workflow.start();
+  await until(() => isSession(workflow.state), 'the page loaded');
   return { workflow, ...page };
 }
 type Page = Awaited<ReturnType<typeof openPage>>;
@@ -51,7 +53,7 @@ async function link(page: Page): Promise<void> {
 
 async function migrate(page: Page): Promise<void> {
   page.workflow.startMigration();
-  await until(() => page.workflow.phase.kind === 'finished', 'the end of the migration');
+  await until(() => page.workflow.state.kind === 'done', 'the end of the migration');
   await settle(page);
 }
 
@@ -93,7 +95,7 @@ describe('the workflow', () => {
 
     await world.clock.advance(5 * 60 * MINUTE);
     const second = await openPage(alice, browser);
-    await until(() => second.workflow.phase.kind === 'finished', 'the end of the migration');
+    await until(() => second.workflow.state.kind === 'done', 'the end of the migration');
     await settle(second);
     expect(second.server.active.size).toBe(0);
     expect(world.signal.devices(alice.aci)).toEqual([1, deviceId]);
@@ -159,14 +161,14 @@ describe('the workflow', () => {
     );
     const states: string[] = [];
     page.workflow.addEventListener('change', () => {
-      if (page.workflow.phase.kind === 'migrating') states.push(page.workflow.telegram.state.kind);
+      if (page.workflow.state.kind === 'migrating') states.push(page.workflow.telegram.state.kind);
     });
     page.started.at(-1)!.crash();
     await migrate(page);
-    expect(page.workflow.telegram.notice).toBe(
+    expect(page.workflow.notice).toBe(
       "Telegram's library stopped after an internal error and was restarted. (TDLib: Aborted())",
     );
-    expect(new Set(states)).toEqual(new Set(['ready']));
+    expect(new Set(states)).toEqual(new Set(['signed-in']));
     expect(page.started.length).toBe(1);
     expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
     expect(world.signal.packsUploaded.get(alice.aci)).toBe(3);
@@ -191,9 +193,7 @@ describe('the workflow', () => {
     await until(() => page.workflow.step === 'signal', 'the Signal step');
     expect(page.workflow.telegram.instance).not.toBe(stopped);
     expect(browser.instances.has(stopped)).toBe(false);
-    expect(page.workflow.telegram.notice).toBe(
-      "Telegram's library stopped after an internal error. (TDLib: Aborted())",
-    );
+    expect(page.workflow.notice).toBe("Telegram's library stopped after an internal error. (TDLib: Aborted())");
   });
 
   // Detects: "Disconnect and clear" waiting forever for a TDLib that stopped before it reported anything, with the
@@ -210,14 +210,49 @@ describe('the workflow', () => {
 
     const second = await openPage(alice, browser, { silentTelegram: true });
     await until(() => second.workflow.telegram.state.kind === 'starting', 'TDLib starting');
-    const clearing = second.workflow.clear();
+    second.workflow.clear();
     // The clear reaches the wait for TDLib's first report before TDLib stops.
     for (let i = 0; i < 20; i++) await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(second.workflow.phase.kind).toBe('clearing');
+    expect(second.workflow.state.kind).toBe('ending');
     second.started.at(-1)!.crash();
-    await clearing;
-    expect(second.workflow.phase).toEqual({ kind: 'setup', step: 'start' });
+    await until(() => second.workflow.state.kind === 'setup', 'the start');
+    await settle(second);
+    expect(second.workflow.step).toBe('start');
     expect(browser.instances.size).toBe(0);
+  });
+
+  // Detects: the record of the earlier version not read after an update, which forgets the kept logins: the user
+  // signs in and links again, and the old session and device stay active with nothing to end them.
+  it('continues from the record kept by the earlier version', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+    first.workflow.setSelected(
+      first.workflow.stickers!.entries.filter((entry) => entry.pack.title === 'B'),
+      false,
+    );
+    const deviceId = deviceIdOf(first);
+    await settle(first);
+    browser.closePage();
+    const kept = browser.snapshot as { telegram: string; signal: unknown; deselected: string[] };
+    browser.snapshot = {
+      version: 2,
+      phase: 'setup',
+      step: 'review',
+      telegram: kept.telegram,
+      signal: kept.signal,
+      deselected: kept.deselected,
+    };
+
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.step === 'review' && second.workflow.packsReady, 'the review');
+    expect(deviceIdOf(second)).toBe(deviceId);
+    expect(second.server.active.size).toBe(1);
+    expect(world.signal.devices(alice.aci)).toEqual([1, deviceId]);
+    expect(second.workflow.stickers!.entries.map((entry) => entry.selected)).toEqual([true, false]);
   });
 
   // Detects: a deselected pack coming back selected after a reload, and being migrated against the user's choice.
@@ -248,7 +283,8 @@ describe('the workflow', () => {
     await signIn(page);
     await link(page);
     const deviceId = deviceIdOf(page);
-    await page.workflow.clear();
+    page.workflow.clear();
+    await until(() => page.workflow.state.kind === 'setup', 'the start');
     await settle(page);
     expect(page.workflow.step).toBe('start');
     expect(page.server.active.size).toBe(0);
@@ -268,7 +304,8 @@ describe('the workflow', () => {
     await link(first);
     const deviceId = deviceIdOf(first);
     world.signal.failUnlinks = 1;
-    await first.workflow.clear();
+    first.workflow.clear();
+    await until(() => first.workflow.state.kind === 'end-failed', 'the failed unlink');
     await settle(first);
     expect(world.signal.isLinked(alice.aci, deviceId)).toBe(true);
     browser.closePage();
@@ -289,8 +326,8 @@ describe('the workflow', () => {
     const browser = new Browser();
     const first = await openPage(alice, browser);
     await signIn(first);
-    void first.workflow.clear();
-    await until(() => first.workflow.telegram.state.kind === 'stopping', 'signing out');
+    first.workflow.clear();
+    await until(() => first.workflow.telegram.state.kind === 'signing-out', 'signing out');
     browser.syncTdlib();
     browser.closePage();
     expect(first.server.active.size).toBe(1);
@@ -320,8 +357,12 @@ describe('the workflow', () => {
     expect(page.started.filter((client) => !client.disposed)).toHaveLength(1);
     expect(browser.instances.size).toBe(1);
 
-    await login.submit({ _: 'setAuthenticationPhoneNumber', phone_number: '+1 555 0100' });
-    await login.submit({ _: 'checkAuthenticationCode', code: TelegramServer.CODE });
+    login.submit({ _: 'setAuthenticationPhoneNumber', phone_number: '+1 555 0100' });
+    await until(
+      () => login.state.kind === 'login' && login.state.auth._ === 'authorizationStateWaitCode' && !login.sending,
+      'the code form',
+    );
+    login.submit({ _: 'checkAuthenticationCode', code: TelegramServer.CODE });
     await until(() => page.workflow.step === 'signal', 'the Signal step');
     expect(page.server.active.size).toBe(1);
   });
@@ -336,7 +377,7 @@ describe('the workflow', () => {
     await signIn(page);
     await link(page);
     alice.phone.unlink(deviceIdOf(page));
-    page.workflow.signal.device!.onUnlinked();
+    page.devices.get(deviceIdOf(page))!.onUnlinked();
     await until(() => page.workflow.step === 'signal', 'the Signal step');
     await until(() => page.scanSignalCode(), 'a new Signal QR code');
     await until(() => page.workflow.step === 'review' && page.workflow.packsReady, 'the review again');
@@ -400,11 +441,33 @@ describe('the workflow', () => {
     page.workflow.startMigration();
     await until(() => page.workflow.stickers?.announceError != null, 'the failure to tell the other devices');
     await settle(page);
-    expect(page.workflow.phase.kind).toBe('migrating');
+    expect(page.workflow.state.kind).toBe('migrating');
     expect(page.workflow.signal.state.kind).toBe('linked');
     world.signal.failAnnouncements = 0;
     page.workflow.tryAgain();
-    await until(() => page.workflow.phase.kind === 'finished', 'the end of the migration');
+    await until(() => page.workflow.state.kind === 'done', 'the end of the migration');
+    expect(world.signal.toldInstalled.get(alice.aci)).toHaveLength(1);
+  });
+
+  // Detects: a reload after every pack reached Signal but before the phone was told ending the migration at once,
+  // so that the phone is never told and shows none of the packs.
+  it('tells the phone after a reload, before finishing, when every pack is already in Signal', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+    world.signal.failAnnouncements = 1000;
+    first.workflow.goTo('review');
+    first.workflow.startMigration();
+    await until(() => first.workflow.stickers?.announceError != null, 'the failure to tell the other devices');
+    await settle(first);
+    browser.closePage();
+
+    world.signal.failAnnouncements = 0;
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.state.kind === 'done', 'the end of the migration');
     expect(world.signal.toldInstalled.get(alice.aci)).toHaveLength(1);
   });
 
