@@ -79,18 +79,18 @@ const icon = (paths: TemplateResult, size = 22, colour = 'currentColor', strokeW
 
 export const icons = {
   check: (size = 14) => icon(svg`<path d="M5 12l5 5L20 7"></path>`, size, 'currentColor', 3),
-  computer: () =>
-    icon(svg`<rect x="4" y="5" width="16" height="11" rx="2"></rect><path d="M2 19h20"></path>`, 22, '#1B1B1F'),
-  servers: () =>
+  computer: (size = 22) =>
+    icon(svg`<rect x="4" y="5" width="16" height="11" rx="2"></rect><path d="M2 19h20"></path>`, size, '#1B1B1F'),
+  servers: (size = 22) =>
     icon(
       svg`<rect x="4" y="4" width="16" height="7" rx="1.5"></rect><rect x="4" y="13" width="16" height="7" rx="1.5"></rect><path d="M8 7.5h.01"></path><path d="M8 16.5h.01"></path>`,
-      22,
+      size,
       '#1B1B1F',
     ),
-  relay: () =>
+  relay: (size = 22) =>
     icon(
       svg`<path d="M4 12h16"></path><path d="M12 4v16"></path><circle cx="12" cy="12" r="3"></circle>`,
-      22,
+      size,
       '#1B1B1F',
     ),
   lock: (colour = '#3F3CBB') =>
@@ -118,35 +118,47 @@ export const icons = {
     ),
 };
 
-/** A two-headed arrow with a label above it, for the connection diagrams. */
-export function connectionArrow(label: string): TemplateResult {
-  return html`<div class="flex min-w-12 flex-[1_1_48px] flex-col items-center gap-0.5">
-    <span class="text-center text-xs text-muted">${label}</span>
-    <svg
-      width="100%"
-      height="12"
-      viewBox="0 0 140 12"
-      preserveAspectRatio="none"
-      fill="none"
-      stroke="#3F3CBB"
-      stroke-width="2"
-      stroke-linecap="round"
-      aria-hidden="true"
-    >
-      <path d="M2 6h136"></path>
-      <path d="M8 1L2 6l6 5"></path>
-      <path d="M132 1l6 5-6 5"></path>
-    </svg>
+/** A part of a connection diagram: one end or relay, or the link between two of them. */
+export type DiagramPart = { symbol: TemplateResult; name: string } | { link: string };
+
+/** A small diagram of a connection, from end to end, for the connections cards. */
+export function connectionDiagram(parts: DiagramPart[]): TemplateResult {
+  return html`<div class="flex items-start rounded-lg bg-panel px-2 py-2.5" aria-hidden="true">
+    ${parts.map((part) =>
+      'link' in part
+        ? html`<div class="flex min-w-0 flex-1 flex-col items-center gap-1 px-1 pt-2">
+            <span class="text-[10px] leading-none whitespace-nowrap text-muted">${part.link}</span>
+            <svg
+              width="100%"
+              height="8"
+              viewBox="0 0 100 8"
+              preserveAspectRatio="none"
+              fill="none"
+              stroke="#3F3CBB"
+              stroke-width="1.5"
+              stroke-linecap="round"
+            >
+              <path d="M1 4h98"></path>
+              <path d="M5 1L1 4l4 3"></path>
+              <path d="M95 1l4 3-4 3"></path>
+            </svg>
+          </div>`
+        : html`<div class="flex w-[76px] flex-none flex-col items-center gap-1 text-center">
+            <span class="flex size-8 items-center justify-center rounded-lg bg-white ring-1 ring-line ring-inset"
+              >${part.symbol}</span
+            >
+            <span class="text-[11px] leading-tight font-semibold">${part.name}</span>
+          </div>`,
+    )}
   </div>`;
 }
 
-/** One end of a connection diagram. */
-export function connectionEnd(symbol: TemplateResult, name: string, detail: string): TemplateResult {
-  return html`<div class="flex items-center gap-2.5 rounded-xl bg-white px-4 py-3 ring-1 ring-[#DADBE0] ring-inset">
-    ${symbol}
-    <span class="flex flex-col"
-      ><span class="text-sm font-semibold">${name}</span><span class="text-xs text-muted">${detail}</span></span
-    >
+/** The card of a login method: the QR code or the form, and beside it (below on narrow screens) what to do. */
+export function loginCard(main: TemplateResult, side: TemplateResult | typeof nothing = nothing): TemplateResult {
+  return html`<div
+    class="flex flex-col gap-6 rounded-2xl bg-panel p-5 ring-1 ring-line ring-inset sm:p-6 md:flex-row md:items-start md:gap-8"
+  >
+    ${main} ${side === nothing ? nothing : html`<div class="flex min-w-0 flex-1 flex-col gap-5">${side}</div>`}
   </div>`;
 }
 
@@ -156,25 +168,29 @@ export function qrBox(dataUrl: string | null, label: string): TemplateResult {
     ? html`<img
         src=${dataUrl}
         alt=${label}
-        class="size-60 flex-none rounded-2xl bg-white p-2 ring-1 ring-[#DADBE0] ring-inset"
+        class="size-56 flex-none self-center rounded-xl bg-white p-2 ring-1 ring-line ring-inset md:self-start"
       />`
     : html`<div
         role="img"
         aria-label=${label}
-        class="flex size-60 flex-none items-center justify-center rounded-2xl bg-panel text-sm text-muted ring-1 ring-[#DADBE0] ring-inset"
+        class="flex size-56 flex-none items-center justify-center self-center rounded-xl bg-white text-sm text-muted ring-1 ring-line ring-inset md:self-start"
       >
         Preparing the code…
       </div>`;
 }
 
-/** Numbered instructions next to a QR code. */
-export function instructions(
-  steps: (string | TemplateResult)[],
-  extra: TemplateResult | typeof nothing = nothing,
-): TemplateResult {
-  return html`<ol class="flex flex-[1_1_260px] flex-col gap-[18px]">
-    ${steps.map((text, i) => html`<li class="flex items-baseline gap-3.5"><span class="w-[18px] flex-none font-semibold text-accent">${i + 1}</span><span class="text-base">${text}</span></li>`)}
-    ${extra === nothing ? nothing : html`<li class="pl-8">${extra}</li>`}
+/** Numbered instructions for scanning a QR code. */
+export function instructions(steps: (string | TemplateResult)[]): TemplateResult {
+  return html`<ol class="flex flex-col gap-3.5">
+    ${steps.map(
+      (text, i) =>
+        html`<li class="flex items-start gap-3">
+          <span
+            class="flex size-6 flex-none items-center justify-center rounded-full bg-accent-soft text-[13px] font-semibold text-accent"
+            >${i + 1}</span
+          ><span class="pt-0.5 text-[15px] leading-snug">${text}</span>
+        </li>`,
+    )}
   </ol>`;
 }
 

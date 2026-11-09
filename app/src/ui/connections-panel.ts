@@ -1,11 +1,11 @@
 // The connections panel at the bottom of the step list: what the page is connected to right now, a way to
-// disconnect each, and for each a card attached to its row that says what the connection is, first plainly, then
-// technically. The card shows while the pointer is over the row, or while its info button has focus (a tap on touch
+// disconnect each, and for each a card attached to its row that says what the connection is: a small diagram of it,
+// then plainly, then technically. The card shows while the pointer is over the row, or while its info button has focus (a tap on touch
 // screens). Below the panel, a link to the source code.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
-import { icons, LightElement } from './layout';
+import { connectionDiagram, type DiagramPart, icons, LightElement } from './layout';
 
 export type ConnectionState = 'off' | 'wait' | 'on' | 'ended';
 export type Connection = { state: ConnectionState; status: string; action?: { label: string; event: string } };
@@ -21,21 +21,41 @@ const DOTS: Record<ConnectionState, string> = {
 
 const code = (text: string) => html`<code class="rounded bg-segment px-1 py-0.5 text-[12px]">${text}</code>`;
 
-/** What each connection is: one plain sentence about the connection and its encryption, then one technical line. */
-const INFO: Record<'telegram' | 'signal' | 'index', { title: string; plain: string; technical: TemplateResult }> = {
+/**
+ * What each connection is: a diagram of it, one plain sentence about the connection and its encryption, one technical
+ * line, and when it ends.
+ */
+const INFO: Record<
+  'telegram' | 'signal' | 'index',
+  { title: string; diagram?: DiagramPart[]; plain: string; technical: TemplateResult; ends?: string }
+> = {
   telegram: {
     title: 'Telegram',
+    diagram: [
+      { symbol: icons.computer(18), name: 'Your browser' },
+      { link: 'MTProto, encrypted' },
+      { symbol: icons.servers(18), name: 'Telegram' },
+    ],
     plain: 'Your browser talks to Telegram directly. The connection is encrypted, and only Telegram can read it.',
     technical: html`Your browser runs TDLib, Telegram's own library. TDLib connects to ${code('*.web.telegram.org')}
     over a WebSocket and encrypts everything with MTProto, Telegram's protocol.`,
+    ends: 'Signed out of Telegram when the migration is done.',
   },
   signal: {
     title: 'Signal',
+    diagram: [
+      { symbol: icons.computer(18), name: 'Your browser' },
+      { link: 'WebSocket' },
+      { symbol: icons.relay(18), name: 'Tunnel' },
+      { link: 'TCP' },
+      { symbol: icons.servers(18), name: 'Signal' },
+    ],
     plain:
       'Your browser talks to Signal through a tunnel on our server. The connection is end-to-end encrypted between your browser and Signal, so our server cannot read it.',
     technical: html`Signal uses their own certificate authority which is not trusted by the browser. To work around this
     the browser opens a WebSocket to the migration server, and runs its own TLS connection to ${code('*.signal.org')}
     inside it, checked against Signal's root certificate.`,
+    ends: 'Linked only while the migration runs, and unlinked automatically when it finishes.',
   },
   index: {
     title: 'Sticker pack index',
@@ -56,7 +76,7 @@ const githubMark = html`<svg width="16" height="16" viewBox="0 0 16 16" fill="cu
  */
 const PLACEMENT = {
   side: {
-    card: 'left-full bottom-0 ml-4 w-[320px] before:absolute before:inset-y-0 before:-left-4 before:w-4',
+    card: 'left-full bottom-0 ml-4 w-[400px] before:absolute before:inset-y-0 before:-left-4 before:w-4',
     arrow: '-left-[7px] bottom-[18px] border-b border-l',
   },
   below: {
@@ -85,13 +105,17 @@ export class ConnectionsPanel extends LightElement {
       class="connection-card invisible absolute z-50 rounded-xl bg-white p-4 text-ink opacity-0 shadow-[0_8px_32px_rgba(20,20,30,0.16)] ring-1 ring-line transition-opacity duration-150 ${placement.card}"
     >
       <span class="absolute size-3.5 rotate-45 border-line bg-white ${placement.arrow}"></span>
-      <p class="flex items-start gap-2.5">
-        <span class="mt-[3px]">${icons.lock()}</span>
-        <span class="flex flex-col gap-1.5">
-          <span class="text-sm leading-snug">${info.plain}</span>
-          <span class="text-xs leading-relaxed text-muted">${info.technical}</span>
-        </span>
-      </p>
+      <div class="flex flex-col gap-3">
+        ${info.diagram ? connectionDiagram(info.diagram) : nothing}
+        <p class="flex items-start gap-2.5">
+          <span class="mt-[3px]">${icons.lock()}</span>
+          <span class="flex flex-col gap-1.5">
+            <span class="text-sm leading-snug">${info.plain}</span>
+            <span class="text-xs leading-relaxed text-muted">${info.technical}</span>
+            ${info.ends ? html`<span class="text-xs leading-relaxed text-muted">${info.ends}</span>` : nothing}
+          </span>
+        </p>
+      </div>
     </div>`;
   }
 

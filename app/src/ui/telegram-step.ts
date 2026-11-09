@@ -1,6 +1,6 @@
 // Step 2: logging in to Telegram, by scanning a QR code with Telegram on the phone, or with the phone number, the
 // code Telegram sends and the Two-Step Verification password if the account has one. It shows the login machine's
-// state (app/telegram-login.ts) and sends it the user's input; the machine decides everything else.
+// state (app/machine/telegram) and sends it the user's input; the machine decides everything else.
 
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -8,12 +8,11 @@ import QRCode from 'qrcode';
 import type { LoginQuery } from '../app/machine/telegram';
 import type { TelegramView } from '../app/workflow';
 import {
-  connectionArrow,
-  connectionEnd,
   icons,
   instructions,
   LightElement,
   linkButton,
+  loginCard,
   primaryButton,
   qrBox,
   secondaryButton,
@@ -105,14 +104,31 @@ export class TelegramStep extends LightElement {
     </form>`;
   }
 
+  /** Why the last attempt failed. */
+  private error() {
+    return this.login.error ? html`<p class="text-sm text-danger" role="alert">${this.login.error}</p>` : nothing;
+  }
+
+  /** A sign-in form with the hints that go with it, in the login card. */
+  private formCard(form: ReturnType<TelegramStep['form']>, ...hints: unknown[]) {
+    return loginCard(
+      html`<div class="flex max-w-lg min-w-0 flex-1 flex-col gap-4">
+        ${form}
+        <div class="flex flex-col gap-2 text-sm text-muted empty:hidden">${hints}</div>
+        ${this.error()}
+      </div>`,
+    );
+  }
+
   private body() {
     const login = this.login;
     const state = login.state;
     if (state.kind === 'off' || state.kind === 'stopped') {
       return login.error
-        ? html`<button type="button" class="${secondaryButton} self-start" @click=${() => login.retry()}>
-            Try again
-          </button>`
+        ? html`<div class="flex flex-col items-start gap-3">
+            ${this.error()}
+            <button type="button" class=${secondaryButton} @click=${() => login.retry()}>Try again</button>
+          </div>`
         : html`<p class="text-muted">
             ${state.kind === 'off' && state.signedOut ? 'Signed out of Telegram.' : 'Not connected.'}
           </p>`;
@@ -124,9 +140,10 @@ export class TelegramStep extends LightElement {
     )
       return html`<p class="text-muted">Signing out of Telegram…</p>`;
     if (state.kind === 'saving' || state.kind === 'signed-in')
-      return html`<p class="flex items-center gap-2 font-semibold text-accent">
-        ${icons.check(18)} Signed in to Telegram
-      </p>`;
+      return html`<div class="flex flex-col gap-3">
+        <p class="flex items-center gap-2 font-semibold text-accent">${icons.check(18)} Signed in to Telegram</p>
+        ${this.error()}
+      </div>`;
     const auth = state.kind === 'login' ? state.auth : null;
     if (
       login.method === 'qr' &&
@@ -135,59 +152,69 @@ export class TelegramStep extends LightElement {
         auth._ === 'authorizationStateWaitOtherDeviceConfirmation')
     ) {
       const link = this.qrLink;
-      return html`<div class="flex flex-wrap items-center gap-10">
-        ${qrBox(link && this.qrImage?.link === link ? this.qrImage.url : null, 'QR code for Telegram sign-in')}
-        ${instructions(
-          [
+      return loginCard(
+        qrBox(link && this.qrImage?.link === link ? this.qrImage.url : null, 'QR code for Telegram sign-in'),
+        html`${instructions([
             'Open Telegram on your phone',
-            'Settings › Devices › Link Desktop Device',
+            'Settings › Devices › Add Device',
             'Point the camera at this code',
             'If your account has a Two-Step Verification password, enter it here after scanning',
-          ],
-          html`<button type="button" class=${linkButton} @click=${() => login.useMethod('phone')}>
+          ])}
+          ${this.error()}
+          <button type="button" class="${linkButton} self-start" @click=${() => login.useMethod('phone')}>
             Sign in with phone number instead
           </button>`,
-        )}
-      </div>`;
+      );
     }
     switch (auth?._) {
       case undefined:
         return html`<p class="text-muted">Connecting to Telegram…</p>`;
       case 'authorizationStateWaitPhoneNumber':
-        return html`${this.form('Phone number, in international format', 'tel', 'tel', (phone_number) => ({ _: 'setAuthenticationPhoneNumber', phone_number }))}
-          <p class="text-sm text-muted">
+        return this.formCard(
+          this.form('Phone number, in international format', 'tel', 'tel', (phone_number) => ({
+            _: 'setAuthenticationPhoneNumber',
+            phone_number,
+          })),
+          html`<p>
             After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
             has one.
-          </p>
-          <button type="button" class="${linkButton} self-start" @click=${() => login.useMethod('qr')}>
+          </p>`,
+          html`<button type="button" class="${linkButton} self-start" @click=${() => login.useMethod('qr')}>
             Sign in with a QR code instead
-          </button>`;
+          </button>`,
+        );
       case 'authorizationStateWaitCode':
-        return this.form(
-          `Code Telegram sent${auth.code_info.phone_number ? ` to ${auth.code_info.phone_number}` : ''}`,
-          'text',
-          'one-time-code',
-          (code) => ({ _: 'checkAuthenticationCode', code }),
+        return this.formCard(
+          this.form(
+            `Code Telegram sent${auth.code_info.phone_number ? ` to ${auth.code_info.phone_number}` : ''}`,
+            'text',
+            'one-time-code',
+            (code) => ({ _: 'checkAuthenticationCode', code }),
+          ),
         );
       case 'authorizationStateWaitEmailCode':
-        return this.form(
-          `Code Telegram sent to ${auth.code_info.email_address_pattern}`,
-          'text',
-          'one-time-code',
-          (code) => ({
-            _: 'checkAuthenticationEmailCode',
-            code: { _: 'emailAddressAuthenticationCode', code },
-          }),
+        return this.formCard(
+          this.form(
+            `Code Telegram sent to ${auth.code_info.email_address_pattern}`,
+            'text',
+            'one-time-code',
+            (code) => ({
+              _: 'checkAuthenticationEmailCode',
+              code: { _: 'emailAddressAuthenticationCode', code },
+            }),
+          ),
         );
       case 'authorizationStateWaitPassword':
-        return html`${this.form('Two-Step Verification password', 'password', 'current-password', (password) => ({
+        return this.formCard(
+          this.form('Two-Step Verification password', 'password', 'current-password', (password) => ({
             _: 'checkAuthenticationPassword',
             password,
-          }))}
-          <p class="text-sm text-muted">
+          })),
+          html`<p>
             The extra password set in Telegram under Settings › Privacy and Security › Two-Step Verification.
-          </p>
-          ${auth.password_hint ? html`<p class="text-sm text-muted">Hint: ${auth.password_hint}</p>` : nothing}`;
+          </p>`,
+          auth.password_hint ? html`<p>Hint: ${auth.password_hint}</p>` : nothing,
+        );
       default:
         return html`<p>
           This account needs a login step that is not supported here (${auth?._}). Sign in once in a Telegram app, then
@@ -204,25 +231,12 @@ export class TelegramStep extends LightElement {
       : login.method === 'qr'
         ? 'Scan the code with the Telegram app on your phone.'
         : 'Sign in with your phone number.';
-    return html`${stepHeader(2, 'Connect Telegram', description)}
-      <div class="flex flex-col gap-4">
-        ${this.body()} ${login.error ? html`<p class="text-danger" role="alert">${login.error}</p>` : nothing}
-      </div>
-      <figure class="flex flex-col gap-3 rounded-xl bg-panel p-[18px] ring-1 ring-line ring-inset">
-        <div class="flex flex-wrap items-center gap-3 md:flex-nowrap">
-          ${connectionEnd(icons.computer(), 'This browser', 'signal-migration page')}
-          ${connectionArrow('MTProto, encrypted')}
-          ${connectionEnd(icons.servers(), 'Telegram servers', 'operated by Telegram')}
-        </div>
-        <figcaption class="text-sm">
-          Direct connection, no server in between. Signed out of Telegram when the migration is done.
-        </figcaption>
-      </figure>
-      ${stickyFooter(
-        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
-          <button type="button" class=${primaryButton} ?disabled=${!ready} @click=${() => this.emit('next')}>
-            Continue
-          </button>`,
-      )}`;
+    return html`${stepHeader(2, 'Connect Telegram', description)} ${this.body()}
+    ${stickyFooter(
+      html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
+        <button type="button" class=${primaryButton} ?disabled=${!ready} @click=${() => this.emit('next')}>
+          Continue
+        </button>`,
+    )}`;
   }
 }

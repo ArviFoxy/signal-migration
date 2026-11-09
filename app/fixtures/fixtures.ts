@@ -119,6 +119,15 @@ async function packs(count: number, withPreviews: boolean): Promise<PackEntry[]>
   );
 }
 
+/**
+ * Shows a connection's card, as hovering over its row does. Headless Chrome keeps no focus in a background page, so
+ * the card is made visible directly.
+ */
+function showCard(app: MigrationApp, connection: string): void {
+  const card = app.querySelector<HTMLElement>(`#connection-info-side-${connection}`)!;
+  Object.assign(card.style, { visibility: 'visible', opacity: '1' });
+}
+
 type Fixture = {
   /** The state the fixture shows. */
   state(): Promise<AppState> | AppState;
@@ -173,6 +182,22 @@ const FIXTURES: Record<string, Fixture> = {
           request: null,
           sent: 1,
           qrRequested: true,
+          error: null,
+        },
+      }),
+  },
+  'telegram-phone': {
+    state: () =>
+      setup('packs', {
+        telegram: {
+          kind: 'login',
+          method: 'phone',
+          instance: 'fixture',
+          attempt: 1,
+          auth: { _: 'authorizationStateWaitPhoneNumber' },
+          request: null,
+          sent: 0,
+          qrRequested: false,
           error: null,
         },
       }),
@@ -297,6 +322,26 @@ const FIXTURES: Record<string, Fixture> = {
         telegramError: 'Signing out of Telegram failed: Telegram did not answer within 60 seconds.',
         signalError: 'Unlinking Signal failed: Signal did not answer within 60 seconds.',
       };
+    },
+  },
+  'info-telegram': {
+    state: () =>
+      setup('packs', {
+        telegram: signedIn,
+        signal: { kind: 'linking', deviceName: 'Sticker migration', attempt: 1, qrUrl: null },
+      }),
+    then(app) {
+      showCard(app, 'telegram');
+    },
+  },
+  'info-signal': {
+    state: () =>
+      setup('packs', {
+        telegram: signedIn,
+        signal: { kind: 'linking', deviceName: 'Sticker migration', attempt: 1, qrUrl: null },
+      }),
+    then(app) {
+      showCard(app, 'signal');
     },
   },
   elsewhere: { state: () => ({ kind: 'elsewhere' }) },
