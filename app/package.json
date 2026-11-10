@@ -12,7 +12,7 @@
     "test": "npm run generate && vitest run",
     "format": "prettier --write . && (cd ../crates/server && cargo fmt) && (cd ../crates/signal-wasm && cargo fmt)",
     "format:check": "prettier --check . && (cd ../crates/server && cargo fmt --check) && (cd ../crates/signal-wasm && cargo fmt --check)",
-    "prepare": "git config core.hooksPath .githooks"
+    "prepare": "if git rev-parse --git-dir >/dev/null 2>&1; then git config core.hooksPath .githooks; fi"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.17.0",
