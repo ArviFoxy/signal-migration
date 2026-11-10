@@ -269,12 +269,8 @@ export class StickerMigrateStep extends MigrationView {
       return html`${jump}<button type="button" class=${primaryButton} disabled>Finishing…</button>`;
     }
     if (!ended) {
-      return html`${jump}<button
-          type="button"
-          class=${secondaryButton}
-          @click=${() => (migration.paused ? migration.resume() : migration.pause())}
-        >
-          ${migration.paused ? 'Resume uploads' : 'Pause uploads'}
+      return html`${jump}<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
+          Back to start
         </button>`;
     }
     const retry =
@@ -314,9 +310,7 @@ export class StickerMigrateStep extends MigrationView {
       >`;
     }
     const current = migration.current;
-    return html`<span class="text-muted"
-      >${migration.paused ? 'Paused' : current ? `Working on ${current.pack.title}` : 'Working'}</span
-    >`;
+    return html`<span class="text-muted">${current ? `Working on ${current.pack.title}` : 'Working'}</span>`;
   }
 
   render() {

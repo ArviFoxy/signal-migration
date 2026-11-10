@@ -20,6 +20,8 @@ export const migrating: VariantHandlers<AppState, 'migrating', AppEvent, Context
   finish: (state, _, context) => beginEnding(state, 'finish', context),
   clear: (state, _, context) => beginEnding(state, 'clear', context),
   'telegram/stop': (state) => ({ ...sessionOf(state), kind: 'setup', step: 'start' }),
+  // Back to the setup, signed in and linked; the run stops with this state, and a new one continues from Signal.
+  'go-to': (state, event) => ({ ...sessionOf(state), kind: 'setup', step: event.step }),
 };
 
 /** The run, once the packs and Signal's installed packs are read. */

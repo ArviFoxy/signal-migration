@@ -255,6 +255,32 @@ describe('the workflow', () => {
     expect(second.workflow.stickers!.entries.map((entry) => entry.selected)).toEqual([true, false]);
   });
 
+  // Detects: going back to the start from the migration signing out or unlinking, the run going on in the
+  // background, or a new start not continuing where the first one stopped.
+  it('goes back to the start from the migration, signed in and linked, and continues on a new start', async () => {
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const alice = world.user(['A', 'B', 'C'].map((title) => world.pack(title)));
+    const page = await openPage(alice, new Browser());
+    await signIn(page);
+    await link(page);
+    page.workflow.startMigration();
+    await until(() => page.workflow.stickers?.uploadAllowedAt != null, 'the wait for the upload limit');
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(page.workflow.goTo('start')).toBe(true);
+    await settle(page);
+    expect(page.workflow.state.kind === 'setup' && page.workflow.step).toBe('start');
+    expect(page.workflow.telegram.state.kind).toBe('signed-in');
+    expect(page.workflow.signal.state.kind).toBe('linked');
+    await world.clock.advance(3 * 72 * MINUTE);
+    await settle(page);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+
+    page.workflow.goTo('review');
+    await until(() => page.workflow.step === 'review' && page.workflow.packsReady, 'the review');
+    await migrate(page);
+    expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
+  });
+
   // Detects: a deselected pack coming back selected after a reload, and being migrated against the user's choice.
   it('keeps the selection across a reload', async () => {
     const world = new StickerWorld();

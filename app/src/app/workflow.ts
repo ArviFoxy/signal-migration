@@ -168,9 +168,10 @@ export class Workflow extends Runtime {
     return !(state.step === 'start' && state.telegram.kind === 'off' && state.signal.kind === 'off');
   }
 
+  /** Asks for a step of the setup; from the migration, it stops the run and keeps both logins. */
   goTo(step: Step): boolean {
     if (step === 'migrate') return this.state.kind === 'migrating';
-    if (this.state.kind !== 'setup') return false;
+    if (this.state.kind !== 'setup' && this.state.kind !== 'migrating') return false;
     this.dispatch({ type: 'go-to', step: step as SetupStep });
     return true;
   }

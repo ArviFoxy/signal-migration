@@ -179,8 +179,6 @@ export class StickerMigration extends EventTarget {
   #originals = new Map<PackEntry, Uint8Array[]>();
   #lookup: Promise<void> | null = null;
   #previewsStopped = false;
-  #paused = false;
-  #resume: (() => void) | null = null;
   /** The packs each run set out to install from the index, and to upload; for progress across runs of a visit. */
   #plannedInstalls = new Set<PackEntry>();
   #plannedUploads = new Set<PackEntry>();
@@ -196,10 +194,6 @@ export class StickerMigration extends EventTarget {
 
   get selected(): PackEntry[] {
     return this.entries.filter((entry) => entry.selected);
-  }
-
-  get paused(): boolean {
-    return this.#paused;
   }
 
   /** Packs to install that someone already uploaded: how many are in Signal now, of how many. */
@@ -361,18 +355,6 @@ export class StickerMigration extends EventTarget {
     this.announceError = null;
     for (const entry of this.selected)
       if (entry.state === 'failed') Object.assign(entry, { state: 'to-upload', error: null, progress: null });
-    this.#changed();
-  }
-
-  pause(): void {
-    this.#paused = true;
-    this.#changed();
-  }
-
-  resume(): void {
-    this.#paused = false;
-    this.#resume?.();
-    this.#resume = null;
     this.#changed();
   }
 
@@ -563,10 +545,6 @@ export class StickerMigration extends EventTarget {
     Object.assign(entry, { state: 'in-signal', progress: null, error: null });
   }
 
-  async #waitWhilePaused(cancel: AbortSignal): Promise<void> {
-    while (this.#paused) await untilCancelled(new Promise<void>((resolve) => (this.#resume = resolve)), cancel);
-  }
-
   /**
    * Installs every selected pack: first those already uploaded, in one write, then the rest pack by pack, reading
    * their stickers from `telegram`.
@@ -608,7 +586,6 @@ export class StickerMigration extends EventTarget {
     for (const entry of queue) if (!this.#plannedInstalls.has(entry)) this.#plannedUploads.add(entry);
     this.#changed();
     while (queue.length > 0) {
-      await this.#waitWhilePaused(cancel);
       cancel.throwIfAborted();
       if (!signal.isLinked) break;
       const entry = queue.shift()!;

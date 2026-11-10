@@ -376,29 +376,4 @@ describe('choices', () => {
     page.migration.setSelected(page.entry('Huge'), true);
     expect(page.entry('Huge').selected).toBe(false);
   });
-
-  // Detects: pausing not holding back the next upload, or the migration not continuing after resume.
-  it('starts no upload while paused and finishes after resume', async () => {
-    const world = new StickerWorld();
-    const alice = world.user([world.pack('A'), world.pack('B'), world.pack('C')]);
-    let paused = false;
-    let uploadsWhilePaused = -1;
-    const page = alice.openPage({
-      onChange: (migration) => {
-        if (!paused && migration.entries.filter((entry) => entry.state === 'in-signal').length === 1) {
-          paused = true;
-          migration.pause();
-          setTimeout(() => {
-            uploadsWhilePaused = world.signal.packsUploaded.get(alice.aci) ?? 0;
-            migration.resume();
-          }, 20);
-        }
-      },
-    });
-    await page.readTelegram();
-    await page.linkSignal();
-    await page.run();
-    expect(uploadsWhilePaused).toBe(1);
-    expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
-  });
 });

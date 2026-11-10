@@ -337,6 +337,7 @@ export class MigrationApp extends LightElement {
           .ending=${w.state.kind === 'ending'}
           @retry=${() => w.tryAgain()}
           @finish=${() => w.finish()}
+          @back-to-start=${() => w.goTo('start')}
           @restart=${() => w.startOver()}
         ></sticker-migrate-step>`;
     }
