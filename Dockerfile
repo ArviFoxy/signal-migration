@@ -41,9 +41,15 @@ RUN scripts/build-webm-decoder.sh
 FROM scratch AS webm-decoder
 COPY --from=webm-decoder-build /src/build/webm-decoder/webm-decoder.js /src/build/webm-decoder/webm-decoder.wasm /
 
+# Everything above this stage is what the `tdweb` and `webm-decoder` stages are built from; CI's cache keys for the
+# two cover exactly these lines.
+#
 # The Rust toolchain both crates' rust-toolchain.toml select, with the WebAssembly target, and the wasm-bindgen
 # command-line tool at the version of the wasm-bindgen crate in Cargo.lock, which it must match.
 FROM base AS rust
+# protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds.
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.cargo/bin:$PATH
 COPY crates/server/rust-toolchain.toml crates/signal-wasm/Cargo.lock /tmp/
 RUN toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /tmp/rust-toolchain.toml) \

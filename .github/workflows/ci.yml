@@ -23,13 +23,14 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Each key covers every input of its build: the Dockerfile and .dockerignore (the base image, Node.js), the
-      # build scripts, and for TDLib the commit of the third_party/td submodule.
+      # Each key covers every input of its build: the Dockerfile up to the Rust stage (the base image, Node.js and
+      # the two stages), .dockerignore, the build scripts, and for TDLib the commit of the third_party/td submodule.
       - name: Cache keys
         id: keys
         run: |
-          echo "tdweb=tdweb-$(git rev-parse HEAD:third_party/td)-${{ hashFiles('Dockerfile', '.dockerignore', 'scripts/build-tdweb.sh', 'scripts/build-tdweb-js.sh', 'scripts/tdweb/**') }}" >> "$GITHUB_OUTPUT"
-          echo "webm=webm-decoder-${{ hashFiles('Dockerfile', '.dockerignore', 'scripts/build-webm-decoder.sh', 'app/src/kinds/stickers/webm-decoder.c') }}" >> "$GITHUB_OUTPUT"
+          stages=$(sed '/^FROM base AS rust$/,$d' Dockerfile | sha256sum | cut -c1-16)
+          echo "tdweb=tdweb-$(git rev-parse HEAD:third_party/td)-$stages-${{ hashFiles('.dockerignore', 'scripts/build-tdweb.sh', 'scripts/build-tdweb-js.sh', 'scripts/tdweb/**') }}" >> "$GITHUB_OUTPUT"
+          echo "webm=webm-decoder-$stages-${{ hashFiles('.dockerignore', 'scripts/build-webm-decoder.sh', 'app/src/kinds/stickers/webm-decoder.c') }}" >> "$GITHUB_OUTPUT"
       - id: tdweb
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -92,6 +93,8 @@ jobs:
           workspaces: |
             crates/server
             crates/signal-wasm
+      # protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       - working-directory: crates/server
         run: cargo test --locked
       # The crate builds for WebAssembly by default (.cargo/config.toml); its tests run natively.
@@ -122,6 +125,8 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: crates/signal-wasm
+      # protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
       # The command-line tool must be the version of the wasm-bindgen crate the lock file holds.
       - name: wasm-bindgen version
         id: wasm-bindgen
