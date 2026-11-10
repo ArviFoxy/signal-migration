@@ -74,10 +74,10 @@ That build of FFmpeg is under the LGPL 2.1, libvpx under a BSD licence; the scri
 
 ## What the browser stores
 
-IndexedDB holds, until the migration ends or the user clears it:
+IndexedDB stores locally, until the migration ends or the user clears it:
 
 - TDLib's database with the Telegram session, saved right after sign-in, and a copy of its login file in a
-  database of the app's own, which is written back each time TDLib starts;
+  database of the app's own, which is written back each time TDLib starts; The copy of login credentials is needed because TDLib often segfaults and it's database has to be reset to recover.
 - the linked device's password, storage service key, account identity key pair and registration ID;
 - the selection and progress, so that a reload continues.
 
