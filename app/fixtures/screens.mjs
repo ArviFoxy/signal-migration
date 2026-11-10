@@ -92,7 +92,11 @@ for (const [size, metrics] of Object.entries(SIZES)) {
 console.log(
   `${names.length * Object.keys(SIZES).length} screens in ${((Date.now() - started) / 1000).toFixed(1)} s, in ${out}`,
 );
-chrome.kill();
+// Chrome writes to its profile while it shuts down, so the profile is removed only after it has exited.
+await new Promise((resolve) => {
+  chrome.once('exit', resolve);
+  chrome.kill();
+});
 server.close();
 fs.rmSync(profile, { recursive: true, force: true });
 process.exit(0);

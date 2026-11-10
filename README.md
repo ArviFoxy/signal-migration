@@ -122,5 +122,6 @@ crates/server/target/release/signal-migration-server
 ```sh
 cd app && npm test               # the app, against simulated Telegram, Signal and index servers
 cd crates/server && cargo test   # the server
+cd crates/signal-wasm && cargo test --target x86_64-unknown-linux-gnu   # the WebAssembly module's Rust code, run natively
 cd app && npm run screens        # a screenshot of every screen, in build/screens
 ```

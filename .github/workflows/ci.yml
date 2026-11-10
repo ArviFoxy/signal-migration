@@ -1,0 +1,174 @@
+# Formatting, the tests, the full build, and on pull requests the screen fixtures' screenshots.
+#
+# TDLib's web client and the video sticker decoder take long to build. The job `wasm-builds` builds each from the
+# Dockerfile only when no cached copy exists for its exact inputs, and hands both to the jobs that need them.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  wasm-builds:
+    runs-on: ubuntu-latest
+    # A TDLib build from nothing; with both in the cache this job takes seconds.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Each key covers every input of its build: the Dockerfile and .dockerignore (the base image, Node.js), the
+      # build scripts, and for TDLib the commit of the third_party/td submodule.
+      - name: Cache keys
+        id: keys
+        run: |
+          echo "tdweb=tdweb-$(git rev-parse HEAD:third_party/td)-${{ hashFiles('Dockerfile', '.dockerignore', 'scripts/build-tdweb.sh', 'scripts/build-tdweb-js.sh', 'scripts/tdweb/**') }}" >> "$GITHUB_OUTPUT"
+          echo "webm=webm-decoder-${{ hashFiles('Dockerfile', '.dockerignore', 'scripts/build-webm-decoder.sh', 'app/src/kinds/stickers/webm-decoder.c') }}" >> "$GITHUB_OUTPUT"
+      - id: tdweb
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm-builds/tdweb
+          key: ${{ steps.keys.outputs.tdweb }}
+      - id: webm
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm-builds/webm-decoder
+          key: ${{ steps.keys.outputs.webm }}
+      - if: steps.tdweb.outputs.cache-hit != 'true' || steps.webm.outputs.cache-hit != 'true'
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build TDLib's web client
+        if: steps.tdweb.outputs.cache-hit != 'true'
+        run: |
+          git submodule update --init --depth 1 third_party/td
+          docker buildx build --target tdweb --output "type=local,dest=${{ runner.temp }}/wasm-builds/tdweb" .
+      - if: steps.tdweb.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm-builds/tdweb
+          key: ${{ steps.keys.outputs.tdweb }}
+      - name: Build the video sticker decoder
+        if: steps.webm.outputs.cache-hit != 'true'
+        run: docker buildx build --target webm-decoder --output "type=local,dest=${{ runner.temp }}/wasm-builds/webm-decoder" .
+      - if: steps.webm.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm-builds/webm-decoder
+          key: ${{ steps.keys.outputs.webm }}
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wasm-builds
+          path: ${{ runner.temp }}/wasm-builds/
+          retention-days: 1
+
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      # rustup installs the toolchain and rustfmt that each crate's rust-toolchain.toml names on first use.
+      - working-directory: app
+        run: npm ci && npm run format:check
+
+  rust:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true # signal-wasm builds on libsignal's crates
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: |
+            crates/server
+            crates/signal-wasm
+      - working-directory: crates/server
+        run: cargo test --locked
+      # The crate builds for WebAssembly by default (.cargo/config.toml); its tests run natively.
+      - working-directory: crates/signal-wasm
+        run: cargo test --locked --target x86_64-unknown-linux-gnu
+
+  app:
+    needs: wasm-builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true # the protocol definitions and TDLib's API scheme the app's types are generated from
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-builds
+          path: ${{ runner.temp }}/wasm-builds
+      - run: |
+          mkdir -p build/tdweb
+          mv "${{ runner.temp }}/wasm-builds/tdweb" build/tdweb/dist
+          mv "${{ runner.temp }}/wasm-builds/webm-decoder" build/webm-decoder
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 26
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: crates/signal-wasm
+      # The command-line tool must be the version of the wasm-bindgen crate the lock file holds.
+      - name: wasm-bindgen version
+        id: wasm-bindgen
+        run: echo "version=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"/\1/p}' crates/signal-wasm/Cargo.lock)" >> "$GITHUB_OUTPUT"
+      - uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39 # v2.90.3
+        with:
+          tool: wasm-bindgen@${{ steps.wasm-bindgen.outputs.version }}
+      - working-directory: app
+        run: npm ci
+      - name: Type check
+        working-directory: app
+        run: npm run check
+      - name: Tests
+        working-directory: app
+        run: npm test
+      - name: Screenshots of the screen fixtures
+        if: github.event_name == 'pull_request'
+        working-directory: app
+        env:
+          CHROME: google-chrome
+        run: node build.mjs --fixtures && node fixtures/screens.mjs
+      - if: github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: screens
+          path: build/screens/
+
+  build:
+    needs: wasm-builds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: wasm-builds
+          path: ${{ runner.temp }}/wasm-builds
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      # The two cached builds take the place of their stages.
+      - run: >-
+          docker buildx build
+          --build-context "tdweb=${{ runner.temp }}/wasm-builds/tdweb"
+          --build-context "webm-decoder=${{ runner.temp }}/wasm-builds/webm-decoder"
+          --output "type=local,dest=${{ runner.temp }}/release" .
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signal-migration-server
+          path: ${{ runner.temp }}/release/
