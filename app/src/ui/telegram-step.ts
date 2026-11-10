@@ -21,6 +21,7 @@ import {
   stickyFooter,
 } from './layout';
 import './phone-input';
+import { codeExpired, signInError } from './telegram-errors';
 
 @customElement('telegram-step')
 export class TelegramStep extends LightElement {
@@ -130,9 +131,27 @@ export class TelegramStep extends LightElement {
     </form>`;
   }
 
-  /** Why the last attempt failed. */
+  /** Why the last attempt failed: during the sign-in, as a sentence for Telegram's error (telegram-errors.ts). */
   private error() {
-    return this.login.error ? html`<p class="text-sm text-danger" role="alert">${this.login.error}</p>` : nothing;
+    const login = this.login;
+    if (!login.error) return nothing;
+    const message = login.state.kind === 'login' ? signInError(login.error) : login.error;
+    return html`<div class="flex flex-col items-start gap-3">
+      <p class="text-sm text-danger" role="alert">${message}</p>
+      ${
+        login.state.kind === 'login' && codeExpired(login.error)
+          ? html`<button
+              type="button"
+              class=${secondaryButton}
+              ?disabled=${login.sending}
+              @click=${() =>
+                login.submit({ _: 'resendAuthenticationCode', reason: { _: 'resendCodeReasonUserRequest' } })}
+            >
+              Send a new code
+            </button>`
+          : nothing
+      }
+    </div>`;
   }
 
   /** A sign-in form in its card: the form, the hints that go with it, why it failed, and another way to sign in. */

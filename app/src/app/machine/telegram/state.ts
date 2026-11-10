@@ -22,6 +22,7 @@ export type LoginQuery =
   | Td.setAuthenticationEmailAddress
   | Td.checkAuthenticationEmailCode
   | Td.checkAuthenticationPassword
+  | Td.resendAuthenticationCode
   | Td.registerUser;
 
 /** What every state keeps: how the user chose to sign in. */

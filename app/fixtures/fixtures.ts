@@ -224,6 +224,25 @@ const FIXTURES: Record<string, Fixture> = {
         },
       }),
   },
+  'telegram-code-expired': {
+    state: () =>
+      setup('packs', {
+        telegram: {
+          kind: 'login',
+          method: 'phone',
+          instance: 'fixture',
+          attempt: 1,
+          auth: {
+            _: 'authorizationStateWaitCode',
+            code_info: { _: 'authenticationCodeInfo', phone_number: '+1 201 555 0123', timeout: 0 },
+          } as Td.AuthorizationState,
+          request: null,
+          sent: 2,
+          qrRequested: false,
+          error: 'PHONE_CODE_EXPIRED',
+        },
+      }),
+  },
   'telegram-stopped': {
     state: () =>
       setup('packs', {
