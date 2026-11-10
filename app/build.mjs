@@ -1,5 +1,5 @@
 // Builds the web app into dist/: bundles each entry point, copies the static files and the WebAssembly modules.
-// The bundles are not minified.
+// The bundles and the stylesheet are minified; source maps lead back to the sources.
 //
 // TDLib's web client (tdweb) is bundled from ../build/tdweb/dist/tdweb.js, which scripts/build-tdweb-js.sh builds
 // with this project's patches; the "tdweb" package in node_modules provides only its types. tdweb.js starts a worker
@@ -37,13 +37,18 @@ await build({
   format: 'esm',
   target: 'es2022',
   outdir,
+  minify: true,
   sourcemap: true,
   alias: { tdweb: path.resolve(tdwebDist, 'tdweb.js'), 'webm-decoder': path.resolve(webmDecoder, 'webm-decoder.js') },
   external: ['node:*'],
 });
-execFileSync('node_modules/.bin/tailwindcss', ['--input', 'src/styles.css', '--output', `${outdir}/styles.css`], {
-  stdio: 'inherit',
-});
+execFileSync(
+  'node_modules/.bin/tailwindcss',
+  ['--input', 'src/styles.css', '--output', `${outdir}/styles.css`, '--minify'],
+  {
+    stdio: 'inherit',
+  },
+);
 if (fixtures) {
   fs.copyFileSync('fixtures/fixtures.html', `${outdir}/index.html`);
   process.exit(0);

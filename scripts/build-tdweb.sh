@@ -2,9 +2,8 @@
 # Builds TDLib's web client (tdweb) from the third_party/td submodule: the WebAssembly module into the submodule's
 # example/web/tdweb/src/prebuilt, then the JavaScript, patched, into build/tdweb/dist (scripts/build-tdweb-js.sh).
 #
-# The steps are TDLib's own (example/web/build-openssl.sh, build-tdlib.sh, copy-tdlib.sh, build-tdweb.sh),
-# with one change: the WebAssembly module is linked with -g1. TDLib builds with -Os, and at -Os Emscripten
-# strips all whitespace from the JavaScript it generates. -g1 keeps that JavaScript formatted as written.
+# The steps are TDLib's own (example/web/build-openssl.sh, build-tdlib.sh, copy-tdlib.sh, build-tdweb.sh), built at
+# TDLib's -Os, at which Emscripten also minifies the JavaScript it generates.
 # Function names in the WebAssembly module are left out, as in TDLib's own build: TDLib's mangled C++ names
 # take 128 MB, against 15 MB for the whole module without them.
 #
@@ -40,7 +39,7 @@ openssl_options=(
 mkdir -p build/generate build/wasm
 (cd build/generate && cmake -DTD_GENERATE_SOURCE_FILES=ON "$td")
 cmake --build build/generate --parallel "$(nproc)"
-(cd build/wasm && emcmake cmake -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_EXE_LINKER_FLAGS=-g1 "${openssl_options[@]}" "$td")
+(cd build/wasm && emcmake cmake -DCMAKE_BUILD_TYPE=MinSizeRel "${openssl_options[@]}" "$td")
 cmake --build build/wasm --target td_wasm --parallel "$(nproc)"
 ./copy-tdlib.sh
 
