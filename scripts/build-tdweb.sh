@@ -39,9 +39,9 @@ openssl_options=(
 
 mkdir -p build/generate build/wasm
 (cd build/generate && cmake -DTD_GENERATE_SOURCE_FILES=ON "$td")
-cmake --build build/generate
+cmake --build build/generate --parallel "$(nproc)"
 (cd build/wasm && emcmake cmake -DCMAKE_BUILD_TYPE=MinSizeRel -DCMAKE_EXE_LINKER_FLAGS=-g1 "${openssl_options[@]}" "$td")
-cmake --build build/wasm --target td_wasm
+cmake --build build/wasm --target td_wasm --parallel "$(nproc)"
 ./copy-tdlib.sh
 
 "$repo/scripts/build-tdweb-js.sh"

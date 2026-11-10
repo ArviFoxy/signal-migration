@@ -1,0 +1,12 @@
+# Built output and installed dependencies; the Dockerfile builds its own.
+.git
+build
+**/node_modules
+**/target
+app/dist
+app/dist-fixtures
+app/src/wasm
+app/src/gen
+third_party/td/example/web/build
+third_party/td/example/web/tdweb/src/prebuilt
+third_party/td/example/web/tdweb/node_modules
