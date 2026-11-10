@@ -47,8 +47,9 @@ COPY --from=webm-decoder-build /src/build/webm-decoder/webm-decoder.js /src/buil
 # The Rust toolchain both crates' rust-toolchain.toml select, with the WebAssembly target, and the wasm-bindgen
 # command-line tool at the version of the wasm-bindgen crate in Cargo.lock, which it must match.
 FROM base AS rust
-# protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds.
-RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler \
+# protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds. clang and llvm: the ring crate
+# compiles C for WebAssembly with clang and archives it with llvm-ar.
+RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler clang llvm \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.cargo/bin:$PATH
 COPY crates/server/rust-toolchain.toml crates/signal-wasm/Cargo.lock /tmp/
