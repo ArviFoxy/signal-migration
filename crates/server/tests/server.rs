@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use signal_migration_server::index::{AddressLimiter, ENTRY_LEN, Index};
+use signal_migration_server::index::{AddressLimiter, ENTRY_LEN, Index, client_address};
 use signal_migration_server::relay::RelayTargets;
 use signal_migration_server::{ClientConfig, Config, TelegramApp, demo_router, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -217,6 +217,58 @@ fn address_limiter_refuses_when_empty_and_refills_over_time() {
     assert!(!limiter.allow(address, start));
     assert!(limiter.allow(address, start + Duration::from_secs(10)));
     assert!(!limiter.allow(address, start + Duration::from_secs(10)));
+}
+
+/// Detects: behind the local reverse proxy, every client sharing the proxy's address, or the wrong entry of
+/// `X-Forwarded-For` being used; anywhere else, a client choosing its own limit by sending the header.
+#[test]
+fn client_address_trusts_forwarded_for_only_from_loopback() {
+    let headers = |values: &[&str]| {
+        let mut map = axum::http::HeaderMap::new();
+        for value in values {
+            map.append("x-forwarded-for", value.parse().unwrap());
+        }
+        map
+    };
+    let proxy: SocketAddr = "127.0.0.1:50000".parse().unwrap();
+    let proxy_v6: SocketAddr = "[::1]:50000".parse().unwrap();
+    let direct: SocketAddr = "198.51.100.7:50000".parse().unwrap();
+    let ip = |text: &str| text.parse::<std::net::IpAddr>().unwrap();
+
+    assert_eq!(client_address(proxy, &headers(&["203.0.113.5"])), ip("203.0.113.5"));
+    assert_eq!(client_address(proxy_v6, &headers(&["2001:db8::5"])), ip("2001:db8::5"));
+    // The proxy adds the client last; earlier entries come from the client and are not trusted.
+    assert_eq!(
+        client_address(proxy, &headers(&["192.0.2.1, 203.0.113.5"])),
+        ip("203.0.113.5")
+    );
+    assert_eq!(
+        client_address(proxy, &headers(&["192.0.2.1", "203.0.113.5"])),
+        ip("203.0.113.5")
+    );
+    assert_eq!(client_address(proxy, &headers(&[])), ip("127.0.0.1"));
+    assert_eq!(client_address(proxy, &headers(&["not an address"])), ip("127.0.0.1"));
+    assert_eq!(client_address(direct, &headers(&["203.0.113.5"])), ip("198.51.100.7"));
+}
+
+/// Detects: the index's append limit not following the address the proxy reports, so that one client behind the
+/// proxy uses up the limit for everyone.
+#[tokio::test]
+async fn clients_behind_the_proxy_have_separate_limits() {
+    let server = start(RelayTargets::signal()).await;
+    let client = reqwest::Client::new();
+    let post = |seed: u8, forwarded_for: &'static str| {
+        client
+            .post(format!("http://{}/v1/sticker-packs/index", server.base))
+            .header("x-forwarded-for", forwarded_for)
+            .body(entry(seed))
+            .send()
+    };
+    for seed in 0..60 {
+        assert_eq!(post(seed, "203.0.113.5").await.unwrap().status(), 201);
+    }
+    assert_eq!(post(60, "203.0.113.5").await.unwrap().status(), 429);
+    assert_eq!(post(61, "203.0.113.6").await.unwrap().status(), 201);
 }
 
 /// Detects: the page not receiving the Telegram app identity it needs to start TDLib, or receiving it under other names.

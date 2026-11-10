@@ -2,17 +2,18 @@
 //!
 //! Lookup keys are derived from a Telegram pack's content, so only someone who has the pack can compute one.
 //! Clients download the whole list and match it locally; the server never learns which packs a user has.
-//! The server keeps no accounts and logs no client addresses; per-address limits live in memory only.
+//! The server keeps no accounts and logs no client addresses; per-address limits live in memory only. Behind a reverse
+//! proxy on the same machine, the limit counts the address the proxy reports (see `client_address`).
 
 use std::collections::{HashMap, HashSet};
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Query, State};
-use axum::http::{StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
@@ -103,12 +104,34 @@ pub async fn read(State(index): State<Index>, Query(query): Query<HashMap<String
         .into_response()
 }
 
+/// The address the per-address limit counts a request against.
+///
+/// A request whose connection comes from loopback came through a reverse proxy on the same machine, which puts the
+/// client's address last in `X-Forwarded-For`. Any other request counts against its connection's own address, whatever
+/// it sends in that header, so a client cannot choose its bucket. A loopback request without a readable header counts
+/// against the loopback address.
+pub fn client_address(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
+    if !peer.ip().is_loopback() {
+        return peer.ip();
+    }
+    headers
+        .get_all("x-forwarded-for")
+        .iter()
+        .next_back()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.rsplit(',').next())
+        .and_then(|last| last.trim().parse().ok())
+        .unwrap_or(peer.ip())
+}
+
 /// `POST /v1/sticker-packs/index` with one 48-byte entry: 201 when added, 200 when already present.
 pub async fn append(
     State(index): State<Index>,
-    ConnectInfo(client): ConnectInfo<std::net::SocketAddr>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
     body: Bytes,
 ) -> Response {
+    let client = client_address(peer, &headers);
     let Ok(entry) = <[u8; ENTRY_LEN]>::try_from(body.as_ref()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
@@ -116,7 +139,7 @@ pub async fn append(
     if state.known.contains(&entry) {
         return StatusCode::OK.into_response();
     }
-    if !state.append_limiter.allow(client.ip(), Instant::now()) {
+    if !state.append_limiter.allow(client, Instant::now()) {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let mut file = match tokio::fs::OpenOptions::new()
