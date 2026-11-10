@@ -111,15 +111,15 @@ export class ConnectionsPanel extends LightElement {
     return html`<div
       id="connection-info-${this.placement}-${id}"
       role="tooltip"
-      class="connection-card invisible absolute z-50 rounded-xl bg-white p-4 text-ink opacity-0 shadow-[0_8px_32px_rgba(20,20,30,0.16)] ring-1 ring-line transition-opacity duration-150 ${placement.card}"
+      class="connection-card invisible absolute z-50 rounded-xl bg-white p-5 text-ink opacity-0 shadow-[0_8px_32px_rgba(20,20,30,0.16)] ring-1 ring-line transition-opacity duration-150 ${placement.card}"
     >
       <span class="absolute size-3.5 rotate-45 border-line bg-white ${placement.arrow}"></span>
       <div class="flex flex-col gap-4">
         <p class="flex items-start gap-2.5">
           <span class="mt-[3px]">${icons.lock()}</span>
           <span class="flex flex-col gap-2">
-            <span class="text-sm leading-snug">${info.plain}</span>
-            <span class="text-xs leading-relaxed text-muted">${info.technical}</span>
+            <span class="text-sm leading-snug text-pretty">${info.plain}</span>
+            <span class="text-xs leading-relaxed text-pretty text-muted">${info.technical}</span>
           </span>
         </p>
         ${info.diagram ? connectionDiagram(info.diagram.parts, info.diagram.encryption) : nothing}
