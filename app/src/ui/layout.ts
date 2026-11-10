@@ -163,12 +163,22 @@ export function connectionDiagram(parts: DiagramPart[], encryption: string): Tem
   </div>`;
 }
 
-/** The card of a login method: the QR code or the form, and beside it (below on narrow screens) what to do. */
+/**
+ * The card of a QR code login: the code, and beside it (below on narrow screens) what to do, centred on the code's
+ * height so that neither looks pushed to the top.
+ */
 export function loginCard(main: TemplateResult, side: TemplateResult | typeof nothing = nothing): TemplateResult {
   return html`<div
-    class="flex flex-col gap-6 rounded-2xl bg-panel p-5 ring-1 ring-line ring-inset sm:p-6 md:flex-row md:items-start md:gap-8"
+    class="flex flex-col gap-6 rounded-2xl bg-panel p-5 ring-1 ring-line ring-inset sm:p-6 md:flex-row md:items-center md:gap-8"
   >
     ${main} ${side === nothing ? nothing : html`<div class="flex min-w-0 flex-1 flex-col gap-5">${side}</div>`}
+  </div>`;
+}
+
+/** The card of a sign-in form: as wide as a form needs, with the form, its hints, an error, and other ways on. */
+export function formCard(content: TemplateResult): TemplateResult {
+  return html`<div class="flex max-w-xl flex-col gap-5 rounded-2xl bg-panel p-6 ring-1 ring-line ring-inset sm:p-7">
+    ${content}
   </div>`;
 }
 
@@ -178,12 +188,12 @@ export function qrBox(dataUrl: string | null, label: string): TemplateResult {
     ? html`<img
         src=${dataUrl}
         alt=${label}
-        class="size-56 flex-none self-center rounded-xl bg-white p-2 ring-1 ring-line ring-inset md:self-start"
+        class="size-56 flex-none self-center rounded-xl bg-white p-2 ring-1 ring-line ring-inset"
       />`
     : html`<div
         role="img"
         aria-label=${label}
-        class="flex size-56 flex-none items-center justify-center self-center rounded-xl bg-white text-sm text-muted ring-1 ring-line ring-inset md:self-start"
+        class="flex size-56 flex-none items-center justify-center self-center rounded-xl bg-white text-sm text-muted ring-1 ring-line ring-inset"
       >
         Preparing the code…
       </div>`;

@@ -11,6 +11,7 @@ import {
   icons,
   instructions,
   LightElement,
+  formCard,
   linkButton,
   loginCard,
   primaryButton,
@@ -70,7 +71,7 @@ export class TelegramStep extends LightElement {
   private phoneForm() {
     const sending = this.login.sending;
     return html`<form
-      class="flex max-w-lg flex-wrap items-end gap-3"
+      class="flex flex-wrap items-end gap-3"
       @submit=${(event: SubmitEvent) => {
         event.preventDefault();
         if (this.phone) this.login.submit({ _: 'setAuthenticationPhoneNumber', phone_number: this.phone });
@@ -90,7 +91,7 @@ export class TelegramStep extends LightElement {
 
   private form(label: string, type: string, autocomplete: string, build: (value: string) => LoginQuery) {
     return html`<form
-      class="flex max-w-md flex-wrap items-end gap-3"
+      class="flex flex-wrap items-end gap-3"
       @submit=${(event: SubmitEvent) => this.submit(event, build)}
     >
       <label class="flex min-w-[220px] flex-1 flex-col gap-2">
@@ -102,10 +103,9 @@ export class TelegramStep extends LightElement {
                 <input
                   type=${this.showPassword ? 'text' : 'password'}
                   autocomplete=${autocomplete}
-                  placeholder="••••••••"
                   required
                   ?disabled=${this.login.sending}
-                  class="min-h-11 w-full rounded-[10px] bg-panel pr-11 pl-10 text-[15px] tracking-wide ring-1 ring-line-strong ring-inset placeholder:text-line-strong focus:bg-white focus:ring-2 focus:ring-accent focus:outline-none"
+                  class="min-h-11 w-full rounded-[10px] bg-white pr-11 pl-10 text-[15px] tracking-wide ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
                 />
                 <button
                   type="button"
@@ -122,7 +122,7 @@ export class TelegramStep extends LightElement {
                 autocomplete=${autocomplete}
                 required
                 ?disabled=${this.login.sending}
-                class="min-h-11 rounded-[10px] px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
+                class="min-h-11 rounded-[10px] bg-white px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
               />`
         }
       </label>
@@ -135,14 +135,14 @@ export class TelegramStep extends LightElement {
     return this.login.error ? html`<p class="text-sm text-danger" role="alert">${this.login.error}</p>` : nothing;
   }
 
-  /** A sign-in form with the hints that go with it, in the login card. */
-  private formCard(form: ReturnType<TelegramStep['form']>, ...hints: unknown[]) {
-    return loginCard(
-      html`<div class="flex max-w-lg min-w-0 flex-1 flex-col gap-4">
-        ${form}
-        <div class="flex flex-col gap-2 text-sm text-muted empty:hidden">${hints}</div>
-        ${this.error()}
-      </div>`,
+  /** A sign-in form in its card: the form, the hints that go with it, why it failed, and another way to sign in. */
+  private formCard(form: ReturnType<TelegramStep['form']>, hints: unknown[] = [], other: unknown = nothing) {
+    return formCard(
+      html`<div class="flex flex-col gap-3">
+          ${form}
+          ${hints.length > 0 ? html`<div class="flex flex-col gap-1.5 text-sm text-pretty text-muted">${hints}</div>` : nothing}
+        </div>
+        ${this.error()} ${other}`,
     );
   }
 
@@ -198,10 +198,12 @@ export class TelegramStep extends LightElement {
       case 'authorizationStateWaitPhoneNumber':
         return this.formCard(
           this.phoneForm(),
-          html`<p>
-            After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
-            has one.
-          </p>`,
+          [
+            html`<p>
+              After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
+              has one.
+            </p>`,
+          ],
           html`<button type="button" class="${linkButton} self-start" @click=${() => login.useMethod('qr')}>
             Sign in with a QR code instead
           </button>`,
@@ -233,10 +235,13 @@ export class TelegramStep extends LightElement {
             _: 'checkAuthenticationPassword',
             password,
           })),
-          html`<p>
-            The extra password set in Telegram under Settings › Privacy and Security › Two-Step Verification.
-          </p>`,
-          auth.password_hint ? html`<p>Hint: ${auth.password_hint}</p>` : nothing,
+          [
+            html`<p>
+              The extra password set in Telegram under
+              <span class="whitespace-nowrap">Settings › Privacy and Security › Two-Step Verification</span>.
+            </p>`,
+            ...(auth.password_hint ? [html`<p>Hint: ${auth.password_hint}</p>`] : []),
+          ],
         );
       default:
         return html`<p>
