@@ -12,6 +12,10 @@
 // <results>/results.jsonl gets one line per measurement, as it is made; <results>/conversions the converted files.
 // A measurement that is already in results.jsonl is not made again, so a run that stopped can be started again.
 // After a change to the conversion or the comparison, start with an empty <results>.
+//
+// Last, every fifth animation that Chrome converted is altered in ways a replaced copy could differ (a spot, a
+// line, a veil, another colour, the picture moved), and each altered file is measured against its original. The
+// summary says which share of them the comparison would accept.
 
 import { build } from 'esbuild';
 import { spawn } from 'node:child_process';
@@ -46,7 +50,7 @@ function summary() {
   const rows = readResults();
   const quantile = (sorted, q) => sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))];
   const groups = new Map();
-  for (const row of rows) {
+  for (const row of rows.filter((row) => row.phase !== 'altered')) {
     const made = row.phase === 'convert' ? row.browser : row.madeBy;
     const key = `${row.format.padEnd(5)} made in ${made.padEnd(8)} compared in ${row.browser.padEnd(8)}`;
     groups.set(key, [...(groups.get(key) ?? []), row]);
@@ -79,6 +83,21 @@ function summary() {
           `  comparing ${mean('compareMs').toFixed(0)} ms each on average  files with more than the picture: ${notPlain}`,
       );
     }
+  }
+  const altered = rows.filter((row) => row.altered);
+  if (altered.length === 0) return;
+  const tolerance = altered[0].tolerance;
+  const failed = rows.filter((row) => row.phase === 'altered' && !row.altered).length;
+  console.log(
+    `altered copies of ${altered.length} animations (${failed} failed): the share within the tolerance of ${tolerance}`,
+  );
+  for (const alteration of Object.keys(altered[0].altered)) {
+    const sorted = altered.map((row) => row.altered[alteration]).sort((a, b) => a - b);
+    const within = sorted.filter((value) => value <= tolerance).length;
+    console.log(
+      `  ${alteration.padEnd(44)} ${String(Math.round((100 * within) / sorted.length)).padStart(3)}%` +
+        `   smallest ${sorted[0].toFixed(1).padStart(5)}  median ${quantile(sorted, 0.5).toFixed(1).padStart(5)}`,
+    );
   }
 }
 
@@ -245,6 +264,14 @@ await runPhase('cross', (browser) =>
         .filter(({ id }) => fs.existsSync(conversionFile(other, id)))
         .map((made) => ({ ...job(made), conversion: `/conversion/${other}/${made.id}`, madeBy: other })),
     ),
+);
+await runPhase('altered', (browser) =>
+  browser === 'chrome'
+    ? chosen
+        .filter(({ id, format }) => format !== 'webp' && fs.existsSync(conversionFile('chrome', id)))
+        .filter((_, number) => number % 5 === 0)
+        .map((made) => ({ ...job(made), conversion: `/conversion/chrome/${made.id}`, madeBy: 'chrome' }))
+    : [],
 );
 server.close();
 fs.rmSync(root, { recursive: true, force: true });

@@ -64,8 +64,63 @@ describe('the difference between two frames', () => {
     expect(largestDifference(one, other, 20, 20)).toBe(20);
   });
 
+  // Detects: the largest difference over the frames of an animation coming out wrong because a frame is measured
+  // from what the earlier frames gave: lower than a later frame's difference, or lower than an earlier one's.
+  it('is the larger of a difference that is already known and that of the frames', () => {
+    const one = frame(48, 48, [100, 100, 100, 255]);
+    const other = paint(one.slice(), 48, [16, 16, 16, 16], [140, 100, 100, 255]);
+    expect(largestDifference(one, other, 48, 48)).toBe(10);
+    expect(largestDifference(one, other, 48, 48, 4)).toBe(10);
+    expect(largestDifference(one, other, 48, 48, 12)).toBe(12);
+  });
+
   // Detects: frames of other sizes than stated compared as far as they go.
   it('refuses frames that do not have the stated size', () => {
     expect(() => largestDifference(frame(16, 16, [0, 0, 0, 0]), frame(16, 15, [0, 0, 0, 0]), 16, 16)).toThrow();
+  });
+});
+
+describe('the difference between two frames where the picture changes from one pixel to the next', () => {
+  const SIZE = 32;
+  /** An opaque grey frame of SIZE × SIZE pixels whose pixel at (x, y) has the brightness `value(x, y)`. */
+  function shaded(value: (x: number, y: number) => number): Uint8Array {
+    const pixels = new Uint8Array(SIZE * SIZE * 4);
+    for (let y = 0; y < SIZE; y++) {
+      for (let x = 0; x < SIZE; x++) pixels.set([value(x, y), value(x, y), value(x, y), 255], (y * SIZE + x) * 4);
+    }
+    return pixels;
+  }
+  /** A black field that is white from column `edge` on. */
+  const edgeAt = (edge: number) => shaded((x) => (x >= edge ? 255 : 0));
+  /** One column of a square black in one frame and white in the other: 16 of 256 pixels, three of four channels. */
+  const COLUMN = (16 * 3 * 255) / (256 * 4);
+  const between = (one: Uint8Array, other: Uint8Array) => largestDifference(one, other, SIZE, SIZE);
+
+  // Detects: the copies of honest users refused because another browser draws an edge up to half a pixel from
+  // where this one draws it. Such an edge shows as a column of pixels at half brightness.
+  it('forgives an edge that is drawn half a pixel off', () => {
+    const halfOff = shaded((x) => (x > 8 ? 255 : x === 8 ? 128 : 0));
+    expect(between(edgeAt(8), halfOff)).toBe(0);
+    expect(between(halfOff, edgeAt(8))).toBe(0);
+  });
+
+  // Detects: a picture that is moved or drawn anew accepted as a matter of drawing. An edge one pixel off counts
+  // as half a column, and every further pixel as a whole column more.
+  it('counts an edge that is a whole pixel off or more', () => {
+    expect(between(edgeAt(8), edgeAt(9))).toBeCloseTo(COLUMN / 2, 6);
+    expect(between(edgeAt(8), edgeAt(10))).toBeCloseTo(1.5 * COLUMN, 6);
+  });
+
+  // Detects: something that only one of the frames has forgiven, because next to a line or a spot the values of
+  // that frame span a wide range and the other frame's plain field lies within it. A line across a square, or a
+  // spot of 4 × 4 pixels, of brightness 0 on 200 gives 16 × 3 × 200 / (256 × 4).
+  it('counts a line or a spot that only one of the frames has in full, whichever frame has it', () => {
+    const field = shaded(() => 200);
+    const line = shaded((x, y) => (y === 5 ? 0 : 200));
+    const spot = shaded((x, y) => (x >= 20 && x < 24 && y >= 20 && y < 24 ? 0 : 200));
+    for (const marked of [line, spot]) {
+      expect(between(field, marked)).toBeCloseTo(9.375, 6);
+      expect(between(marked, field)).toBeCloseTo(9.375, 6);
+    }
   });
 });

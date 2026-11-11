@@ -48,10 +48,8 @@ self.onmessage = (event: MessageEvent<EncodeRequest | OpenRequest | CompareReque
       if (others.length !== kept.frames.length) return reply({ result: 255 });
       let largest = 0;
       for (let i = 0; i < others.length; i++) {
-        largest = Math.max(
-          largest,
-          largestDifference(new Uint8Array(kept.frames[i]), new Uint8Array(others[i]), kept.width, kept.height),
-        );
+        const [frame, other] = [new Uint8Array(kept.frames[i]), new Uint8Array(others[i])];
+        largest = largestDifference(frame, other, kept.width, kept.height, largest);
       }
       reply({ result: largest });
     } else {

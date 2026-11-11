@@ -26,18 +26,22 @@ import { largestDifference } from './frame-difference';
  * frame-difference.ts measures it (0 to 255, for the most different square of the frame).
  *
  * Measured with measure/measure.mjs on 345 vector animations and 191 video stickers from 24 real packs, each
- * converted in Chrome and in Firefox and compared in both. Within one browser the largest difference of the
- * app's own conversions was 9.2 for vector animations and 9.0 for videos. Between the two browsers it was 14 to
- * 18 for vector animations over four runs: a sharp edge that they draw one pixel apart gives about 16 in the
- * square it crosses. The tolerance leaves a third above the largest. A copy with a sticker above it is refused
- * and the pack is uploaded again.
+ * converted in Chrome and in Firefox and compared in both. The largest difference of the app's own conversions was
+ * 9.2 for vector animations and 7.7 for videos, and no larger where one browser compared what the other had made:
+ * what is left is what reducing a frame to 256 colours loses. The tolerance is one and a half times the largest.
+ * A copy with a sticker above it is refused and the pack is uploaded again.
+ *
+ * What it lets through, measured on altered copies of 108 of the animations: always a line one pixel wide, or a
+ * tenth less of one colour; on three animations in ten a spot 3% of the picture wide; on one in ten or fewer a
+ * spot 5% wide, a veil of 15% opacity or a line two pixels wide.
  */
-export const ANIMATION_TOLERANCE = 24;
+export const ANIMATION_TOLERANCE = 14;
 /**
  * The same for a still picture that was encoded again at lower quality. None of 1,899 real still stickers was
- * large enough to need that, so this rests on a drawn picture with fine detail, which differed by 7.0.
+ * large enough to need that, and a drawn picture with fine detail differed by 2.1, so this is the tolerance of
+ * the animations.
  */
-export const STILL_TOLERANCE = 24;
+export const STILL_TOLERANCE = 14;
 
 /** A copy of the bytes in a buffer of their own, to hand to a worker. */
 const ownBuffer = (bytes: Uint8Array) => bytes.slice().buffer;
