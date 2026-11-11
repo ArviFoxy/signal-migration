@@ -2,8 +2,16 @@
 
 /** The side of the squares in which two frames are compared, in pixels. */
 export const SQUARE = 16;
+/**
+ * How far apart the squares are placed. They overlap by half, so that a mark up to this wide lies whole in one of
+ * them wherever it is. With squares side by side, a mark on the line between two of them counts half in each, and
+ * on a corner a quarter.
+ */
+const STEP = SQUARE / 2;
 
 type Frame = Uint8Array | Uint8ClampedArray;
+/** A rectangle of a frame: the pixels from `left` to before `right` and from `top` to before `bottom`. */
+type Part = { left: number; top: number; right: number; bottom: number };
 
 /**
  * One value of a pixel, in units of 1/255: a colour multiplied by the pixel's opacity, or for channel 3 the
@@ -12,8 +20,8 @@ type Frame = Uint8Array | Uint8ClampedArray;
 const valueAt = (frame: Frame, at: number, channel: number) =>
   channel === 3 ? frame[at + 3] * 255 : frame[at + channel] * frame[at + 3];
 
-/** The sum over a square of how far the values of two frames lie apart, pixel by pixel, in units of 1/255. */
-function apart(one: Frame, other: Frame, width: number, left: number, top: number, right: number, bottom: number) {
+/** The sum over a part of how far the values of two frames lie apart, pixel by pixel, in units of 1/255. */
+function apart(one: Frame, other: Frame, width: number, { left, top, right, bottom }: Part) {
   let sum = 0;
   for (let y = top; y < bottom; y++) {
     for (let at = (y * width + left) * 4; at < (y * width + right) * 4; at += 4) {
@@ -26,20 +34,11 @@ function apart(one: Frame, other: Frame, width: number, left: number, top: numbe
 }
 
 /**
- * The sum over a square of how far the values of `frame` lie outside what `other` allows at the same place, in
- * units of 1/255. `other` allows its own value there and, on either side of it, up to half the range of its values
- * at that pixel and the eight around it, and nothing outside that range.
+ * The sum over a part of how far the values of `frame` lie outside what `other` allows at the same place, in units
+ * of 1/255. `other` allows its own value there and, on either side of it, up to half the range of its values at
+ * that pixel and the eight around it, and nothing outside that range.
  */
-function outsideAllowed(
-  frame: Frame,
-  other: Frame,
-  width: number,
-  height: number,
-  left: number,
-  top: number,
-  right: number,
-  bottom: number,
-) {
+function outsideAllowed(frame: Frame, other: Frame, width: number, height: number, { left, top, right, bottom }: Part) {
   let sum = 0;
   for (let y = top; y < bottom; y++) {
     const firstRow = Math.max(y - 1, 0);
@@ -93,21 +92,59 @@ export function largestDifference(one: Frame, other: Frame, width: number, heigh
   if (one.length !== width * height * 4 || other.length !== one.length) {
     throw new Error('the frames do not have the stated size');
   }
+  // The frame in blocks of STEP × STEP pixels, of which a square is four, so that the squares that share a block
+  // share the work on it.
+  const across = Math.ceil(width / STEP);
+  const down = Math.ceil(height / STEP);
+  const block = (column: number, row: number): Part => ({
+    left: column * STEP,
+    top: row * STEP,
+    right: Math.min((column + 1) * STEP, width),
+    bottom: Math.min((row + 1) * STEP, height),
+  });
+  const liesApart = new Float64Array(across * down);
+  for (let row = 0; row < down; row++) {
+    for (let column = 0; column < across; column++) {
+      liesApart[row * across + column] = apart(one, other, width, block(column, row));
+    }
+  }
+  // How far each frame lies outside what the other allows, per block. Worked out when a square first needs it.
+  const oneOutside = new Float64Array(across * down).fill(-1);
+  const otherOutside = new Float64Array(across * down).fill(-1);
+
   let largest = atLeast;
-  for (let top = 0; top < height; top += SQUARE) {
-    for (let left = 0; left < width; left += SQUARE) {
-      const bottom = Math.min(top + SQUARE, height);
-      const right = Math.min(left + SQUARE, width);
-      const scale = (bottom - top) * (right - left) * 4 * 255;
+  // The last square of a row or column starts one block before the end, so that none is narrower than a block.
+  for (let row = 0; row === 0 || row + 1 < down; row++) {
+    for (let column = 0; column === 0 || column + 1 < across; column++) {
+      const lastRow = Math.min(row + 1, down - 1);
+      const lastColumn = Math.min(column + 1, across - 1);
+      const pixels =
+        (Math.min((row + 2) * STEP, height) - row * STEP) * (Math.min((column + 2) * STEP, width) - column * STEP);
+      const scale = pixels * 4 * 255;
       // What a frame allows always includes its own value, so a square never counts for more than its values lie
       // apart. Where that is no more than the largest difference so far, the square cannot change the result, and
-      // most squares are settled this way, at a ninth of the cost of looking at the neighbours.
-      if (apart(one, other, width, left, top, right, bottom) / scale <= largest) continue;
-      const outside = Math.max(
-        outsideAllowed(one, other, width, height, left, top, right, bottom),
-        outsideAllowed(other, one, width, height, left, top, right, bottom),
-      );
-      largest = Math.max(largest, outside / scale);
+      // most squares are settled this way, without a look at the neighbours.
+      let squareApart = 0;
+      for (let blockRow = row; blockRow <= lastRow; blockRow++) {
+        for (let blockColumn = column; blockColumn <= lastColumn; blockColumn++) {
+          squareApart += liesApart[blockRow * across + blockColumn];
+        }
+      }
+      if (squareApart / scale <= largest) continue;
+      let oneSum = 0;
+      let otherSum = 0;
+      for (let blockRow = row; blockRow <= lastRow; blockRow++) {
+        for (let blockColumn = column; blockColumn <= lastColumn; blockColumn++) {
+          const index = blockRow * across + blockColumn;
+          if (oneOutside[index] < 0) {
+            oneOutside[index] = outsideAllowed(one, other, width, height, block(blockColumn, blockRow));
+            otherOutside[index] = outsideAllowed(other, one, width, height, block(blockColumn, blockRow));
+          }
+          oneSum += oneOutside[index];
+          otherSum += otherOutside[index];
+        }
+      }
+      largest = Math.max(largest, Math.max(oneSum, otherSum) / scale);
     }
   }
   return largest;

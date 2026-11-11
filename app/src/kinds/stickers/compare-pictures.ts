@@ -27,21 +27,21 @@ import { largestDifference } from './frame-difference';
  *
  * Measured with measure/measure.mjs on 345 vector animations and 191 video stickers from 24 real packs, each
  * converted in Chrome and in Firefox and compared in both. The largest difference of the app's own conversions was
- * 9.2 for vector animations and 7.7 for videos, and no larger where one browser compared what the other had made:
+ * 9.8 for vector animations and 7.7 for videos, and no larger where one browser compared what the other had made:
  * what is left is what reducing a frame to 256 colours loses. The tolerance is one and a half times the largest.
  * A copy with a sticker above it is refused and the pack is uploaded again.
  *
  * What it lets through, measured on altered copies of 108 of the animations: always a line one pixel wide, or a
- * tenth less of one colour; on three animations in ten a spot 3% of the picture wide; on one in ten or fewer a
- * spot 5% wide, a veil of 15% opacity or a line two pixels wide.
+ * tenth less of one colour; on one animation in four a spot 3% of the picture wide; on one in twenty-five or fewer
+ * a spot 5% wide, a veil of 15% opacity or a line two pixels wide.
  */
-export const ANIMATION_TOLERANCE = 14;
+export const ANIMATION_TOLERANCE = 15;
 /**
  * The same for a still picture that was encoded again at lower quality. None of 1,899 real still stickers was
- * large enough to need that, and a drawn picture with fine detail differed by 2.1, so this is the tolerance of
+ * large enough to need that, and a drawn picture with fine detail differed by 2.2, so this is the tolerance of
  * the animations.
  */
-export const STILL_TOLERANCE = 14;
+export const STILL_TOLERANCE = 15;
 
 /** A copy of the bytes in a buffer of their own, to hand to a worker. */
 const ownBuffer = (bytes: Uint8Array) => bytes.slice().buffer;

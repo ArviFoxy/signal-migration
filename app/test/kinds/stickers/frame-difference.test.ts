@@ -55,13 +55,29 @@ describe('the difference between two frames', () => {
     );
   });
 
-  // Detects: the squares at the right and bottom edge, which are narrower when the size is no multiple of 16,
-  // skipped or averaged over pixels they do not have. A strip 4 pixels wide whose red channel differs by 80 gives
-  // 80 / 4 = 20.
-  it('measures the narrower squares at the edges over their own pixels', () => {
+  // Detects: a mark hidden on the line between two squares or on a corner of four, where squares placed side by
+  // side each see a part of it. A mark of 8 × 8 pixels around the point (16, 16) whose red channel differs by 100
+  // gives 64 × 100 / (256 × 4) in a square that holds all of it, and a quarter of that in each of four side by side.
+  it('counts a small mark in full wherever it lies', () => {
+    const one = frame(48, 48, [10, 10, 10, 255]);
+    for (const [left, top] of [
+      [12, 12],
+      [4, 12],
+      [12, 20],
+      [0, 0],
+    ]) {
+      const other = paint(one.slice(), 48, [left, top, 8, 8], [110, 10, 10, 255]);
+      expect(largestDifference(one, other, 48, 48), `a mark at ${left}, ${top}`).toBe(6.25);
+    }
+  });
+
+  // Detects: the pixels at the right and bottom edge left out when the size is no multiple of the squares' step,
+  // or averaged over pixels the frame does not have. In a frame of 20 pixels the last square is 12 wide, and a
+  // strip of 4 pixels at the edge whose red channel differs by 80 gives 4 × 80 / (12 × 4).
+  it('measures the squares at the edges over their own pixels', () => {
     const one = frame(20, 20, [0, 0, 0, 255]);
     const other = paint(one.slice(), 20, [16, 0, 4, 20], [80, 0, 0, 255]);
-    expect(largestDifference(one, other, 20, 20)).toBe(20);
+    expect(largestDifference(one, other, 20, 20)).toBeCloseTo(80 / 12, 9);
   });
 
   // Detects: the largest difference over the frames of an animation coming out wrong because a frame is measured
