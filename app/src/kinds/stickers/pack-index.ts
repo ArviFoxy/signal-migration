@@ -22,7 +22,10 @@ const PUBLIC_CDN = 'https://cdn-ca.signal.org';
 
 export const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
-/** The server's answers, as in crates/server/src/index.rs. "busy" is its per-address rate limit. */
+/**
+ * The server's answers, as in crates/server/src/index.rs. "busy": its limit per address, or Signal's CDN did not
+ * tell the server whether the pack exists; either way the entry can be sent again later.
+ */
 export type AddResult = 'added' | 'busy';
 
 /** The index server's three operations. */
@@ -51,7 +54,7 @@ export const httpIndexBackend: IndexBackend = {
       body: entry as Uint8Array<ArrayBuffer>,
     });
     if (response.status === 201 || response.status === 200) return 'added';
-    if (response.status === 429) return 'busy';
+    if (response.status === 429 || response.status === 503) return 'busy';
     throw new Error(`adding to the sticker pack index answered ${response.status}`);
   },
 };

@@ -12,7 +12,10 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use signal_migration_server::{
-    ClientConfig, Config, TelegramApp, demo_router, index::Index, relay::RelayTargets, router,
+    ClientConfig, Config, TelegramApp, demo_router,
+    index::{Index, signal_cdn},
+    relay::RelayTargets,
+    router,
 };
 
 fn telegram_app() -> Result<Option<TelegramApp>, Box<dyn std::error::Error>> {
@@ -44,7 +47,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         router(Config {
             static_dir,
-            index: Index::open(PathBuf::from(env::var("INDEX_FILE")?)).await?,
+            index: Index::open(PathBuf::from(env::var("INDEX_FILE")?), signal_cdn()).await?,
             relay_targets: RelayTargets::signal(),
             client: ClientConfig {
                 telegram: telegram_app()?,
