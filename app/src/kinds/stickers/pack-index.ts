@@ -7,6 +7,10 @@
 // Anyone can add an entry, so an entry alone shows nothing. The page installs someone else's copy only after it
 // compared the copy with the Telegram pack itself (compare-pack.ts). It compares at most MAX_COMPARISONS copies of
 // a pack and then uploads the pack, so that bad copies cost a bounded amount of work.
+//
+// A copy is compared as soon as it is listed. For 30 minutes after an upload began, its uploader can replace the
+// files (Signal's upload forms are valid that long), also after a page compared them, and Signal's CDN can go on
+// handing out a version it read earlier. That risk is accepted: no copy is made to wait.
 
 import { fetchWithTimeLimit, REQUEST_TIME_LIMIT_S, SERVER_TIME_LIMIT_S } from '../../core/time-limit';
 import { fromBinary } from '@bufbuild/protobuf';
@@ -23,12 +27,6 @@ const MAX_ENTRIES_PER_READ = 100_000;
 /** Signal's CDN under a publicly trusted certificate, readable from any page. */
 const PUBLIC_CDN = 'https://cdn-ca.signal.org';
 
-/**
- * How long after its manifest was written a copy is left alone. For 30 minutes its uploader can replace the files
- * (Signal's upload forms are valid that long), and Signal's CDN goes on handing out a copy it stored earlier. It
- * was seen to do so for more than an hour; a day is assumed. After both, everyone is given the same, final files.
- */
-export const SETTLED_AFTER_MS = (30 + 24 * 60) * 60 * 1000;
 /** How many copies of a pack are compared with the Telegram pack before the page uploads the pack itself. */
 export const MAX_COMPARISONS = 3;
 /** How many listed copies are looked at from each end of the list while looking for usable ones. */
@@ -49,11 +47,8 @@ export interface IndexBackend {
   add(entry: Uint8Array): Promise<AddResult>;
 }
 
-/** A pack's encrypted manifest, and when it was last written, in milliseconds since 1970 (null when not known). */
-export type FetchedManifest = { bytes: Uint8Array; lastModified: number | null };
-
 /** Reads a pack's encrypted manifest from Signal's CDN; null when the CDN has no such pack. */
-export type ManifestSource = (packId: Uint8Array) => Promise<FetchedManifest | null>;
+export type ManifestSource = (packId: Uint8Array) => Promise<Uint8Array | null>;
 
 /** Reads one encrypted sticker file of a pack from Signal's CDN; null when the CDN has no such file. */
 export type StickerSource = (packId: Uint8Array, number: number) => Promise<Uint8Array | null>;
@@ -93,12 +88,7 @@ async function fromPublicCdn(packId: Uint8Array, file: string): Promise<Response
 
 export const manifestFromPublicCdn: ManifestSource = async (packId) => {
   const response = await fromPublicCdn(packId, 'manifest.proto');
-  if (!response) return null;
-  const written = Date.parse(response.headers.get('last-modified') ?? '');
-  return {
-    bytes: new Uint8Array(await response.arrayBuffer()),
-    lastModified: Number.isNaN(written) ? null : written,
-  };
+  return response && new Uint8Array(await response.arrayBuffer());
 };
 
 export const stickerFromPublicCdn: StickerSource = async (packId, number) => {
@@ -124,8 +114,8 @@ export class PackIndex {
   #pageSize: number;
   #packIds = new Map<string, Uint8Array[]>();
   #entryCount = 0;
-  /** The copies this page compared and found faithful, by lookup key and pack key. */
-  #faithful = new Map<string, Uint8Array>();
+  /** What this page found when it compared a copy: whether it is faithful, by pack ID and pack key. */
+  #compared = new Map<string, boolean>();
 
   constructor(
     backend: IndexBackend = httpIndexBackend,
@@ -160,7 +150,7 @@ export class PackIndex {
     if (!encrypted) return null;
     await loadSignalWasm();
     try {
-      return fromBinary(StickerPackSchema, decryptStickerFile(encrypted.bytes, packKey));
+      return fromBinary(StickerPackSchema, decryptStickerFile(encrypted, packKey));
     } catch {
       return null;
     }
@@ -174,8 +164,7 @@ export class PackIndex {
   /**
    * The copies of a pack that are worth comparing, in the order to compare them, with their manifests: the oldest
    * listed copy that is usable, then the newest, then the second newest. A copy is usable when Signal's CDN has
-   * it, its manifest was written at least SETTLED_AFTER_MS before `now`, and the manifest decrypts with `packKey`.
-   * Each copy is looked for only when the one before it was taken.
+   * it and its manifest decrypts with `packKey`. Each copy is looked for only when the one before it was taken.
    *
    * The oldest copy comes first because bad copies added to a pack that already has a good one are then never
    * looked at. The newest come next because a good copy that someone uploaded after meeting bad ones is the newest.
@@ -183,13 +172,11 @@ export class PackIndex {
   async *#copiesToCompare(
     lookupKey: Uint8Array,
     packKey: Uint8Array,
-    now: number,
   ): AsyncGenerator<{ packId: Uint8Array; manifest: Uint8Array }> {
     const listed = this.candidates(lookupKey);
     const usable = async (packId: Uint8Array) => {
       const manifest = await this.#manifests(packId);
-      if (!manifest || manifest.lastModified === null || now - manifest.lastModified < SETTLED_AFTER_MS) return null;
-      return (await manifestOpens(manifest.bytes, packKey)) ? { packId, manifest: manifest.bytes } : null;
+      return manifest && (await manifestOpens(manifest, packKey)) ? { packId, manifest } : null;
     };
     let found = 0;
     /** The newest entry that was looked at from the oldest end. */
@@ -213,23 +200,22 @@ export class PackIndex {
 
   /**
    * The pack ID of a listed copy that the page compared with the Telegram pack and found faithful, or null when
-   * none of the copies it compared is. `now` is the time in milliseconds since 1970.
+   * none of the copies it compared is. A copy is compared once: asked again, the page goes by what it found.
    */
   async findFaithful(
     pack: { lookupKey: Uint8Array; packKey: Uint8Array; original: OriginalPack },
     pictures: PictureComparison,
-    now: number,
   ): Promise<Uint8Array | null> {
-    const key = `${toHex(pack.lookupKey)}:${toHex(pack.packKey)}`;
-    const known = this.#faithful.get(key);
-    if (known) return known;
     await loadSignalWasm();
-    for await (const copy of this.#copiesToCompare(pack.lookupKey, pack.packKey, now)) {
-      const files = { manifest: async () => copy.manifest, sticker: this.#stickers };
-      if (await isFaithfulCopy(copy.packId, pack.packKey, pack.original, files, pictures)) {
-        this.#faithful.set(key, copy.packId);
-        return copy.packId;
+    for await (const copy of this.#copiesToCompare(pack.lookupKey, pack.packKey)) {
+      const key = `${toHex(copy.packId)}:${toHex(pack.packKey)}`;
+      let faithful = this.#compared.get(key);
+      if (faithful === undefined) {
+        const files = { manifest: async () => copy.manifest, sticker: this.#stickers };
+        faithful = await isFaithfulCopy(copy.packId, pack.packKey, pack.original, files, pictures);
+        this.#compared.set(key, faithful);
       }
+      if (faithful) return copy.packId;
     }
     return null;
   }

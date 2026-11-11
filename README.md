@@ -70,9 +70,6 @@ after comparing it with the Telegram pack itself (`compare-pack.ts`):
   (`compare-pictures.ts`). An animation must have one of the sizes and frame rates the app converts to, and its file
   may hold nothing but the pictures. Each frame may differ from the original by a tolerance that covers what the
   encoding loses (`ANIMATION_TOLERANCE`, `STILL_TOLERANCE`).
-- A copy is used only when its manifest was written at least 24.5 hours earlier (the `Last-Modified` header of
-  Signal's CDN). For 30 minutes after an upload, its uploader can replace the files, and Signal's CDN goes on serving
-  a version it read earlier. How long it does so is not documented; a day is assumed.
 
 The browser compares at most three copies of a pack: the oldest one that can be used, then the newest, then the
 second newest. To find them it looks at no more than the ten oldest and the ten newest entries of the pack. If no
@@ -81,8 +78,15 @@ since its last read and looks again.
 
 Bad copies listed after a good one cost nothing, because the oldest copy passes and no other is read. When the
 oldest copy is bad, the first user who meets it uploads a good copy, which is then the newest one and is found by
-the users after them. Someone who keeps adding bad copies of a pack can make users upload that pack again. They
-cannot make a browser install a copy whose pictures differ from the Telegram pack by more than the tolerance.
+the users after them. Someone who keeps adding bad copies of a pack can make users upload that pack again.
+
+A copy is compared as soon as it is listed, so that no pack waits. The comparison shows what Signal's CDN served at
+that moment. For 30 minutes after an upload began, its uploader can replace the files, because Signal's upload forms
+are valid that long. A copy that was faithful when a browser compared it shows other pictures afterwards if its
+uploader replaces them in that time. Signal's CDN also goes on serving a version it read earlier (for more than 90
+minutes when measured), so a browser can still be given the earlier version to compare after the replacement. This
+risk is accepted. In every other case, a browser installs no copy whose pictures differ from the Telegram pack by
+more than the tolerance.
 
 ## Signal
 

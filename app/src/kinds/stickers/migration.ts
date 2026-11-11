@@ -510,7 +510,7 @@ export class StickerMigration extends EventTarget {
    * found faithful: its pack ID, or null. The index is read again first, for entries added since the last read.
    */
   async #faithfulCopy(entry: PackEntry): Promise<Uint8Array | null> {
-    const { clock, index, pictures } = this.#services;
+    const { index, pictures } = this.#services;
     await index.refresh();
     const stickers = entry.pack.stickers;
     const original = {
@@ -521,17 +521,13 @@ export class StickerMigration extends EventTarget {
         format: stickers[i].format,
       })),
     };
-    return index.findFaithful(
-      { lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original },
-      pictures,
-      clock.now(),
-    );
+    return index.findFaithful({ lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original }, pictures);
   }
 
   /**
    * Chooses the copy of a pack to install: a copy that someone else uploaded, after comparing it with the stickers
    * from Telegram, or else the page's own upload. The index is asked again right before the upload, for a copy
-   * that became usable meanwhile.
+   * that someone uploaded meanwhile.
    */
   async #chooseCopy(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
     entry.state = 'checking';
@@ -567,7 +563,7 @@ export class StickerMigration extends EventTarget {
       this.uploaded++;
       this.#notListed.add(entry);
     } else if (this.#plannedUploads.delete(entry)) {
-      // A copy became usable while this page converted the pack: an install after all.
+      // Uploaded by someone else while this page converted it: an install after all.
       this.#plannedInstalls.add(entry);
     }
     this.#copyChosen.add(entry);
