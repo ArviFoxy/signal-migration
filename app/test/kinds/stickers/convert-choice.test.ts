@@ -9,6 +9,7 @@ import {
   bestRated,
   type Candidate,
   frameDelay,
+  growthOf,
   PIXELS_PER_FRAME_RATE,
   predictedBytes,
   SIZES,
@@ -81,6 +82,19 @@ describe('the file size expected for a size and frame rate', () => {
     const encodings = [law(512, 90), law(192, 24)];
     const slow = predictedBytes(encodings, { size: 192, rate: 4, frames: 12 });
     expect(predictedBytes(encodings, { size: 192, rate: 8, frames: 24 })).toBeCloseTo(2 * slow, 3);
+  });
+
+  // Detects: every frame taken to cost the same for an animation whose frames hardly differ from one to the next,
+  // such as footage with a still background. Its file grows little with the frame rate, and a prediction that
+  // misses this keeps it far smaller or slower than the limit allows. The law here: bytes = 9 x size^1.4 x
+  // frames^0.25, shown by two sizes at one frame rate and one of them at a higher frame rate.
+  it('follows how the file grew with the number of frames when the encodings show it', () => {
+    const footage = (size: number, frames: number) => ({ size, frames, bytes: 9 * size ** 1.4 * frames ** 0.25 });
+    const encodings = [footage(128, 21), footage(256, 21), footage(128, 63)];
+    const growth = growthOf(encodings);
+    expect(growth.sizePower).toBeCloseTo(1.4, 6);
+    expect(growth.framePower).toBeCloseTo(0.25, 6);
+    expect(predictedBytes(encodings, { size: 300, rate: 30, frames: 90 })).toBeCloseTo(footage(300, 90).bytes, 3);
   });
 
   // Detects: the first attempt not being the best candidate, because something is ruled out before anything is

@@ -46,11 +46,12 @@ const MAX_FRAME_DELAY_MS = 250;
  * choices.
  */
 export const PIXELS_PER_FRAME_RATE = { tgs: 24, webm: 12 } as const;
-/** How many encodings the search for a size and frame rate makes at most, the two it starts with included. */
+/** How many encodings the search for a size and frame rate makes at most, those it starts with included. */
 const MAX_ATTEMPTS = 8;
 /**
- * The two encodings the search starts with: small, at a low frame rate, so that they cost little. They show how
- * this animation's file grows with its size, which predicts the file sizes of all the others.
+ * The encodings the search starts with: small ones, so that they cost little. Two sizes at one frame rate show how
+ * this animation's file grows with its size, and the smaller size at a higher frame rate shows how it grows with
+ * the number of frames (see Growth). Together they predict the file sizes of all the others.
  *
  * The frame rate is one that the usual 60, 30 and 24 frames per second are no multiple of. Many animations hold a
  * drawing for several frames, and at a rate that falls in step with the holds, frames repeat and the file is far
@@ -58,15 +59,17 @@ const MAX_ATTEMPTS = 8;
  */
 const FIRST_SIZES = [128, 256];
 const FIRST_FRAME_RATE = 7;
+const HIGHER_FIRST_FRAME_RATE = 21;
 /**
- * A candidate is tried when its predicted file size is at most this share of the limit. The candidates lie close
- * together, so one that is predicted to fit only just is not worth the risk: the next one is nearly as good.
+ * A candidate is tried when its predicted file size is at most this share of the limit. The prediction is off by a
+ * few percent, and the candidates lie close together, so one predicted to fit only just is not worth the risk.
  */
-const PREDICTION_MARGIN = 0.99;
+const PREDICTION_MARGIN = 0.97;
 /**
  * After a candidate that fits, another is tried only when it is clearly better: it rates at least 1.03 times as
- * high, or it is at least 1.05 times as large or as fast and no smaller or slower. The second case is for an
- * animation whose own frame rate is low, where the rating no longer rises with the size.
+ * high, or it is no smaller and no slower and either at least 1.05 times as large or as fast, or at the full size
+ * or the animation's own frame rate. The second case is for an animation whose own frame rate is low, where the
+ * rating no longer rises with the size.
  */
 const CLEARLY_HIGHER_RATING = 1.03;
 const CLEARLY_LARGER = 1.05;
@@ -186,32 +189,62 @@ export function bestRated(candidates: Candidate[], pixelsPerFrameRate: number): 
 }
 
 /**
- * How a file's bytes per frame grow with the size of the frame, as a power of the size, when only one encoding is
- * known. Flat colour keeps fewer bytes per pixel at a large size than fine detail does, so the power differs from
- * one animation to the next: about 1.2 for vector animations and 1.6 for videos among those measured.
+ * How an animation's file grows: its bytes are in proportion to the size of its frames to the power `sizePower`
+ * times their number to the power `framePower`. Both differ from one animation to the next. Flat colour keeps
+ * fewer bytes per pixel at a large size than fine detail does. And a file stores for each frame only what changed
+ * since the one before: in a drawn animation that is most of the picture, so every frame costs about the same
+ * (a power near 1), while in footage with a still background frames close in time hardly differ, so more frames
+ * cost little (a power near 0.25 was measured).
  */
-const ASSUMED_SIZE_POWER = 1.5;
+export type Growth = { sizePower: number; framePower: number };
 
-/**
- * The bytes to expect for `candidate`, from the encodings made so far (0 when there is none). A file grows in
- * proportion to its number of frames, and with the size of the frame by a power that is measured from the two
- * encodings nearest in size, once there are two of different sizes.
- */
-export function predictedBytes(encodings: Encoding[], candidate: Candidate): number {
-  return predictedBytesPerFrame(encodings, candidate.size) * candidate.frames;
+/** What is assumed for a power that the encodings made so far do not show. */
+const ASSUMED_GROWTH: Growth = { sizePower: 1.5, framePower: 1 };
+
+/** The growth that fits the encodings made so far best (least squares on the logarithms). */
+export function growthOf(encodings: Encoding[]): Growth {
+  const mean = (values: number[]) => values.reduce((sum, value) => sum + value, 0) / Math.max(1, values.length);
+  const centred = (values: number[]) => values.map((value) => value - mean(values));
+  const sizes = centred(encodings.map((encoding) => Math.log(encoding.size)));
+  const frames = centred(encodings.map((encoding) => Math.log(encoding.frames)));
+  const bytes = centred(encodings.map((encoding) => Math.log(encoding.bytes)));
+  const dot = (one: number[], other: number[]) => one.reduce((sum, value, i) => sum + value * other[i], 0);
+  const [ss, ff, sf, sb, fb] = [
+    dot(sizes, sizes),
+    dot(frames, frames),
+    dot(sizes, frames),
+    dot(sizes, bytes),
+    dot(frames, bytes),
+  ];
+  const determinant = ss * ff - sf * sf;
+  let { sizePower, framePower } = ASSUMED_GROWTH;
+  if (determinant > 1e-6 * ss * ff && determinant > 1e-12) {
+    sizePower = (sb * ff - fb * sf) / determinant;
+    framePower = (fb * ss - sb * sf) / determinant;
+  } else if (ss > 1e-9) {
+    // The encodings do not show the two apart: the frames are taken to cost the assumed power.
+    sizePower = (sb - framePower * sf) / ss;
+  } else if (ff > 1e-9) {
+    framePower = (fb - sizePower * sf) / ff;
+  }
+  const within = (value: number, least: number, most: number) => Math.min(Math.max(value, least), most);
+  return { sizePower: within(sizePower, 0.3, 2.5), framePower: within(framePower, 0.05, 1.3) };
 }
 
-/** The bytes to expect for one frame of `size` pixels, from the encodings made so far (0 when there is none). */
-function predictedBytesPerFrame(encodings: Encoding[], size: number): number {
+/**
+ * The bytes to expect for `candidate`, from the encodings made so far (0 when there is none): those of the
+ * encoding nearest to it in size and number of frames, carried over to its size and number of frames by the
+ * growth that fits all of them.
+ */
+export function predictedBytes(encodings: Encoding[], candidate: Candidate): number {
   if (encodings.length === 0) return 0;
-  const distance = (encoding: Encoding) => Math.abs(Math.log(encoding.size / size));
-  const nearest = [...encodings].sort((a, b) => distance(a) - distance(b));
-  const anchor = nearest[0];
-  const other = nearest.find((encoding) => encoding.size !== anchor.size);
-  const perFrame = (encoding: Encoding) => encoding.bytes / encoding.frames;
-  const measured = other ? Math.log(perFrame(anchor) / perFrame(other)) / Math.log(anchor.size / other.size) : NaN;
-  const power = Number.isFinite(measured) ? Math.min(Math.max(measured, 0.5), 2.5) : ASSUMED_SIZE_POWER;
-  return perFrame(anchor) * (size / anchor.size) ** power;
+  const { sizePower, framePower } = growthOf(encodings);
+  const distance = (encoding: Encoding) =>
+    Math.abs(Math.log(encoding.size / candidate.size)) + Math.abs(Math.log(encoding.frames / candidate.frames));
+  const nearest = encodings.reduce((best, encoding) => (distance(encoding) < distance(best) ? encoding : best));
+  return (
+    nearest.bytes * (candidate.size / nearest.size) ** sizePower * (candidate.frames / nearest.frames) ** framePower
+  );
 }
 
 /**
@@ -281,13 +314,21 @@ async function encodeToFit(animation: Animation, pixelsPerFrameRate: number, ste
   const preferred = (one: Fitting | null, other: Fitting | null) =>
     one && (!other || preference(one.candidate, other.candidate, pixelsPerFrameRate) > 0) ? one : other;
   let best: Fitting | null = null;
-  const firstRate = rates.reduce((nearest, rate) =>
-    Math.abs(rate - FIRST_FRAME_RATE) < Math.abs(nearest - FIRST_FRAME_RATE) ? rate : nearest,
-  );
-  for (const size of FIRST_SIZES) {
-    const first = candidates.find((candidate) => candidate.size === size && candidate.rate === firstRate)!;
-    best = preferred(await attempt(first), best);
-  }
+  const nearestRate = (wanted: number) =>
+    rates.reduce((nearest, rate) => (Math.abs(rate - wanted) < Math.abs(nearest - wanted) ? rate : nearest));
+  const candidateAt = (size: number, rate: number) =>
+    candidates.find((candidate) => candidate.size === size && candidate.rate === rate)!;
+  const firstRate = nearestRate(FIRST_FRAME_RATE);
+  const first = FIRST_SIZES.map((size) => candidateAt(size, firstRate));
+  // The encoding at a higher frame rate is left out when the animation has too few frames to tell.
+  const faster = candidateAt(FIRST_SIZES[0], nearestRate(HIGHER_FIRST_FRAME_RATE));
+  if (faster.frames >= first[0].frames * 1.3) first.push(faster);
+  for (const candidate of first) best = preferred(await attempt(candidate), best);
+
+  // Their logarithms, worked out once: every candidate's file size is predicted again after each encoding.
+  const logSize = candidates.map((candidate) => Math.log(candidate.size));
+  const logFrames = candidates.map((candidate) => Math.log(candidate.frames));
+  const fullRate = rates[0];
   while (tried.size < MAX_ATTEMPTS) {
     const fitting = best?.candidate;
     const clearlyBetter = (candidate: Candidate) =>
@@ -295,14 +336,34 @@ async function encodeToFit(animation: Animation, pixelsPerFrameRate: number, ste
       rating(candidate, pixelsPerFrameRate) >= rating(fitting, pixelsPerFrameRate) * CLEARLY_HIGHER_RATING ||
       (candidate.size >= fitting.size &&
         candidate.rate >= fitting.rate &&
-        (candidate.size >= fitting.size * CLEARLY_LARGER || candidate.rate >= fitting.rate * CLEARLY_LARGER));
-    // There are many candidates, so what one frame is expected to cost is worked out once for each size.
-    const perFrame = new Map(SIZES.map((size) => [size, predictedBytesPerFrame(encodings, size)]));
+        (candidate.size >= fitting.size * CLEARLY_LARGER ||
+          candidate.rate >= fitting.rate * CLEARLY_LARGER ||
+          (candidate.size === MAX_SIZE && fitting.size < MAX_SIZE) ||
+          (candidate.rate === fullRate && fitting.rate < fullRate)));
+    const { sizePower, framePower } = growthOf(encodings);
+    const made = encodings.map((encoding) => ({
+      logSize: Math.log(encoding.size),
+      logFrames: Math.log(encoding.frames),
+      logBytes: Math.log(encoding.bytes),
+    }));
+    const logLimit = Math.log(MAX_STICKER_BYTES * PREDICTION_MARGIN);
+    /** Whether candidate number `i` is predicted to fit: predictedBytes, on the logarithms worked out above. */
+    const predictedToFit = (i: number) => {
+      let nearest = made[0];
+      let least = Infinity;
+      for (const encoding of made) {
+        const distance = Math.abs(encoding.logSize - logSize[i]) + Math.abs(encoding.logFrames - logFrames[i]);
+        if (distance < least) [nearest, least] = [encoding, distance];
+      }
+      return (
+        nearest.logBytes +
+          sizePower * (logSize[i] - nearest.logSize) +
+          framePower * (logFrames[i] - nearest.logFrames) <=
+        logLimit
+      );
+    };
     const worthTrying = candidates.filter(
-      (candidate) =>
-        !tried.has(candidate) &&
-        clearlyBetter(candidate) &&
-        perFrame.get(candidate.size)! * candidate.frames <= MAX_STICKER_BYTES * PREDICTION_MARGIN,
+      (candidate, i) => !tried.has(candidate) && clearlyBetter(candidate) && predictedToFit(i),
     );
     const next = bestRated(worthTrying, pixelsPerFrameRate);
     if (!next) break;

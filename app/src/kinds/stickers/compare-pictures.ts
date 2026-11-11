@@ -26,10 +26,11 @@ import { largestDifference } from './frame-difference';
  * frame-difference.ts measures it (0 to 255, for the most different square of the frame).
  *
  * Measured with measure/measure.mjs on 345 vector animations and 191 video stickers from 24 real packs, each
- * converted in Chrome and in Firefox and compared in both. The largest difference of the app's own conversions
- * was 16.1, for one vector animation made in Chrome and compared in Firefox: a sharp edge that the two browsers
- * draw one pixel apart gives about 16 in the square it crosses. The next largest were 11.1 and 10.8. The tolerance
- * leaves half above the largest. A copy with a sticker above it is refused and the pack is uploaded again.
+ * converted in Chrome and in Firefox and compared in both. Within one browser the largest difference of the
+ * app's own conversions was 9.2 for vector animations and 12.7 for videos. Between the two browsers it was 14 to
+ * 18 for vector animations over four runs: a sharp edge that they draw one pixel apart gives about 16 in the
+ * square it crosses. The tolerance leaves a third above the largest. A copy with a sticker above it is refused
+ * and the pack is uploaded again.
  */
 export const ANIMATION_TOLERANCE = 24;
 /**
