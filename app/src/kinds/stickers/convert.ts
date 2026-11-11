@@ -3,7 +3,8 @@
 // Signal's sticker creator accepts static images and animated PNG (APNG), up to 300 KiB and 512 x 512 pixels, and
 // an APNG must be square and loop forever (Signal Desktop sticker-creator/src/util/processImage.ts). Telegram has
 // three formats:
-// - WebP, static: passed through unchanged when within the size limit, otherwise re-encoded at lower quality.
+// - WebP, static: passed through unchanged when within the size limit, otherwise re-encoded at lower quality,
+//   as a file that holds only the picture (plain-webp.ts).
 // - TGS, a gzipped Lottie animation: drawn frame by frame with lottie-web, then encoded as APNG.
 // - WebM, VP9 video with transparency: decoded frame by frame with FFmpeg and libvpx compiled to WebAssembly
 //   (webm-decoder.c), then encoded as APNG.
@@ -11,6 +12,7 @@
 // rate are lowered until the file fits the size limit.
 
 import lottie from 'lottie-web/build/player/lottie_light_canvas';
+import { plainWebp } from './plain-webp';
 import { withTimeLimit } from '../../core/time-limit';
 import type { StickerFormat } from './telegram-packs';
 import { MAX_STICKER_BYTES } from './upload';
@@ -21,7 +23,8 @@ const MAX_SIZE = 512;
 /** Telegram animations run at up to 60 frames per second. Fewer frames leave more of the size limit for each frame. */
 const MAX_FRAME_RATE = 30;
 const PALETTE_COLOURS = 256;
-const SIZES = [512, 448, 384, 320, 256, 224, 192, 160, 128];
+/** The square sizes and the frame rates an animation is encoded at, the largest that fits first. */
+export const SIZES = [512, 448, 384, 320, 256, 224, 192, 160, 128];
 const FRAME_RATES = [30, 24, 20, 15, 12, 10];
 const MAX_ATTEMPTS = 6;
 /** Aim this far under the limit when predicting a file's size from an earlier attempt. */
@@ -45,7 +48,7 @@ export type ConvertSticker = (file: Uint8Array, format: StickerFormat) => Promis
 type Step = { now: string };
 
 /** An animation that can be drawn at a given square size and frame rate, as RGBA frames. */
-type Animation = {
+export type Animation = {
   duration: number;
   sourceFrameRate: number | null;
   render(size: number, frameRate: number): Promise<ArrayBuffer[]>;
@@ -95,8 +98,26 @@ class WorkerChannel {
 const encoder = new WorkerChannel('/apng-worker.js', 'the animation encoder');
 const videoDecoder = new WorkerChannel('/webm-worker.js', 'the video decoder');
 
+/** Asks the worker that encodes and reads animated PNG files (apng-worker.ts). */
+export const askPngWorker = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>
+  encoder.request<T>(message, transfer);
+
+/** The delay between two frames of an animation encoded at `frameRate`, in milliseconds, as the file holds it. */
+export const frameDelay = (frameRate: number) => Math.round(1000 / frameRate);
+
+/** How many frames an animation has when it is encoded at `frameRate`. */
+export const frameCount = (animation: Animation, frameRate: number) =>
+  Math.max(1, Math.round(animation.duration * frameRate));
+
+/** The frame rates an animation may be encoded at: the listed ones up to its own rate, or its own when it is lower. */
+export function allowedFrameRates(animation: Animation): number[] {
+  const sourceRate = Math.min(animation.sourceFrameRate ?? MAX_FRAME_RATE, MAX_FRAME_RATE);
+  const lowerRates = FRAME_RATES.filter((rate) => rate <= sourceRate);
+  return lowerRates.length > 0 ? lowerRates : [sourceRate];
+}
+
 function encodeApng(frames: ArrayBuffer[], size: number, frameRate: number): Promise<Uint8Array> {
-  const delays = frames.map(() => Math.round(1000 / frameRate));
+  const delays = frames.map(() => frameDelay(frameRate));
   return encoder
     .request<ArrayBuffer>({ frames, width: size, height: size, delays, colours: PALETTE_COLOURS }, frames)
     .then((png) => new Uint8Array(png));
@@ -114,12 +135,9 @@ export const CONVERSION_TIME_LIMIT_MS = 120_000;
  * of pixels over all frames; each attempt that comes out too large corrects the factor.
  */
 async function encodeToFit(animation: Animation, step: Step): Promise<ConvertedSticker> {
-  const sourceRate = Math.min(animation.sourceFrameRate ?? MAX_FRAME_RATE, MAX_FRAME_RATE);
-  const frameCount = (rate: number) => Math.max(1, Math.round(animation.duration * rate));
-  const lowerRates = FRAME_RATES.filter((rate) => rate <= sourceRate);
-  const rates = lowerRates.length > 0 ? lowerRates : [sourceRate];
+  const rates = allowedFrameRates(animation);
   const candidates = SIZES.flatMap((size) =>
-    rates.map((rate) => ({ size, rate, pixels: size * size * frameCount(rate) })),
+    rates.map((rate) => ({ size, rate, pixels: size * size * frameCount(animation, rate) })),
   ).sort((a, b) => b.pixels - a.pixels);
   let bytesPerPixel = 0;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
@@ -211,6 +229,15 @@ async function webmAnimation(webm: Uint8Array, step: Step): Promise<Animation> {
   };
 }
 
+/** The animation in a Telegram sticker file. */
+export function openAnimation(file: Uint8Array, format: 'tgs' | 'webm'): Promise<Animation> {
+  const step: Step = { now: 'starting' };
+  return format === 'tgs' ? lottieAnimation(file, step) : webmAnimation(file, step);
+}
+
+/** The largest width or height of a still picture that had to be encoded again. */
+export const MAX_STILL_SIZE = MAX_SIZE;
+
 async function reencodeWebp(webp: Uint8Array): Promise<Uint8Array> {
   const bitmap = await createImageBitmap(new Blob([webp as Uint8Array<ArrayBuffer>], { type: 'image/webp' }));
   const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height));
@@ -219,9 +246,19 @@ async function reencodeWebp(webp: Uint8Array): Promise<Uint8Array> {
   bitmap.close();
   for (const quality of [0.9, 0.8, 0.7, 0.6, 0.5]) {
     const blob = await canvas.convertToBlob({ type: 'image/webp', quality });
-    if (blob.size <= MAX_STICKER_BYTES) return new Uint8Array(await blob.arrayBuffer());
+    if (blob.size > MAX_STICKER_BYTES) continue;
+    const file = new Uint8Array(await blob.arrayBuffer());
+    // The browser's encoder adds a colour profile. Without it the file holds only the picture, which is what
+    // other users' browsers accept as a copy (compare-pack.ts). A browser that cannot write WebP gives a PNG.
+    return blob.type === 'image/webp' ? plainWebp(file) : file;
   }
   throw new ConversionError(`the image does not fit in ${MAX_STICKER_BYTES / 1024} KiB`);
+}
+
+/** Stops both workers and fails what they were asked with `error`. The next request starts them again. */
+export function stopWorkers(error: Error): void {
+  encoder.stop(error);
+  videoDecoder.stop(error);
 }
 
 /** The file to upload to Signal for one Telegram sticker file. */
@@ -231,8 +268,7 @@ export const convertSticker: ConvertSticker = (file, format) => {
     const error = new ConversionError(
       `converting took longer than ${CONVERSION_TIME_LIMIT_MS / 1000} seconds, at: ${step.now}`,
     );
-    encoder.stop(error);
-    videoDecoder.stop(error);
+    stopWorkers(error);
     return error;
   });
 };

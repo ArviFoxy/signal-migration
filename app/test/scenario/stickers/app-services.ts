@@ -26,7 +26,7 @@ import { LinkingCancelledError } from '../../../src/signal/link';
 import { storageServiceKeyFromMasterKey } from '../../../src/wasm/signal_migration_wasm';
 import { PageClock } from '../clock';
 import { SimulatedAccount } from '../world';
-import { simulatedConvert, type StickerUser } from './sticker-world';
+import { simulatedConvert, simulatedPictures, type StickerUser } from './sticker-world';
 
 /** A TDLib instance's data: the authorization it holds, and whether it was logging out. */
 type InstanceData = { authorization: string | null; loggingOut: boolean };
@@ -298,7 +298,13 @@ export function appServices(
     migration: () => ({
       clock: new PageClock(world.clock, options.leaveAfterWaitOf ?? null),
       convert: simulatedConvert,
-      index: new PackIndex(world.index.backend, world.signal.manifestSource, world.index.pageSize),
+      index: new PackIndex(
+        world.index.backend,
+        world.signal.manifestSource,
+        world.index.pageSize,
+        world.signal.stickerSource,
+      ),
+      pictures: simulatedPictures,
     }),
     snapshots: {
       load: async () => {

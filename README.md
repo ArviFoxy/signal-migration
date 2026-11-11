@@ -20,6 +20,8 @@ browser ──── WebSocket, MTProto ─────────────�
 browser ──── WebSocket ──▶ server ──── TCP ─────────────────▶ Signal (chat, storage, cdn hosts)
              └──────────── TLS between the browser and Signal ───┘
 browser ──── HTTPS ──────▶ server (app files, sticker pack index)
+browser ──── HTTPS ──────────────────────────────────────────▶ Signal's public CDN (cdn-ca.signal.org)
+             server ──── HTTPS ─────────────────────────────▶ Signal's public CDN (cdn-ca.signal.org)
 ```
 
 Telegram is reached directly. Signal is not, because Signal's servers use certificates from Signal's own
@@ -28,11 +30,16 @@ certificate authority, which browsers do not trust. The browser therefore opens 
 `.signal.org`) and copies bytes both ways. Inside, the browser runs its own TLS session with Signal, accepting only
 Signal's root certificates (the ones libsignal ships).
 
+Signal's public CDN has a certificate that browsers trust and serves the encrypted files of every sticker pack to
+anyone. The browser reads from it the copies of a pack that others uploaded. The server asks it whether a pack
+exists before listing the pack in the index.
+
 ## What the server sees
 
 - **Relay:** encrypted bytes, which Signal host they go to, and when.
 - **Index:** for each uploaded pack, a 32-byte lookup key and the 16-byte Signal pack ID. Client addresses are used
-  for rate limits, in memory only, and are not logged.
+  for rate limits, in memory only, and are not logged. For a new entry, the server requests the headers of the
+  pack's manifest from Signal's public CDN, to learn whether Signal has the pack. It downloads no file of a pack.
 - **Nothing else:** no Telegram traffic, no Signal credentials, no pack keys, no stickers.
 
 ## Pack keys and the index
@@ -47,11 +54,35 @@ Each pack has two values, computed in the browser (`app/src/kinds/stickers/ident
 Both encodings start with a fixed label and give every field a 4-byte length, so two different packs never encode
 the same. This scheme is fixed: changing it would make every earlier upload unfindable.
 
-Everyone who migrates the same Telegram pack computes the same values, so a pack is uploaded once. Right before
-each upload, the browser reads the entries added since its last read and looks the pack up again. The index
-(`/v1/sticker-packs/index`) is an append-only list of 48-byte entries, `lookup key ‖ pack ID`. The browser downloads
-all of it and searches it locally. Before installing a pack from an entry, it downloads the pack's stickers, computes
-the pack key and checks that the pack's manifest on Signal's CDN decrypts with it.
+Everyone who migrates the same Telegram pack computes the same values, so a later user finds an earlier upload.
+The index (`/v1/sticker-packs/index`) is an append-only list of 48-byte entries, `lookup key ‖ pack ID`. The browser
+downloads all of it and searches it locally, so the server does not learn which packs a user looks up.
+
+Anyone can add an entry. The server adds one only if Signal has that pack and no entry lists that pack ID yet. An
+entry says nothing about what the pack contains, so the browser installs a copy that someone else uploaded only
+after comparing it with the Telegram pack itself (`compare-pack.ts`):
+
+- The copy's manifest must decrypt with the pack key and hold the title, the emoji and the numbering that the app
+  writes, and nothing else.
+- A still sticker within Signal's size limit must be the Telegram file, byte for byte.
+- A larger still, which the app encodes again at lower quality, and an animation, which the app converts to an
+  animated PNG, are drawn and compared with the original drawn at the same size and frame rate
+  (`compare-pictures.ts`). An animation must have one of the sizes and frame rates the app converts to, and its file
+  may hold nothing but the pictures. Each frame may differ from the original by a tolerance that covers what the
+  encoding loses (`ANIMATION_TOLERANCE`, `STILL_TOLERANCE`).
+- A copy is used only when its manifest was written at least 24.5 hours earlier (the `Last-Modified` header of
+  Signal's CDN). For 30 minutes after an upload, its uploader can replace the files, and Signal's CDN goes on serving
+  a version it read earlier. How long it does so is not documented; a day is assumed.
+
+The browser compares at most three copies of a pack: the oldest one that can be used, then the newest, then the
+second newest. To find them it looks at no more than the ten oldest and the ten newest entries of the pack. If no
+copy passes, it converts and uploads the pack and adds an entry. Right before the upload, it reads the entries added
+since its last read and looks again.
+
+Bad copies listed after a good one cost nothing, because the oldest copy passes and no other is read. When the
+oldest copy is bad, the first user who meets it uploads a good copy, which is then the newest one and is found by
+the users after them. Someone who keeps adding bad copies of a pack can make users upload that pack again. They
+cannot make a browser install a copy whose pictures differ from the Telegram pack by more than the tolerance.
 
 ## Signal
 
@@ -124,9 +155,10 @@ cd app && npm test               # the app, against simulated Telegram, Signal a
 cd crates/server && cargo test   # the server
 cd crates/signal-wasm && cargo test --target x86_64-unknown-linux-gnu   # the WebAssembly module's Rust code, run natively
 cd app && npm run screens        # a screenshot of every screen, in build/screens
-cd app && npm run test:integration   # the built app in Chrome, served by the real server; after `npm run build`
+cd app && npm run test:integration   # what needs a real Chrome; after `npm run build`
 ```
 
-The integration tests (`app/integration/`) start the real server on the built app and drive a headless Chrome over
-its DevTools protocol. Each test checks one thing that only the real server, the built files and a real browser
-together show.
+The integration tests (`app/integration/`) drive a headless Chrome over its DevTools protocol. `built-app.test.ts`
+starts the real server on the built app; each of its tests checks one thing that only the real server, the built
+files and a real browser together show. `pictures.test.ts` converts stickers with the app's conversion and compares
+them with their originals, which needs the browser's canvas and workers.

@@ -152,12 +152,17 @@ describe('the comparison of a copy on Signal with the Telegram pack', () => {
   });
 
   // Detects: a still sticker too large for Signal, which the app re-encodes, compared byte for byte (and so always
-  // refused), or accepted without its picture being compared.
-  it('compares the picture of a still sticker that had to be re-encoded', async () => {
+  // refused), accepted without its picture being compared, or accepted although its file holds more than one
+  // still picture (which a Signal app may show differently than this page).
+  it('wants a still sticker that had to be re-encoded to be a plain WebP file that shows the same', async () => {
     const large = { file: new Uint8Array(MAX_STICKER_BYTES + 1).fill(7), emoji: '🐈', format: 'webp' as const };
     const pack = { title: 'Cats', stickers: [large] };
     const copy = new Copy(pack);
-    copy.stickers[0] = still(9);
+    // A WebP file with one lossy picture of four bytes: 'RIFF', the length that follows, 'WEBP', and one chunk.
+    const reencoded = new Uint8Array([
+      82, 73, 70, 70, 16, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 32, 4, 0, 0, 0, 9, 9, 9, 9,
+    ]);
+    copy.stickers[0] = reencoded;
     const asked: Uint8Array[][] = [];
     const says = (same: boolean): PictureComparison => ({
       ...noPictures,
@@ -168,7 +173,9 @@ describe('the comparison of a copy on Signal with the Telegram pack', () => {
     });
     expect(await faithful(copy, pack, says(true))).toBe(true);
     expect(await faithful(copy, pack, says(false))).toBe(false);
-    expect(asked[0]).toEqual([still(9), large.file]);
+    expect(asked[0]).toEqual([reencoded, large.file]);
+    copy.stickers[0] = new Uint8Array([...reencoded, 0]);
+    expect(await faithful(copy, pack, noPictures), 'bytes after the picture').toBe(false);
   });
 
   // Detects: an animated sticker accepted without its frames being compared, or although its file holds more than

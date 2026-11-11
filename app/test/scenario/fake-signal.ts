@@ -75,6 +75,8 @@ export class FakeSignal {
   #random = seededBytes(7);
   #policies = new Map<string, { expires: number; maxBytes: number; account: string }>();
   #cdn = new Map<string, Uint8Array>();
+  /** When each file on the CDN was written, in milliseconds of the simulated clock. */
+  #cdnWritten = new Map<string, number>();
   #faults: Fault[] = [];
   #beforeStorageWrite: (() => Promise<void>)[] = [];
   /** Sticker pack upload forms issued, and manifests stored, per account. */
@@ -320,6 +322,7 @@ export class FakeSignal {
       return httpResponse(403);
     if (this.#cdn.has(key)) return httpResponse(403);
     this.#cdn.set(key, file);
+    this.#cdnWritten.set(key, this.clock.now());
     if (key.endsWith('/manifest.proto'))
       this.packsUploaded.set(policy.account, (this.packsUploaded.get(policy.account) ?? 0) + 1);
     return httpResponse(204);
@@ -330,7 +333,24 @@ export class FakeSignal {
     return this.#cdn.get(key) ?? null;
   }
 
-  /** The manifest of a pack, as the page reads it from Signal's public CDN to verify an index entry. */
-  readonly manifestSource = async (packId: Uint8Array): Promise<Uint8Array | null> =>
-    this.cdnFile(`stickers/${hex(packId)}/manifest.proto`);
+  /** Whether the public CDN says when a file was written (its Last-Modified header). */
+  tellsWriteTimes = true;
+  /** How often a page asked the public CDN for each file, by key. */
+  readonly publicCdnReads = new Map<string, number>();
+
+  #publicCdnFile(key: string): Uint8Array | null {
+    this.publicCdnReads.set(key, (this.publicCdnReads.get(key) ?? 0) + 1);
+    return this.cdnFile(key);
+  }
+
+  /** The manifest of a pack with the time it was written, as the page reads it from Signal's public CDN. */
+  readonly manifestSource = async (packId: Uint8Array) => {
+    const key = `stickers/${hex(packId)}/manifest.proto`;
+    const bytes = this.#publicCdnFile(key);
+    return bytes && { bytes, lastModified: this.tellsWriteTimes ? this.#cdnWritten.get(key)! : null };
+  };
+
+  /** A sticker file of a pack, as the page reads it from Signal's public CDN to compare a copy. */
+  readonly stickerSource = async (packId: Uint8Array, number: number): Promise<Uint8Array | null> =>
+    this.#publicCdnFile(`stickers/${hex(packId)}/full/${number}`);
 }

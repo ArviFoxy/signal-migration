@@ -8,6 +8,7 @@
 import { create, fromBinary } from '@bufbuild/protobuf';
 import { InstalledStickerPackRecordSchema, ManifestRecord_Identifier_Type } from '../../../src/gen/SignalStorage_pb';
 import { StickerPackSchema } from '../../../src/gen/Stickers_pb';
+import type { PictureComparison } from '../../../src/kinds/stickers/compare-pack';
 import { ConversionError, type ConvertSticker } from '../../../src/kinds/stickers/convert';
 import { contentPackKey, packIdentity } from '../../../src/kinds/stickers/identity';
 import { StickerMigration } from '../../../src/kinds/stickers/migration';
@@ -34,6 +35,15 @@ export type PackSpec = { title: string; stickers: StickerSpec[] };
 
 /** Sticker files starting with these bytes fail to convert, like an animation that cannot fit Signal's limit. */
 export const UNCONVERTIBLE = new TextEncoder().encode('UNCONVERTIBLE');
+
+/**
+ * Compares pictures as the simulated conversion makes them: it gives every file back as it is, so a converted file
+ * shows the same when it is the Telegram file.
+ */
+export const simulatedPictures: PictureComparison = {
+  sameStill: async (converted, original) => hex(converted) === hex(original),
+  sameAnimation: async (converted, original) => hex(converted) === hex(original),
+};
 
 /**
  * Stands in for the browser-only conversion (checked in a browser separately): the image is the file itself, and
@@ -130,11 +140,17 @@ export class StickerPage {
     readonly options: VisitOptions,
   ) {
     const { world } = user;
-    const index = new PackIndex(world.index.backend, world.signal.manifestSource, world.index.pageSize);
+    const index = new PackIndex(
+      world.index.backend,
+      world.signal.manifestSource,
+      world.index.pageSize,
+      world.signal.stickerSource,
+    );
     this.migration = new StickerMigration({
       clock: new PageClock(world.clock, options.leaveAfterWaitOf ?? null),
       convert: simulatedConvert,
       index,
+      pictures: simulatedPictures,
     });
     this.migration.addEventListener('change', () => {
       if (this.account) options.onChange?.(this.migration, this.account);
@@ -235,7 +251,11 @@ export class StickerWorld extends World {
 
   constructor(options: { uploadLimit?: UploadLimit; indexPageSize?: number } = {}) {
     super(options);
-    this.index = new FakeIndex(this.clock, options.indexPageSize ?? 3);
+    this.index = new FakeIndex(
+      this.clock,
+      options.indexPageSize ?? 3,
+      (packId) => this.signal.cdnFile(`stickers/${hex(packId)}/manifest.proto`) !== null,
+    );
   }
 
   /** A Telegram pack with `count` stickers of one format; `unconvertible` lists stickers that cannot be converted. */
@@ -289,25 +309,68 @@ export class StickerWorld extends World {
     return { packId, packKey };
   }
 
-  /** Another user migrating a Telegram pack: uploads it under the key derived from its content and adds it to the index. */
-  async migrateElsewhere(spec: PackSpec): Promise<Uint8Array> {
-    const identity = await packIdentity(spec);
-    const packKey = await packKeyOf(spec);
-    const stickers = await Promise.all(
-      spec.stickers.map(async (sticker) => ({
-        image: (await simulatedConvert(sticker.bytes, sticker.format)).image,
-        emoji: sticker.emoji,
-      })),
-    );
+  /**
+   * Uploads a copy of a Telegram pack with the given sticker images, under the key derived from the pack's content
+   * and with the manifest the app writes, and adds it to the index.
+   */
+  async #listCopy(spec: PackSpec, images: Uint8Array[]): Promise<Uint8Array> {
+    const stickers = spec.stickers.map((sticker, i) => ({ image: images[i], emoji: sticker.emoji }));
     const packId = await uploadStickerPack(
       this.#publisherChat(),
       { title: spec.title, stickers },
-      packKey,
+      await packKeyOf(spec),
       undefined,
       this.signal.https,
     );
-    await this.index.backend.add(new Uint8Array([...identity.lookupKey, ...packId]));
+    await this.index.backend.add(new Uint8Array([...(await packIdentity(spec)).lookupKey, ...packId]));
     return packId;
+  }
+
+  /** Another user migrating a Telegram pack: uploads it under the key derived from its content and adds it to the index. */
+  async migrateElsewhere(spec: PackSpec): Promise<Uint8Array> {
+    const converted = await Promise.all(
+      spec.stickers.map((sticker) => simulatedConvert(sticker.bytes, sticker.format)),
+    );
+    return this.#listCopy(
+      spec,
+      converted.map((sticker) => sticker.image),
+    );
+  }
+
+  /**
+   * Someone who has the Telegram pack uploading a copy of it in which the last sticker is another picture, and
+   * adding it to the index. The copy's manifest is the one the app writes, and it opens with the pack's key.
+   */
+  async listAlteredCopy(spec: PackSpec): Promise<Uint8Array> {
+    const images = spec.stickers.map((sticker) => sticker.bytes.slice());
+    images[images.length - 1] = new TextEncoder().encode('another picture');
+    return this.#listCopy(spec, images);
+  }
+
+  /** Someone adding an index entry that points a Telegram pack at a Signal pack under another key. */
+  async listOtherPack(spec: PackSpec): Promise<{ packId: Uint8Array; packKey: Uint8Array }> {
+    const other = await this.publishSignalPack('Other');
+    await this.index.backend.add(new Uint8Array([...(await packIdentity(spec)).lookupKey, ...other.packId]));
+    return other;
+  }
+
+  /** The hex pack IDs of the files that pages read from Signal's public CDN and whose name matches `file`. */
+  #publicCdnReads(file: RegExp): string[] {
+    const packIds = [...this.signal.publicCdnReads.keys()].flatMap((key) => {
+      const [, packId, name] = /^stickers\/([0-9a-f]+)\/(.*)$/.exec(key) ?? [];
+      return packId && file.test(name) ? [packId] : [];
+    });
+    return [...new Set(packIds)].sort();
+  }
+
+  /** The packs whose manifest pages read from Signal's public CDN, as sorted hex pack IDs. */
+  manifestsRead(): string[] {
+    return this.#publicCdnReads(/^manifest\.proto$/);
+  }
+
+  /** The packs of which pages read a sticker file from Signal's public CDN, as sorted hex pack IDs. */
+  stickersRead(): string[] {
+    return this.#publicCdnReads(/^full\//);
   }
 }
 

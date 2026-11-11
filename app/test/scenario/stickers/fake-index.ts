@@ -1,5 +1,6 @@
 // A simulated sticker pack index with the server's rules (crates/server/src/index.rs): append-only entries, reads
-// from an offset in pages, and a duplicate entry stored once.
+// from an offset in pages, a duplicate entry stored once, a Signal pack listed once, and no entry for a pack that
+// Signal does not have. Where the server refuses an entry, `add` fails as the page's request does.
 
 import type { AddResult, IndexBackend } from '../../../src/kinds/stickers/pack-index';
 import { hex } from '../bytes';
@@ -15,7 +16,9 @@ export class FakeIndex {
 
   constructor(
     readonly clock: Pick<Clock, 'now'>,
-    readonly pageSize = 3,
+    readonly pageSize: number,
+    /** Whether Signal has the pack, as the server learns it from Signal's CDN. */
+    readonly signalHas: (packId: Uint8Array) => boolean,
   ) {}
 
   readonly backend: IndexBackend = {
@@ -27,10 +30,14 @@ export class FakeIndex {
     add: async (entry: Uint8Array): Promise<AddResult> => {
       if (entry.length !== 48) throw new Error('malformed entry');
       if (this.entries.some((existing) => hex(existing) === hex(entry))) return 'added';
+      const packId = entry.subarray(32);
+      if (this.entries.some((existing) => hex(existing.subarray(32)) === hex(packId)))
+        throw new Error('adding to the sticker pack index answered 409');
       if (this.busy.adds > 0) {
         this.busy.adds--;
         return 'busy';
       }
+      if (!this.signalHas(packId)) throw new Error('adding to the sticker pack index answered 422');
       this.adds++;
       this.entries.push(entry.slice());
       return 'added';

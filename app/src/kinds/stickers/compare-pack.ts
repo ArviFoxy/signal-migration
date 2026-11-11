@@ -9,6 +9,7 @@ import { fromBinary } from '@bufbuild/protobuf';
 import { StickerPackSchema } from '../../gen/Stickers_pb';
 import { decryptStickerFile } from '../../wasm/signal_migration_wasm';
 import { isPlainPng } from './plain-png';
+import { isPlainWebp } from './plain-webp';
 import type { StickerFormat } from './telegram-packs';
 import { MAX_STICKER_BYTES } from './upload';
 
@@ -72,7 +73,7 @@ async function stickerMatches(
   if (original.format === 'webp') {
     // A still picture within Signal's size limit is uploaded as it is.
     if (original.file.length <= MAX_STICKER_BYTES) return sameBytes(file, original.file);
-    return pictures.sameStill(file, original.file);
+    return isPlainWebp(file) && (await pictures.sameStill(file, original.file));
   }
   return isPlainPng(file) && (await pictures.sameAnimation(file, original.file, original.format));
 }

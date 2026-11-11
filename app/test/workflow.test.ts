@@ -57,6 +57,22 @@ async function migrate(page: Page): Promise<void> {
   await settle(page);
 }
 
+/**
+ * Resolves at the moment the migration starts to wait for Signal's upload limit. The simulated clock ends a wait at
+ * once, so the moment is taken from the migration's own change event: looking for it between timers can miss it.
+ */
+function startOfUploadWait(page: Page): Promise<void> {
+  const migration = page.workflow.stickers!;
+  return new Promise((resolve) => {
+    const onChange = () => {
+      if (migration.uploadAllowedAt === null) return;
+      migration.removeEventListener('change', onChange);
+      resolve();
+    };
+    migration.addEventListener('change', onChange);
+  });
+}
+
 const deviceIdOf = (page: Page) => page.workflow.signal.device!.deviceId;
 
 describe('the workflow', () => {
@@ -263,8 +279,9 @@ describe('the workflow', () => {
     const page = await openPage(alice, new Browser());
     await signIn(page);
     await link(page);
+    const waiting = startOfUploadWait(page);
     page.workflow.startMigration();
-    await until(() => page.workflow.stickers?.uploadAllowedAt != null, 'the wait for the upload limit');
+    await waiting;
     expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
     expect(page.workflow.goTo('start')).toBe(true);
     await settle(page);
