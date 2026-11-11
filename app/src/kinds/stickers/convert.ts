@@ -23,12 +23,53 @@ const MAX_SIZE = 512;
 /** Telegram animations run at up to 60 frames per second. Fewer frames leave more of the size limit for each frame. */
 const MAX_FRAME_RATE = 30;
 const PALETTE_COLOURS = 256;
-/** The square sizes and the frame rates an animation is encoded at, the largest that fits first. */
-export const SIZES = [512, 448, 384, 320, 256, 224, 192, 160, 128];
-const FRAME_RATES = [30, 24, 20, 15, 12, 10];
-const MAX_ATTEMPTS = 6;
-/** Aim this far under the limit when predicting a file's size from an earlier attempt. */
-const PREDICTION_MARGIN = 0.9;
+/** The smallest square size an animation is encoded at. */
+const MIN_SIZE = 128;
+/** The square sizes an animation is encoded at: every number of pixels from 512 down to 128. */
+export const SIZES = Array.from({ length: MAX_SIZE - MIN_SIZE + 1 }, (_, step) => MAX_SIZE - step);
+/**
+ * The longest delay between two frames that an animation is encoded with, in milliseconds: 4 frames per second.
+ * An animation whose own frames are further apart keeps its own rate.
+ */
+const MAX_FRAME_DELAY_MS = 250;
+/**
+ * How many pixels of size one frame per second is worth, for vector animations and for video stickers. Most
+ * animations fit Signal's limit only when both the size and the frame rate are lowered, and a large picture that
+ * barely moves is no better than a small one that moves well. A size and frame rate are therefore rated by the
+ * smaller of the size and this number times the frame rate, and the best rated that fits is taken.
+ *
+ * The numbers were chosen by eye on twelve real stickers that fit only far below full quality, each shown at five
+ * sizes with the highest frame rate that fits. For vector animations, 192 pixels at 6 to 10 frames per second was
+ * preferred to 256 at 5 or 6 and to 128 at 12 to 15: their sharp edges suffer from a small size. For videos, the
+ * smallest size at the highest frame rate was preferred every time (128 pixels at 8 to 12 frames per second to
+ * 192 at 4 to 6): natural, soft pictures lose little at a small size. The numbers reproduce eleven of the twelve
+ * choices.
+ */
+export const PIXELS_PER_FRAME_RATE = { tgs: 24, webm: 12 } as const;
+/** How many encodings the search for a size and frame rate makes at most, the two it starts with included. */
+const MAX_ATTEMPTS = 8;
+/**
+ * The two encodings the search starts with: small, at a low frame rate, so that they cost little. They show how
+ * this animation's file grows with its size, which predicts the file sizes of all the others.
+ *
+ * The frame rate is one that the usual 60, 30 and 24 frames per second are no multiple of. Many animations hold a
+ * drawing for several frames, and at a rate that falls in step with the holds, frames repeat and the file is far
+ * smaller than at the rates around it (40% in one measured case), which would mislead every prediction.
+ */
+const FIRST_SIZES = [128, 256];
+const FIRST_FRAME_RATE = 7;
+/**
+ * A candidate is tried when its predicted file size is at most this share of the limit. The candidates lie close
+ * together, so one that is predicted to fit only just is not worth the risk: the next one is nearly as good.
+ */
+const PREDICTION_MARGIN = 0.99;
+/**
+ * After a candidate that fits, another is tried only when it is clearly better: it rates at least 1.03 times as
+ * high, or it is at least 1.05 times as large or as fast and no smaller or slower. The second case is for an
+ * animation whose own frame rate is low, where the rating no longer rises with the size.
+ */
+const CLEARLY_HIGHER_RATING = 1.03;
+const CLEARLY_LARGER = 1.05;
 
 export class ConversionError extends Error {}
 
@@ -98,6 +139,10 @@ class WorkerChannel {
 const encoder = new WorkerChannel('/apng-worker.js', 'the animation encoder');
 const videoDecoder = new WorkerChannel('/webm-worker.js', 'the video decoder');
 
+/** Chooses how the video decoder scales frames down (webm-decoder.c webm_set_filter). */
+export const setVideoScaling = (filter: number): Promise<null> =>
+  videoDecoder.request<null>({ kind: 'filter', filter } satisfies WebmCall);
+
 /** Asks the worker that encodes and reads animated PNG files (apng-worker.ts). */
 export const askPngWorker = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>
   encoder.request<T>(message, transfer);
@@ -109,11 +154,91 @@ export const frameDelay = (frameRate: number) => Math.round(1000 / frameRate);
 export const frameCount = (animation: Animation, frameRate: number) =>
   Math.max(1, Math.round(animation.duration * frameRate));
 
-/** The frame rates an animation may be encoded at: the listed ones up to its own rate, or its own when it is lower. */
+/** A size and frame rate an animation can be encoded at, with the number of frames it then has. */
+export type Candidate = { size: number; rate: number; frames: number };
+
+/** An encoding that was made: the size and number of frames, and how many bytes the file has. */
+export type Encoding = { size: number; frames: number; bytes: number };
+
+/**
+ * Which of two candidates is preferred: positive when it is `one`. The rating is the smaller of the size and
+ * `pixelsPerFrameRate` times the frame rate, so a candidate rates high only when both are high. Of equally rated
+ * ones, the higher frame rate is preferred, and then the larger size.
+ */
+function preference(one: Candidate, other: Candidate, pixelsPerFrameRate: number): number {
+  return (
+    rating(one, pixelsPerFrameRate) - rating(other, pixelsPerFrameRate) ||
+    one.rate - other.rate ||
+    one.size - other.size
+  );
+}
+
+const rating = (candidate: Candidate, pixelsPerFrameRate: number) =>
+  Math.min(candidate.size, pixelsPerFrameRate * candidate.rate);
+
+/** The most preferred of `candidates` (see `preference`), or undefined when there is none. */
+export function bestRated(candidates: Candidate[], pixelsPerFrameRate: number): Candidate | undefined {
+  let best: Candidate | undefined;
+  for (const candidate of candidates) {
+    if (!best || preference(candidate, best, pixelsPerFrameRate) > 0) best = candidate;
+  }
+  return best;
+}
+
+/**
+ * How a file's bytes per frame grow with the size of the frame, as a power of the size, when only one encoding is
+ * known. Flat colour keeps fewer bytes per pixel at a large size than fine detail does, so the power differs from
+ * one animation to the next: about 1.2 for vector animations and 1.6 for videos among those measured.
+ */
+const ASSUMED_SIZE_POWER = 1.5;
+
+/**
+ * The bytes to expect for `candidate`, from the encodings made so far (0 when there is none). A file grows in
+ * proportion to its number of frames, and with the size of the frame by a power that is measured from the two
+ * encodings nearest in size, once there are two of different sizes.
+ */
+export function predictedBytes(encodings: Encoding[], candidate: Candidate): number {
+  return predictedBytesPerFrame(encodings, candidate.size) * candidate.frames;
+}
+
+/** The bytes to expect for one frame of `size` pixels, from the encodings made so far (0 when there is none). */
+function predictedBytesPerFrame(encodings: Encoding[], size: number): number {
+  if (encodings.length === 0) return 0;
+  const distance = (encoding: Encoding) => Math.abs(Math.log(encoding.size / size));
+  const nearest = [...encodings].sort((a, b) => distance(a) - distance(b));
+  const anchor = nearest[0];
+  const other = nearest.find((encoding) => encoding.size !== anchor.size);
+  const perFrame = (encoding: Encoding) => encoding.bytes / encoding.frames;
+  const measured = other ? Math.log(perFrame(anchor) / perFrame(other)) / Math.log(anchor.size / other.size) : NaN;
+  const power = Number.isFinite(measured) ? Math.min(Math.max(measured, 0.5), 2.5) : ASSUMED_SIZE_POWER;
+  return perFrame(anchor) * (size / anchor.size) ** power;
+}
+
+/**
+ * The frame rate that goes with a delay of `delay` milliseconds between frames. A file holds the delay in whole
+ * milliseconds, so the delay is what can be chosen. A whole number of frames per second whose delay rounds to
+ * `delay` is that number, which is how earlier versions of the app encoded 30, 24, 15 and 12 frames per second;
+ * every other delay has its exact rate.
+ */
+function rateOfDelay(delay: number): number {
+  const whole = Math.round(1000 / delay);
+  return frameDelay(whole) === delay ? whole : 1000 / delay;
+}
+
+/**
+ * The frame rates an animation may be encoded at, the highest first: its own rate (30 at most), and below it one
+ * for every delay in whole milliseconds up to MAX_FRAME_DELAY_MS.
+ */
 export function allowedFrameRates(animation: Animation): number[] {
   const sourceRate = Math.min(animation.sourceFrameRate ?? MAX_FRAME_RATE, MAX_FRAME_RATE);
-  const lowerRates = FRAME_RATES.filter((rate) => rate <= sourceRate);
-  return lowerRates.length > 0 ? lowerRates : [sourceRate];
+  // One frame rate for each delay, so that the delays in a file say at which rate it was made.
+  const byDelay = new Map<number, number>();
+  for (let delay = frameDelay(sourceRate); delay <= MAX_FRAME_DELAY_MS; delay++) {
+    const rate = rateOfDelay(delay);
+    if (rate <= sourceRate) byDelay.set(delay, rate);
+  }
+  byDelay.set(frameDelay(sourceRate), sourceRate);
+  return [...byDelay.values()].sort((a, b) => b - a);
 }
 
 function encodeApng(frames: ArrayBuffer[], size: number, frameRate: number): Promise<Uint8Array> {
@@ -131,37 +256,77 @@ function encodeApng(frames: ArrayBuffer[], size: number, frameRate: number): Pro
 export const CONVERSION_TIME_LIMIT_MS = 120_000;
 
 /**
- * Encodes at the largest size and frame rate that fits. The file size is predicted as proportional to the number
- * of pixels over all frames; each attempt that comes out too large corrects the factor.
+ * Encodes at the most preferred size and frame rate that fits (see `preference`). It starts with two small
+ * encodings, which predict the file sizes of the others (predictedBytes), and then tries the most preferred
+ * candidate that is predicted to fit. Each encoding that is made improves the prediction. After one that fits, a
+ * more preferred candidate is tried as long as one is predicted to fit, up to MAX_ATTEMPTS encodings in all.
  */
-async function encodeToFit(animation: Animation, step: Step): Promise<ConvertedSticker> {
+async function encodeToFit(animation: Animation, pixelsPerFrameRate: number, step: Step): Promise<ConvertedSticker> {
   const rates = allowedFrameRates(animation);
-  const candidates = SIZES.flatMap((size) =>
-    rates.map((rate) => ({ size, rate, pixels: size * size * frameCount(animation, rate) })),
-  ).sort((a, b) => b.pixels - a.pixels);
-  const smallest = candidates[candidates.length - 1];
-  let bytesPerPixel = 0;
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const predicted = candidates.find((c) => c.pixels * bytesPerPixel <= MAX_STICKER_BYTES * PREDICTION_MARGIN);
-    // The prediction comes from larger sizes and can be wrong for the smallest one, so the smallest is tried
-    // before giving up: when nothing is predicted to fit, and on the last attempt.
-    const candidate = predicted && attempt < MAX_ATTEMPTS - 1 ? predicted : smallest;
-    const frames = await animation.render(candidate.size, candidate.rate);
-    step.now = `encoding ${frames.length} frames at ${candidate.size} px, ${candidate.rate} fps (attempt ${attempt + 1})`;
-    const png = await encodeApng(frames, candidate.size, candidate.rate);
-    if (png.length <= MAX_STICKER_BYTES) {
-      return {
-        image: png,
-        animation: { size: candidate.size, frameRate: candidate.rate, sourceFrameRate: animation.sourceFrameRate },
-        reencoded: false,
-      };
-    }
-    if (candidate === smallest) break;
-    bytesPerPixel = Math.max(bytesPerPixel, png.length / candidate.pixels);
-  }
-  throw new ConversionError(
-    `the animation does not fit in ${MAX_STICKER_BYTES / 1024} KiB even at small size and frame rate`,
+  const candidates: Candidate[] = SIZES.flatMap((size) =>
+    rates.map((rate) => ({ size, rate, frames: frameCount(animation, rate) })),
   );
+  const encodings: Encoding[] = [];
+  const tried = new Set<Candidate>();
+  type Fitting = { candidate: Candidate; png: Uint8Array };
+  /** Encodes `candidate`; gives the file when it fits the limit. */
+  const attempt = async (candidate: Candidate): Promise<Fitting | null> => {
+    const frames = await animation.render(candidate.size, candidate.rate);
+    step.now = `encoding ${frames.length} frames at ${candidate.size} px, ${candidate.rate} fps (attempt ${tried.size + 1})`;
+    const png = await encodeApng(frames, candidate.size, candidate.rate);
+    tried.add(candidate);
+    encodings.push({ size: candidate.size, frames: candidate.frames, bytes: png.length });
+    return png.length <= MAX_STICKER_BYTES ? { candidate, png } : null;
+  };
+  const preferred = (one: Fitting | null, other: Fitting | null) =>
+    one && (!other || preference(one.candidate, other.candidate, pixelsPerFrameRate) > 0) ? one : other;
+  let best: Fitting | null = null;
+  const firstRate = rates.reduce((nearest, rate) =>
+    Math.abs(rate - FIRST_FRAME_RATE) < Math.abs(nearest - FIRST_FRAME_RATE) ? rate : nearest,
+  );
+  for (const size of FIRST_SIZES) {
+    const first = candidates.find((candidate) => candidate.size === size && candidate.rate === firstRate)!;
+    best = preferred(await attempt(first), best);
+  }
+  while (tried.size < MAX_ATTEMPTS) {
+    const fitting = best?.candidate;
+    const clearlyBetter = (candidate: Candidate) =>
+      !fitting ||
+      rating(candidate, pixelsPerFrameRate) >= rating(fitting, pixelsPerFrameRate) * CLEARLY_HIGHER_RATING ||
+      (candidate.size >= fitting.size &&
+        candidate.rate >= fitting.rate &&
+        (candidate.size >= fitting.size * CLEARLY_LARGER || candidate.rate >= fitting.rate * CLEARLY_LARGER));
+    // There are many candidates, so what one frame is expected to cost is worked out once for each size.
+    const perFrame = new Map(SIZES.map((size) => [size, predictedBytesPerFrame(encodings, size)]));
+    const worthTrying = candidates.filter(
+      (candidate) =>
+        !tried.has(candidate) &&
+        clearlyBetter(candidate) &&
+        perFrame.get(candidate.size)! * candidate.frames <= MAX_STICKER_BYTES * PREDICTION_MARGIN,
+    );
+    const next = bestRated(worthTrying, pixelsPerFrameRate);
+    if (!next) break;
+    best = preferred(await attempt(next), best);
+  }
+  // The prediction can be wrong for the smallest candidate, so it is tried before giving up.
+  const smallest = candidates.reduce((least, candidate) =>
+    candidate.size * candidate.size * candidate.frames < least.size * least.size * least.frames ? candidate : least,
+  );
+  if (!best && !tried.has(smallest)) best = await attempt(smallest);
+  if (!best) {
+    throw new ConversionError(
+      `the animation does not fit in ${MAX_STICKER_BYTES / 1024} KiB even at small size and frame rate`,
+    );
+  }
+  return {
+    image: best.png,
+    animation: {
+      size: best.candidate.size,
+      frameRate: best.candidate.rate,
+      sourceFrameRate: animation.sourceFrameRate,
+    },
+    reencoded: false,
+  };
 }
 
 function newCanvas(size: number): { canvas: HTMLCanvasElement; context: CanvasRenderingContext2D } {
@@ -285,7 +450,7 @@ async function convert(file: Uint8Array, format: StickerFormat, step: Step): Pro
   }
   const animation = format === 'tgs' ? await lottieAnimation(file, step) : await webmAnimation(file, step);
   try {
-    return await encodeToFit(animation, step);
+    return await encodeToFit(animation, PIXELS_PER_FRAME_RATE[format], step);
   } finally {
     animation.close();
   }

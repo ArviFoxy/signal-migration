@@ -237,6 +237,93 @@ static void resize_area(const uint8_t *source, int row_pixels, int width, int he
   free(across);
 }
 
+/** How frames are scaled down: 0 by area averaging, 1 by a Lanczos filter, 2 by a Lanczos filter and then sharpened. */
+static int scale_filter = 0;
+
+EMSCRIPTEN_KEEPALIVE void webm_set_filter(int filter) { scale_filter = filter; }
+
+static double lanczos3(double x) {
+  if (x == 0) return 1;
+  if (x <= -3 || x >= 3) return 0;
+  const double pi_x = M_PI * x;
+  return 3 * sin(pi_x) * sin(pi_x / 3) / (pi_x * pi_x);
+}
+
+/**
+ * One direction of a Lanczos resize: `count` lines of `length` samples, `step` apart, become lines of
+ * `target_length` samples. Each target sample is a weighted sum of the source samples within three target samples'
+ * width, which keeps edges sharper than an average does.
+ */
+static void lanczos_lines(const float *source, int length, int step, int count, int line_step, float *target,
+                          int target_length, int target_step, int target_line_step) {
+  const double scale = (double)length / target_length;
+  // When shrinking, the filter widens by the scale, so that every source sample counts.
+  const double width = scale > 1 ? scale : 1;
+  for (int t = 0; t < target_length; t++) {
+    const double centre = (t + 0.5) * scale - 0.5;
+    int first = (int)ceil(centre - 3 * width), last = (int)floor(centre + 3 * width);
+    double total = 0;
+    for (int s = first; s <= last; s++) total += lanczos3((s - centre) / width);
+    for (int line = 0; line < count; line++) {
+      for (int c = 0; c < 4; c++) {
+        double sum = 0;
+        for (int s = first; s <= last; s++) {
+          const int at = s < 0 ? 0 : s >= length ? length - 1 : s;
+          sum += lanczos3((s - centre) / width) * source[(size_t)line * line_step + (size_t)at * step + c];
+        }
+        target[(size_t)line * target_line_step + (size_t)t * target_step + c] = (float)(sum / total);
+      }
+    }
+  }
+}
+
+/** Resizes premultiplied RGBA like resize_area, with a Lanczos filter, and sharpens the result when `sharpen`. */
+static int resize_lanczos(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
+                          int target_width, int target_height, int sharpen) {
+  float *full = malloc((size_t)width * height * 4 * sizeof(float));
+  float *across = malloc((size_t)target_width * height * 4 * sizeof(float));
+  float *fitted = malloc((size_t)target_width * target_height * 4 * sizeof(float));
+  if (!full || !across || !fitted) {
+    free(full);
+    free(across);
+    free(fitted);
+    return -1;
+  }
+  for (int y = 0; y < height; y++)
+    for (int x = 0; x < width * 4; x++) full[(size_t)y * width * 4 + x] = source[(size_t)y * row_pixels * 4 + x];
+  // Across: each row is a line. Then down: each column is a line.
+  lanczos_lines(full, width, 4, height, width * 4, across, target_width, 4, target_width * 4);
+  lanczos_lines(across, height, target_width * 4, target_width, 4, fitted, target_height, target_width * 4, 4);
+  for (int y = 0; y < target_height; y++) {
+    for (int x = 0; x < target_width; x++) {
+      for (int c = 0; c < 4; c++) {
+        const size_t at = ((size_t)y * target_width + x) * 4 + c;
+        double value = fitted[at];
+        if (sharpen) {
+          // The difference from the picture blurred over its eight neighbours is added back, which raises the
+          // contrast of edges and thin lines.
+          double blurred = 0;
+          static const int weights[3] = {1, 2, 1};
+          for (int dy = -1; dy <= 1; dy++) {
+            for (int dx = -1; dx <= 1; dx++) {
+              const int ny = y + dy < 0 ? 0 : y + dy >= target_height ? target_height - 1 : y + dy;
+              const int nx = x + dx < 0 ? 0 : x + dx >= target_width ? target_width - 1 : x + dx;
+              blurred += weights[dy + 1] * weights[dx + 1] * fitted[((size_t)ny * target_width + nx) * 4 + c];
+            }
+          }
+          value += 0.7 * (value - blurred / 16);
+        }
+        const long rounded = lround(value);
+        target[at] = (uint8_t)(rounded < 0 ? 0 : rounded > 255 ? 255 : rounded);
+      }
+    }
+  }
+  free(full);
+  free(across);
+  free(fitted);
+  return 0;
+}
+
 /** swscale's colour coefficients for the frame's colour space. */
 static const int *coefficients(enum AVColorSpace space) {
   switch (space) {
@@ -284,7 +371,13 @@ static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct Sw
     free(rgba);
     return fail("out of memory", AVERROR(ENOMEM));
   }
-  resize_area(rgba, converted, width, height, fitted, fit_width, fit_height);
+  if (scale_filter == 0 || (fit_width == width && fit_height == height)) {
+    resize_area(rgba, converted, width, height, fitted, fit_width, fit_height);
+  } else if (resize_lanczos(rgba, converted, width, height, fitted, fit_width, fit_height, scale_filter == 2) < 0) {
+    free(rgba);
+    free(fitted);
+    return fail("out of memory", AVERROR(ENOMEM));
+  }
   free(rgba);
   memset(square, 0, (size_t)size * size * 4);
   const int left = (size - fit_width) / 2, top = (size - fit_height) / 2;

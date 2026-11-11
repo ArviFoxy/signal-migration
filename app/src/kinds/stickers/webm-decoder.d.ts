@@ -8,6 +8,7 @@ declare module 'webm-decoder' {
     _webm_probe(data: number, size: number, info: number): number;
     /** Writes `count` square RGBA frames into `out`; the frames written, or an error < 0. */
     _webm_render(data: number, size: number, square: number, frameRate: number, count: number, out: number): number;
+    _webm_set_filter(filter: number): void;
     /** Why the last call failed, as a C string. */
     _webm_error(): number;
     HEAPU8: Uint8Array;
