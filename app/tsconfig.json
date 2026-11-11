@@ -11,5 +11,5 @@
     "skipLibCheck": true,
     "allowJs": true
   },
-  "include": ["fixtures", "integration", "src", "test"]
+  "include": ["fixtures", "integration", "measure", "src", "test"]
 }

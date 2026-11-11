@@ -139,10 +139,13 @@ async function encodeToFit(animation: Animation, step: Step): Promise<ConvertedS
   const candidates = SIZES.flatMap((size) =>
     rates.map((rate) => ({ size, rate, pixels: size * size * frameCount(animation, rate) })),
   ).sort((a, b) => b.pixels - a.pixels);
+  const smallest = candidates[candidates.length - 1];
   let bytesPerPixel = 0;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const candidate = candidates.find((c) => c.pixels * bytesPerPixel <= MAX_STICKER_BYTES * PREDICTION_MARGIN);
-    if (!candidate) break;
+    const predicted = candidates.find((c) => c.pixels * bytesPerPixel <= MAX_STICKER_BYTES * PREDICTION_MARGIN);
+    // The prediction comes from larger sizes and can be wrong for the smallest one, so the smallest is tried
+    // before giving up: when nothing is predicted to fit, and on the last attempt.
+    const candidate = predicted && attempt < MAX_ATTEMPTS - 1 ? predicted : smallest;
     const frames = await animation.render(candidate.size, candidate.rate);
     step.now = `encoding ${frames.length} frames at ${candidate.size} px, ${candidate.rate} fps (attempt ${attempt + 1})`;
     const png = await encodeApng(frames, candidate.size, candidate.rate);
@@ -153,6 +156,7 @@ async function encodeToFit(animation: Animation, step: Step): Promise<ConvertedS
         reencoded: false,
       };
     }
+    if (candidate === smallest) break;
     bytesPerPixel = Math.max(bytesPerPixel, png.length / candidate.pixels);
   }
   throw new ConversionError(
