@@ -124,4 +124,9 @@ cd app && npm test               # the app, against simulated Telegram, Signal a
 cd crates/server && cargo test   # the server
 cd crates/signal-wasm && cargo test --target x86_64-unknown-linux-gnu   # the WebAssembly module's Rust code, run natively
 cd app && npm run screens        # a screenshot of every screen, in build/screens
+cd app && npm run test:integration   # the built app in Chrome, served by the real server; after `npm run build`
 ```
+
+The integration tests (`app/integration/`) start the real server on the built app and drive a headless Chrome over
+its DevTools protocol. Each test checks one thing that only the real server, the built files and a real browser
+together show.
