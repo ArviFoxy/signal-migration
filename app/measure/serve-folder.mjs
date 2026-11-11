@@ -10,7 +10,7 @@ import path from 'node:path';
 const [port, address, certificate, key, folder] = process.argv.slice(2);
 if (!folder) throw new Error('usage: serve-folder.mjs <port> <address> <certificate> <key> <folder>');
 const root = path.resolve(folder);
-const TYPES = { '.html': 'text/html', '.png': 'image/png', '.json': 'application/json' };
+const TYPES = { '.html': 'text/html', '.js': 'text/javascript', '.png': 'image/png', '.json': 'application/json' };
 https
   .createServer({ cert: fs.readFileSync(certificate), key: fs.readFileSync(key) }, (request, response) => {
     const { pathname } = new URL(request.url, 'https://x');

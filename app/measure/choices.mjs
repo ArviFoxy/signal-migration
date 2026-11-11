@@ -139,6 +139,20 @@ server.close();
 fs.rmSync(root, { recursive: true, force: true });
 if (results.length < jobs.length) console.log(`stopped: ${jobs.length - results.length} stickers did not finish`);
 
+/** How long one pass of an animated PNG file takes, in milliseconds: its number of frames times its first delay. */
+function passMs(file) {
+  const data = fs.readFileSync(file);
+  let frames = 1;
+  for (let at = 8; at + 12 <= data.length; at += 12 + data.readUInt32BE(at)) {
+    const kind = data.toString('latin1', at + 4, at + 8);
+    if (kind === 'acTL') frames = data.readUInt32BE(at + 8);
+    // A frame's delay is a fraction of a second, kept after its sequence number, size and place.
+    if (kind === 'fcTL')
+      return Math.round((frames * 1000 * data.readUInt16BE(at + 28)) / (data.readUInt16BE(at + 30) || 100));
+  }
+  return 1000;
+}
+
 const escape = (text) => text.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
 const bytes = (count) =>
   count >= 1024 * 1024 ? `${(count / 1024 / 1024).toFixed(1)} MiB` : `${Math.round(count / 1024)} KiB`;
@@ -185,7 +199,7 @@ const sections = jobs.map((job) => {
       return blindTile(job.id, letter);
     });
     const tiles = [...blind, tile(job.id, 'full', result.full, 'no limit')];
-    return `<h2>${escape(job.title)} #${number} · ${kind} · ${result.duration.toFixed(1)} s</h2><div class="row">${tiles.join('')}</div>`;
+    return `<h2>${escape(job.title)} #${number} · ${kind} · ${result.duration.toFixed(1)} s</h2><div class="row" data-period="${passMs(fileName(job.id, 'full'))}">${tiles.join('')}</div>`;
   }
   const tiles = [
     ...result.variants.map((variant) => tile(job.id, variant.name ?? `${variant.size}`, variant)),
@@ -196,7 +210,7 @@ const sections = jobs.map((job) => {
         : [tile(job.id, 'today', result.today, 'today')]),
     tile(job.id, 'full', result.full, 'no limit'),
   ];
-  return `<h2>${escape(job.title)} #${number} · ${kind} · ${result.duration.toFixed(1)} s</h2><div class="row">${tiles.join('')}</div>`;
+  return `<h2>${escape(job.title)} #${number} · ${kind} · ${result.duration.toFixed(1)} s</h2><div class="row" data-period="${passMs(fileName(job.id, 'full'))}">${tiles.join('')}</div>`;
 });
 fs.writeFileSync(
   path.join(out, 'index.html'),
@@ -228,45 +242,12 @@ figure[aria-pressed="true"] figcaption { color: var(--text); font-weight: 600; }
 <body>
 <div id="chosen"></div>
 ${sections.join('\n')}
-<script>
-// What is chosen, as { sticker: choice }, kept by the server that serves this page.
-let selections = {};
-const tiles = [...document.querySelectorAll('figure[data-sticker]')];
-const stickers = new Set(tiles.map((tile) => tile.dataset.sticker));
-function show() {
-  for (const tile of tiles) {
-    tile.setAttribute('aria-pressed', String(selections[tile.dataset.sticker] === tile.dataset.choice));
-  }
-  const count = Object.keys(selections).length;
-  document.getElementById('chosen').textContent = count + ' of ' + stickers.size + ' chosen';
-}
-async function choose(tile) {
-  const { sticker, choice } = tile.dataset;
-  if (selections[sticker] === choice) delete selections[sticker];
-  else selections[sticker] = choice;
-  show();
-  const response = await fetch('selections', { method: 'POST', body: JSON.stringify(selections) });
-  if (!response.ok) document.getElementById('chosen').textContent = 'Not saved: the server answered ' + response.status;
-}
-for (const tile of tiles) {
-  tile.addEventListener('click', () => choose(tile));
-  tile.addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' && event.key !== ' ') return;
-    event.preventDefault();
-    choose(tile);
-  });
-}
-fetch('selections.json')
-  .then((response) => (response.ok ? response.json() : {}))
-  .then((kept) => {
-    selections = kept;
-    show();
-  });
-</script>
+<script src="tiles.js"></script>
 </body>
 </html>
 `,
 );
+fs.copyFileSync(path.join(import.meta.dirname, 'tiles.js'), path.join(out, 'tiles.js'));
 if (filters) {
   fs.writeFileSync(keyFile, JSON.stringify(key, null, 1));
   // Choices made on an earlier page were made under other letters.
