@@ -11,22 +11,13 @@
 
 import { build } from 'esbuild';
 import { spawn } from 'node:child_process';
-import { randomInt } from 'node:crypto';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 
-const [originals, out, ...rest] = process.argv.slice(2);
-// With --filters <key file>, each sticker is shown as the app converts it with each way of scaling video frames
-// down. The page does not say which tile is which: the tiles of a sticker are in a random order under the letters
-// A, B and C, and the key file, which belongs outside <out>, says which filter each letter stands for.
-const keyFile = rest.includes('--filters') ? rest[rest.indexOf('--filters') + 1] : null;
-const filters = keyFile !== null;
-const ids = rest.filter((argument) => argument !== '--filters' && argument !== keyFile);
-if (ids.length === 0 || (filters && !keyFile)) {
-  throw new Error('usage: choices.mjs <originals> <out> [--filters <key file>] <pack ID>/<number> ...');
-}
+const [originals, out, ...ids] = process.argv.slice(2);
+if (ids.length === 0) throw new Error('usage: choices.mjs <originals> <out> <pack ID>/<number> ...');
 /** A run stops when the browsers have sent nothing for this long. */
 const SILENCE_LIMIT_MS = 300_000;
 const PROCESSES = 12;
@@ -120,7 +111,7 @@ for (let i = 0; i < Math.min(PROCESSES, jobs.length); i++) {
   const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'choices-chrome-'));
   const child = spawn(
     process.env.CHROME ?? 'google-chrome-stable',
-    ['--headless=new', `--user-data-dir=${profile}`, '--no-first-run', filters ? `${base}?mode=filters` : base],
+    ['--headless=new', `--user-data-dir=${profile}`, '--no-first-run', base],
     { stdio: 'ignore' },
   );
   browsers.push({ child, profile });
@@ -162,52 +153,20 @@ const tile = (id, name, encoded, note = '') =>
   `<figure${note === 'today' ? ' class="today"' : ''}` +
   (note === 'no limit'
     ? ''
-    : ` role="button" tabindex="0" aria-pressed="false" data-sticker="${id}" data-choice="${escape(encoded.label ?? `${encoded.size} px, ${rate(encoded.rate)}`)}"`) +
+    : ` role="button" tabindex="0" aria-pressed="false" data-sticker="${id}" data-choice="${encoded.size} px, ${rate(encoded.rate)}"`) +
   `><img loading="lazy" src="${escape(path.basename(fileName(id, name)))}" alt="">` +
-  `<figcaption>${encoded.label ? `${escape(encoded.label)} · ` : ''}${encoded.size} px · ${rate(encoded.rate)} · ${bytes(encoded.bytes)}${note ? ` · ${note}` : ''}</figcaption></figure>`;
-/** A tile that says only its letter. */
-const blindTile = (id, letter) =>
-  `<figure role="button" tabindex="0" aria-pressed="false" data-sticker="${id}" data-choice="${letter}">` +
-  `<img loading="lazy" src="${escape(path.basename(fileName(id, letter.toLowerCase())))}" alt="">` +
-  `<figcaption>${letter}</figcaption></figure>`;
-const key = {};
+  `<figcaption>${encoded.size} px · ${rate(encoded.rate)} · ${bytes(encoded.bytes)}${note ? ` · ${note}` : ''}</figcaption></figure>`;
 const sections = jobs.map((job) => {
   const result = results.find((candidate) => candidate.id === job.id);
   const number = job.id.split('/')[1];
   const kind = job.format === 'tgs' ? 'vector' : 'video';
   if (!result || result.error)
     return `<h2>${escape(job.title)} #${number}</h2><p>${escape(result?.error ?? 'not finished')}</p>`;
-  if (filters) {
-    const files = result.variants.map((variant) => fs.readFileSync(fileName(job.id, variant.name)));
-    for (const variant of result.variants) fs.rmSync(fileName(job.id, variant.name));
-    // A sticker that fits at full size is not scaled, so its three files are the same and there is nothing to choose.
-    if (files.every((file) => file.equals(files[0]))) {
-      fs.rmSync(fileName(job.id, 'full'));
-      return '';
-    }
-    const order = result.variants.map((_, i) => i);
-    for (let i = order.length - 1; i > 0; i--) {
-      const j = randomInt(i + 1);
-      [order[i], order[j]] = [order[j], order[i]];
-    }
-    key[job.id] = {};
-    const blind = order.map((variantNumber, position) => {
-      const letter = 'ABC'[position];
-      const { label, size, rate: frameRate, bytes: fileBytes } = result.variants[variantNumber];
-      fs.writeFileSync(fileName(job.id, letter.toLowerCase()), files[variantNumber]);
-      key[job.id][letter] = { filter: label, size, frameRate, bytes: fileBytes };
-      return blindTile(job.id, letter);
-    });
-    const tiles = [...blind, tile(job.id, 'full', result.full, 'no limit')];
-    return `<h2>${escape(job.title)} #${number} · ${kind} · ${result.duration.toFixed(1)} s</h2><div class="row" data-period="${passMs(fileName(job.id, 'full'))}">${tiles.join('')}</div>`;
-  }
   const tiles = [
-    ...result.variants.map((variant) => tile(job.id, variant.name ?? `${variant.size}`, variant)),
-    ...(result.today === null
-      ? []
-      : result.today.error
-        ? [`<figure class="today"><figcaption>today: does not fit</figcaption></figure>`]
-        : [tile(job.id, 'today', result.today, 'today')]),
+    ...result.variants.map((variant) => tile(job.id, `${variant.size}`, variant)),
+    result.today.error
+      ? `<figure class="today"><figcaption>today: does not fit</figcaption></figure>`
+      : tile(job.id, 'today', result.today, 'today'),
     tile(job.id, 'full', result.full, 'no limit'),
   ];
   return `<h2>${escape(job.title)} #${number} · ${kind} · ${result.duration.toFixed(1)} s</h2><div class="row" data-period="${passMs(fileName(job.id, 'full'))}">${tiles.join('')}</div>`;
@@ -248,9 +207,4 @@ ${sections.join('\n')}
 `,
 );
 fs.copyFileSync(path.join(import.meta.dirname, 'tiles.js'), path.join(out, 'tiles.js'));
-if (filters) {
-  fs.writeFileSync(keyFile, JSON.stringify(key, null, 1));
-  // Choices made on an earlier page were made under other letters.
-  fs.rmSync(path.join(out, 'selections.json'), { force: true });
-}
 console.log(`${results.length} stickers, page at ${path.join(out, 'index.html')}`);

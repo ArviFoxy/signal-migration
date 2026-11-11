@@ -142,10 +142,6 @@ class WorkerChannel {
 const encoder = new WorkerChannel('/apng-worker.js', 'the animation encoder');
 const videoDecoder = new WorkerChannel('/webm-worker.js', 'the video decoder');
 
-/** Chooses how the video decoder scales frames down (webm-decoder.c webm_set_filter). */
-export const setVideoScaling = (filter: number): Promise<null> =>
-  videoDecoder.request<null>({ kind: 'filter', filter } satisfies WebmCall);
-
 /** Asks the worker that encodes and reads animated PNG files (apng-worker.ts). */
 export const askPngWorker = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>
   encoder.request<T>(message, transfer);

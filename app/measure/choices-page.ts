@@ -2,23 +2,11 @@
 // highest frame rate at which the file still fits Signal's limit, and sends the files to the server that served
 // it. The result shows what the choice between size and frame rate looks like.
 
-import {
-  type Animation,
-  askPngWorker,
-  convertSticker,
-  frameDelay,
-  openAnimation,
-  setVideoScaling,
-} from '../src/kinds/stickers/convert';
+import { type Animation, askPngWorker, convertSticker, frameDelay, openAnimation } from '../src/kinds/stickers/convert';
 import { MAX_STICKER_BYTES } from '../src/kinds/stickers/upload';
 
 type Job = { id: string; format: 'tgs' | 'webm'; original: string };
-type Encoded = { size: number; rate: number; frames: number; bytes: number; name?: string; label?: string };
-
-/** With ?mode=filters the page converts each video sticker once for each way of scaling its frames down. */
-const mode = new URLSearchParams(location.search).get('mode');
-const FILTERS = ['area averaging', 'Lanczos', 'Lanczos, sharpened'];
-
+type Encoded = { size: number; rate: number; frames: number; bytes: number };
 const SIZES = [512, 384, 256, 192, 128];
 /** Frame rates from the highest the app uses down to ones it does not use today. */
 const RATES = [30, 24, 20, 15, 12, 10, 8, 6, 5, 4];
@@ -89,31 +77,6 @@ async function choicesFor(job: Job): Promise<object> {
   }
 }
 
-/** The sticker as the app converts it with each scaling filter, and at full size without a limit. */
-async function filtersFor(job: Job): Promise<object> {
-  const original = new Uint8Array(await (await fetch(job.original)).arrayBuffer());
-  const variants: Encoded[] = [];
-  for (const [filter, label] of FILTERS.entries()) {
-    await setVideoScaling(filter);
-    const converted = await convertSticker(original, job.format);
-    const { size, frameRate } = converted.animation!;
-    const name = `filter${filter}`;
-    await send(`/file/${job.id}/${name}`, converted.image);
-    variants.push({ size, rate: frameRate, frames: 0, bytes: converted.image.length, name, label });
-  }
-  await setVideoScaling(0);
-  const animation = await openAnimation(original, job.format);
-  try {
-    const rate = Math.min(animation.sourceFrameRate ?? 30, 30);
-    const file = await encode(animation, 512, rate);
-    await send(`/file/${job.id}/full`, file);
-    const full = { size: 512, rate, frames: 0, bytes: file.length };
-    return { duration: animation.duration, sourceRate: animation.sourceFrameRate, full, variants, today: null };
-  } finally {
-    animation.close();
-  }
-}
-
 async function run(): Promise<void> {
   for (;;) {
     const response = await fetch('/job');
@@ -121,7 +84,7 @@ async function run(): Promise<void> {
     const job = (await response.json()) as Job;
     let result: object;
     try {
-      result = await (mode === 'filters' ? filtersFor(job) : choicesFor(job));
+      result = await choicesFor(job);
     } catch (error) {
       result = { error: error instanceof Error ? error.message : String(error) };
     }

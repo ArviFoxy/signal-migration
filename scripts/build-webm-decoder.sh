@@ -72,7 +72,7 @@ emcc -O3 "$repo/app/src/kinds/stickers/webm-decoder.c" \
   "$prefix/lib/libvpx.a" \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createWebmDecoder -sENVIRONMENT=web,worker,node \
   -sALLOW_MEMORY_GROWTH=1 -sFILESYSTEM=0 \
-  -sEXPORTED_FUNCTIONS=_malloc,_free,_webm_probe,_webm_render,_webm_error,_webm_set_filter \
+  -sEXPORTED_FUNCTIONS=_malloc,_free,_webm_probe,_webm_render,_webm_error \
   -sEXPORTED_RUNTIME_METHODS=HEAPU8,HEAPF64,UTF8ToString \
   -o "$out/webm-decoder.js"
 ls -l "$out/webm-decoder.js" "$out/webm-decoder.wasm"

@@ -5,8 +5,10 @@
 //
 // webm_probe reads a file's size, duration and frame rate. webm_render decodes it from the start and writes `count`
 // square frames, one per 1 / frame_rate seconds, each the video frame showing at that moment, scaled to fit the
-// square and centred on transparency. The scaling averages each output pixel's area on premultiplied colours, so
-// that the colour of transparent pixels does not darken the edges of what is visible.
+// square and centred on transparency. The scaling is a Lanczos filter followed by sharpening (resize_sharp), on
+// colours multiplied by their opacity, so that the colour of transparent pixels does not darken the edges of what
+// is visible. The comparison of a copy with its original (compare-pictures.ts) draws the original the same way, so
+// a change to the scaling makes the copies that earlier versions made fail it.
 
 #include <emscripten/emscripten.h>
 #include <libavcodec/avcodec.h>
@@ -197,50 +199,8 @@ EMSCRIPTEN_KEEPALIVE int webm_probe(const uint8_t *data, int size, double *info)
   return code;
 }
 
-/**
- * Resizes premultiplied RGBA `source` (width x height, in rows of `row_pixels` pixels) to `target` (target_width x
- * target_height): each target pixel is the average of the source area it covers, each source pixel weighted by how
- * much of it lies inside.
- */
-static void resize_area(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
-                        int target_width, int target_height) {
-  // First across, into rows of target_width, then down.
-  float *across = calloc((size_t)target_width * height * 4, sizeof(float));
-  const double x_scale = (double)width / target_width, y_scale = (double)height / target_height;
-  for (int x = 0; x < target_width; x++) {
-    double start = x * x_scale, end = (x + 1) * x_scale;
-    for (int sx = (int)start; sx < width && sx < end; sx++) {
-      double weight = (fmin(end, sx + 1) - fmax(start, sx)) / x_scale;
-      if (weight <= 0) continue;
-      for (int y = 0; y < height; y++)
-        for (int c = 0; c < 4; c++)
-          across[((size_t)y * target_width + x) * 4 + c] +=
-              (float)(weight * source[((size_t)y * row_pixels + sx) * 4 + c]);
-    }
-  }
-  for (int y = 0; y < target_height; y++) {
-    double start = y * y_scale, end = (y + 1) * y_scale;
-    float sum[4];
-    for (int x = 0; x < target_width; x++) {
-      memset(sum, 0, sizeof sum);
-      for (int sy = (int)start; sy < height && sy < end; sy++) {
-        double weight = (fmin(end, sy + 1) - fmax(start, sy)) / y_scale;
-        if (weight <= 0) continue;
-        for (int c = 0; c < 4; c++) sum[c] += (float)(weight * across[((size_t)sy * target_width + x) * 4 + c]);
-      }
-      for (int c = 0; c < 4; c++) {
-        long value = lroundf(sum[c]);
-        target[((size_t)y * target_width + x) * 4 + c] = (uint8_t)(value < 0 ? 0 : value > 255 ? 255 : value);
-      }
-    }
-  }
-  free(across);
-}
-
-/** How frames are scaled down: 0 by area averaging, 1 by a Lanczos filter, 2 by a Lanczos filter and then sharpened. */
-static int scale_filter = 0;
-
-EMSCRIPTEN_KEEPALIVE void webm_set_filter(int filter) { scale_filter = filter; }
+/** How much of the difference between a scaled picture and its blur is added back to it. */
+#define SHARPENING 0.7
 
 static double lanczos3(double x) {
   if (x == 0) return 1;
@@ -250,77 +210,110 @@ static double lanczos3(double x) {
 }
 
 /**
- * One direction of a Lanczos resize: `count` lines of `length` samples, `step` apart, become lines of
- * `target_length` samples. Each target sample is a weighted sum of the source samples within three target samples'
- * width, which keeps edges sharper than an average does.
+ * One direction of a Lanczos resize from `length` samples to `target_length`: target sample t is the sum of
+ * `count` source samples from number first[t] on, each times its weight. The weights of a target sample add up to
+ * one. A sample number outside the source stands for the nearest one inside.
  */
-static void lanczos_lines(const float *source, int length, int step, int count, int line_step, float *target,
-                          int target_length, int target_step, int target_line_step) {
+typedef struct {
+  int count;
+  int *first;
+  float *weights;
+} Taps;
+
+static void taps_free(Taps *taps) {
+  free(taps->first);
+  free(taps->weights);
+}
+
+static int taps_make(Taps *taps, int length, int target_length) {
   const double scale = (double)length / target_length;
   // When shrinking, the filter widens by the scale, so that every source sample counts.
   const double width = scale > 1 ? scale : 1;
-  for (int t = 0; t < target_length; t++) {
-    const double centre = (t + 0.5) * scale - 0.5;
-    int first = (int)ceil(centre - 3 * width), last = (int)floor(centre + 3 * width);
-    double total = 0;
-    for (int s = first; s <= last; s++) total += lanczos3((s - centre) / width);
-    for (int line = 0; line < count; line++) {
-      for (int c = 0; c < 4; c++) {
-        double sum = 0;
-        for (int s = first; s <= last; s++) {
-          const int at = s < 0 ? 0 : s >= length ? length - 1 : s;
-          sum += lanczos3((s - centre) / width) * source[(size_t)line * line_step + (size_t)at * step + c];
-        }
-        target[(size_t)line * target_line_step + (size_t)t * target_step + c] = (float)(sum / total);
-      }
-    }
-  }
-}
-
-/** Resizes premultiplied RGBA like resize_area, with a Lanczos filter, and sharpens the result when `sharpen`. */
-static int resize_lanczos(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
-                          int target_width, int target_height, int sharpen) {
-  float *full = malloc((size_t)width * height * 4 * sizeof(float));
-  float *across = malloc((size_t)target_width * height * 4 * sizeof(float));
-  float *fitted = malloc((size_t)target_width * target_height * 4 * sizeof(float));
-  if (!full || !across || !fitted) {
-    free(full);
-    free(across);
-    free(fitted);
+  taps->count = (int)ceil(6 * width) + 1;
+  taps->first = malloc((size_t)target_length * sizeof(int));
+  taps->weights = malloc((size_t)target_length * taps->count * sizeof(float));
+  if (!taps->first || !taps->weights) {
+    taps_free(taps);
     return -1;
   }
-  for (int y = 0; y < height; y++)
-    for (int x = 0; x < width * 4; x++) full[(size_t)y * width * 4 + x] = source[(size_t)y * row_pixels * 4 + x];
-  // Across: each row is a line. Then down: each column is a line.
-  lanczos_lines(full, width, 4, height, width * 4, across, target_width, 4, target_width * 4);
-  lanczos_lines(across, height, target_width * 4, target_width, 4, fitted, target_height, target_width * 4, 4);
+  for (int t = 0; t < target_length; t++) {
+    const double centre = (t + 0.5) * scale - 0.5;
+    const int first = (int)ceil(centre - 3 * width);
+    double total = 0;
+    for (int k = 0; k < taps->count; k++) total += lanczos3((first + k - centre) / width);
+    for (int k = 0; k < taps->count; k++)
+      taps->weights[(size_t)t * taps->count + k] = (float)(lanczos3((first + k - centre) / width) / total);
+    taps->first[t] = first;
+  }
+  return 0;
+}
+
+/**
+ * Resizes premultiplied RGBA `source` (width x height, in rows of `row_pixels` pixels) to `target` (target_width x
+ * target_height) with a Lanczos filter, and then sharpens it: the difference between each pixel and the average of
+ * it and its eight neighbours (weighted 1 2 1 across and down) is added back, SHARPENING times. Both keep lines
+ * and edges crisper than averaging the covered area does, at the price of a faint halo beside a hard edge. In a
+ * blind comparison on real drawn video stickers this looked best every time. Returns 0, or -1 without memory.
+ */
+static int resize_sharp(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
+                        int target_width, int target_height) {
+  Taps across = {0}, down = {0};
+  float *rows = malloc((size_t)target_width * height * 4 * sizeof(float));
+  float *fitted = malloc((size_t)target_width * target_height * 4 * sizeof(float));
+  if (!rows || !fitted || taps_make(&across, width, target_width) < 0 || taps_make(&down, height, target_height) < 0) {
+    free(rows);
+    free(fitted);
+    taps_free(&across);
+    taps_free(&down);
+    return -1;
+  }
+  for (int y = 0; y < height; y++) {
+    const uint8_t *line = source + (size_t)y * row_pixels * 4;
+    for (int t = 0; t < target_width; t++) {
+      const float *weights = across.weights + (size_t)t * across.count;
+      float sum[4] = {0, 0, 0, 0};
+      for (int k = 0; k < across.count; k++) {
+        const int s = across.first[t] + k;
+        const uint8_t *pixel = line + (size_t)(s < 0 ? 0 : s >= width ? width - 1 : s) * 4;
+        for (int c = 0; c < 4; c++) sum[c] += weights[k] * pixel[c];
+      }
+      memcpy(rows + ((size_t)y * target_width + t) * 4, sum, sizeof sum);
+    }
+  }
+  for (int t = 0; t < target_height; t++) {
+    const float *weights = down.weights + (size_t)t * down.count;
+    for (int x = 0; x < target_width; x++) {
+      float sum[4] = {0, 0, 0, 0};
+      for (int k = 0; k < down.count; k++) {
+        const int s = down.first[t] + k;
+        const float *pixel = rows + ((size_t)(s < 0 ? 0 : s >= height ? height - 1 : s) * target_width + x) * 4;
+        for (int c = 0; c < 4; c++) sum[c] += weights[k] * pixel[c];
+      }
+      memcpy(fitted + ((size_t)t * target_width + x) * 4, sum, sizeof sum);
+    }
+  }
+  static const int blur[3] = {1, 2, 1};
   for (int y = 0; y < target_height; y++) {
     for (int x = 0; x < target_width; x++) {
       for (int c = 0; c < 4; c++) {
-        const size_t at = ((size_t)y * target_width + x) * 4 + c;
-        double value = fitted[at];
-        if (sharpen) {
-          // The difference from the picture blurred over its eight neighbours is added back, which raises the
-          // contrast of edges and thin lines.
-          double blurred = 0;
-          static const int weights[3] = {1, 2, 1};
-          for (int dy = -1; dy <= 1; dy++) {
-            for (int dx = -1; dx <= 1; dx++) {
-              const int ny = y + dy < 0 ? 0 : y + dy >= target_height ? target_height - 1 : y + dy;
-              const int nx = x + dx < 0 ? 0 : x + dx >= target_width ? target_width - 1 : x + dx;
-              blurred += weights[dy + 1] * weights[dx + 1] * fitted[((size_t)ny * target_width + nx) * 4 + c];
-            }
+        double blurred = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+          for (int dx = -1; dx <= 1; dx++) {
+            const int ny = y + dy < 0 ? 0 : y + dy >= target_height ? target_height - 1 : y + dy;
+            const int nx = x + dx < 0 ? 0 : x + dx >= target_width ? target_width - 1 : x + dx;
+            blurred += blur[dy + 1] * blur[dx + 1] * fitted[((size_t)ny * target_width + nx) * 4 + c];
           }
-          value += 0.7 * (value - blurred / 16);
         }
-        const long rounded = lround(value);
-        target[at] = (uint8_t)(rounded < 0 ? 0 : rounded > 255 ? 255 : rounded);
+        const double value = fitted[((size_t)y * target_width + x) * 4 + c];
+        const long rounded = lround(value + SHARPENING * (value - blurred / 16));
+        target[((size_t)y * target_width + x) * 4 + c] = (uint8_t)(rounded < 0 ? 0 : rounded > 255 ? 255 : rounded);
       }
     }
   }
-  free(full);
-  free(across);
+  free(rows);
   free(fitted);
+  taps_free(&across);
+  taps_free(&down);
   return 0;
 }
 
@@ -371,9 +364,11 @@ static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct Sw
     free(rgba);
     return fail("out of memory", AVERROR(ENOMEM));
   }
-  if (scale_filter == 0 || (fit_width == width && fit_height == height)) {
-    resize_area(rgba, converted, width, height, fitted, fit_width, fit_height);
-  } else if (resize_lanczos(rgba, converted, width, height, fitted, fit_width, fit_height, scale_filter == 2) < 0) {
+  if (fit_width == width && fit_height == height) {
+    // At the video's own size nothing is scaled.
+    for (int y = 0; y < height; y++)
+      memcpy(fitted + (size_t)y * width * 4, rgba + (size_t)y * converted * 4, (size_t)width * 4);
+  } else if (resize_sharp(rgba, converted, width, height, fitted, fit_width, fit_height) < 0) {
     free(rgba);
     free(fitted);
     return fail("out of memory", AVERROR(ENOMEM));
