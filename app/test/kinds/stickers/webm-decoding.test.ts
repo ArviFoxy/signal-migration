@@ -84,3 +84,37 @@ it('scales to fit the square, centred, without darkening the edges', () => {
 it('says why a file cannot be decoded', () => {
   expect(() => probeWebm(decoder, new Uint8Array([1, 2, 3, 4]))).toThrow(/^the file is not a WebM video: /);
 });
+
+/** `video` with the duration its file states (the Duration element of the WebM header) replaced by `milliseconds`. */
+function withStatedDuration(video: Uint8Array, milliseconds: number): Uint8Array {
+  const at = video.findIndex((byte, i) => byte === 0x44 && video[i + 1] === 0x89 && video[i + 2] === 0x88);
+  if (at < 0) throw new Error('the file states no duration');
+  const changed = video.slice();
+  new DataView(changed.buffer).setFloat64(at + 3, milliseconds);
+  return changed;
+}
+
+// Detects: an animated sticker converted to a single still picture because its file states one frame's time as its
+// duration, as some of Telegram's video stickers do.
+it('goes by the frames when the stated duration ends before the last frame starts', () => {
+  expect(probeWebm(decoder, withStatedDuration(file, 33)).duration).toBeCloseTo(1, 9);
+});
+
+// Detects: the pause at the end of an animation cut off. A stated duration that reaches past the last frame says
+// how long that frame is held.
+it('keeps a stated duration that reaches past the last frame', () => {
+  expect(probeWebm(decoder, withStatedDuration(file, 3000)).duration).toBe(3);
+});
+
+// Detects: the last column of a video of odd width left unwritten by the colour conversion. It showed as a line of
+// transparent or random pixels at the edge, and the same file decoded differently from one run to the next. The
+// fixtures are 63 x 48 pixels of opaque red, without and with a transparency channel, made with ffmpeg.
+it.each(['odd-width.webm', 'odd-width-transparency.webm'])(
+  'draws every column of a video of odd width (%s)',
+  (name) => {
+    const video = new Uint8Array(fs.readFileSync(new URL(`../../fixtures/stickers/${name}`, import.meta.url)));
+    const [frame] = renderWebm(decoder, video, 63, 10, 1);
+    // The 63 x 48 video sits in the 63 x 63 square from y = 7.
+    for (const x of [0, 31, 61, 62]) expect(isRed(pixel(frame, 63, x, 7 + 24)), `column ${x}`).toBe(true);
+  },
+);

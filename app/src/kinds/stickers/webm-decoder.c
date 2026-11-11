@@ -183,8 +183,11 @@ EMSCRIPTEN_KEEPALIVE int webm_probe(const uint8_t *data, int size, double *info)
       double rate = av_q2d(stream->avg_frame_rate);
       if (!(rate > 0) && frames > 1 && last > first) rate = (frames - 1) / (last - first);
       double duration = video.format->duration > 0 ? (double)video.format->duration / AV_TIME_BASE : 0;
-      // Without a duration in the file, the last frame shows for one frame's time.
-      if (!(duration > 0)) duration = rate > 0 ? frames / rate : 0;
+      // A stated duration that ends before the last frame starts is wrong: some of Telegram's files state one
+      // frame's time for a video of several seconds. Then, and without a duration in the file, the last frame
+      // shows for as long as the frames before it did on average.
+      const double shown = frames > 1 && last > first ? last - first : 0;
+      if (!(duration > shown)) duration = shown > 0 ? shown * frames / (frames - 1) : rate > 0 ? frames / rate : 0;
       info[2] = duration;
       info[3] = rate > 0 ? rate : 0;
       code = frames;
@@ -195,11 +198,12 @@ EMSCRIPTEN_KEEPALIVE int webm_probe(const uint8_t *data, int size, double *info)
 }
 
 /**
- * Resizes premultiplied RGBA `source` (width x height) to `target` (target_width x target_height): each target
- * pixel is the average of the source area it covers, each source pixel weighted by how much of it lies inside.
+ * Resizes premultiplied RGBA `source` (width x height, in rows of `row_pixels` pixels) to `target` (target_width x
+ * target_height): each target pixel is the average of the source area it covers, each source pixel weighted by how
+ * much of it lies inside.
  */
-static void resize_area(const uint8_t *source, int width, int height, uint8_t *target, int target_width,
-                        int target_height) {
+static void resize_area(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
+                        int target_width, int target_height) {
   // First across, into rows of target_width, then down.
   float *across = calloc((size_t)target_width * height * 4, sizeof(float));
   const double x_scale = (double)width / target_width, y_scale = (double)height / target_height;
@@ -210,7 +214,8 @@ static void resize_area(const uint8_t *source, int width, int height, uint8_t *t
       if (weight <= 0) continue;
       for (int y = 0; y < height; y++)
         for (int c = 0; c < 4; c++)
-          across[((size_t)y * target_width + x) * 4 + c] += (float)(weight * source[((size_t)y * width + sx) * 4 + c]);
+          across[((size_t)y * target_width + x) * 4 + c] +=
+              (float)(weight * source[((size_t)y * row_pixels + sx) * 4 + c]);
     }
   }
   for (int y = 0; y < target_height; y++) {
@@ -248,20 +253,25 @@ static const int *coefficients(enum AVColorSpace space) {
 /** Draws the decoded frame into `square` (size x size RGBA): scaled to fit, centred, transparent around it. */
 static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct SwsContext **converter) {
   const int width = frame->width, height = frame->height;
+  // swscale's direct conversion writes pixels two at a time and leaves the last column of an odd width unwritten.
+  // Such a frame is converted one column wider, which the rows of a decoded frame have room for, and the extra
+  // column is not used. Each row of `rgba` is `converted` pixels long.
+  const int converted = frame->linesize[0] > width ? width + (width & 1) : width;
   // At the same size, swscale converts directly, each colour sample covering its 2 x 2 pixels. Interpolating the
   // colour samples instead would blend the colour of transparent pixels into the edges of what is visible.
-  *converter = sws_getCachedContext(*converter, width, height, frame->format, width, height, AV_PIX_FMT_RGBA,
-                                    SWS_POINT, NULL, NULL, NULL);
+  *converter = sws_getCachedContext(*converter, converted, height, frame->format, converted, height,
+                                    AV_PIX_FMT_RGBA, SWS_POINT, NULL, NULL, NULL);
   if (!*converter) return fail("the video's pixel format cannot be converted", 0);
   sws_setColorspaceDetails(*converter, coefficients(frame->colorspace), frame->color_range == AVCOL_RANGE_JPEG,
                            sws_getCoefficients(SWS_CS_DEFAULT), 1, 0, 1 << 16, 1 << 16);
-  uint8_t *rgba = malloc((size_t)width * height * 4);
+  // Zeroed, so that a pixel swscale does not write is transparent and the same on every run.
+  uint8_t *rgba = calloc((size_t)converted * height, 4);
   if (!rgba) return fail("out of memory", AVERROR(ENOMEM));
   uint8_t *planes[4] = {rgba, NULL, NULL, NULL};
-  int strides[4] = {width * 4, 0, 0, 0};
+  int strides[4] = {converted * 4, 0, 0, 0};
   sws_scale(*converter, (const uint8_t *const *)frame->data, frame->linesize, 0, height, planes, strides);
   // A frame without a transparency channel converts to opaque pixels.
-  for (size_t i = 0; i < (size_t)width * height; i++) {
+  for (size_t i = 0; i < (size_t)converted * height; i++) {
     uint8_t *pixel = rgba + i * 4;
     for (int c = 0; c < 3; c++) pixel[c] = (uint8_t)((pixel[c] * pixel[3] + 127) / 255);
   }
@@ -274,7 +284,7 @@ static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct Sw
     free(rgba);
     return fail("out of memory", AVERROR(ENOMEM));
   }
-  resize_area(rgba, width, height, fitted, fit_width, fit_height);
+  resize_area(rgba, converted, width, height, fitted, fit_width, fit_height);
   free(rgba);
   memset(square, 0, (size_t)size * size * 4);
   const int left = (size - fit_width) / 2, top = (size - fit_height) / 2;
