@@ -201,10 +201,12 @@ export class PackIndex {
   /**
    * The pack ID of a listed copy that the page compared with the Telegram pack and found faithful, or null when
    * none of the copies it compared is. A copy is compared once: asked again, the page goes by what it found.
+   * `onProgress` hears how many stickers of the copy at hand were compared, from none on.
    */
   async findFaithful(
     pack: { lookupKey: Uint8Array; packKey: Uint8Array; original: OriginalPack },
     pictures: PictureComparison,
+    onProgress: (done: number, total: number) => void = () => undefined,
   ): Promise<Uint8Array | null> {
     await loadSignalWasm();
     for await (const copy of this.#copiesToCompare(pack.lookupKey, pack.packKey)) {
@@ -212,7 +214,8 @@ export class PackIndex {
       let faithful = this.#compared.get(key);
       if (faithful === undefined) {
         const files = { manifest: async () => copy.manifest, sticker: this.#stickers };
-        faithful = await isFaithfulCopy(copy.packId, pack.packKey, pack.original, files, pictures);
+        onProgress(0, pack.original.stickers.length);
+        faithful = await isFaithfulCopy(copy.packId, pack.packKey, pack.original, files, pictures, onProgress);
         this.#compared.set(key, faithful);
       }
       if (faithful) return copy.packId;

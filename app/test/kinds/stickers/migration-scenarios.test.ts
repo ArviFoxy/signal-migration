@@ -215,6 +215,31 @@ describe('choosing among the copies that others uploaded', () => {
     );
   });
 
+  // Detects: the row of a pack showing a finished download, or no progress at all, while a copy is compared, which
+  // is the longest step of installing someone else's copy.
+  it('shows the comparison of a copy as a step of its own, with its progress', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    await world.migrateElsewhere(a);
+    const alice = world.user([a]);
+    const steps: string[] = [];
+    await alice.visit({
+      onChange: (migration) => {
+        const { state, progress } = migration.entries[0];
+        const step = progress ? `${state} ${progress.done}/${progress.total}` : state;
+        if (steps.at(-1) !== step) steps.push(step);
+      },
+    });
+    const total = a.stickers.length;
+    const downloaded = steps.indexOf(`downloading ${total}/${total}`);
+    const begun = steps.indexOf(`comparing 0/${total}`);
+    const compared = steps.indexOf(`comparing ${total}/${total}`);
+    expect(downloaded).toBeGreaterThan(-1);
+    expect(begun).toBeGreaterThan(downloaded);
+    expect(compared).toBeGreaterThan(begun);
+    expect(steps.indexOf('installing')).toBeGreaterThan(compared);
+  });
+
   // Detects: bad copies added after a good one costing anything: each user would compare them, ask Signal's CDN
   // for them, or upload the pack again.
   it('installs the oldest copy and reads nothing of the copies listed after it', async () => {

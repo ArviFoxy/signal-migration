@@ -35,6 +35,8 @@ export type PackState =
   | 'available'
   | 'to-upload'
   | 'downloading'
+  /** Comparing a copy on Signal that someone else uploaded with the pack's stickers. */
+  | 'comparing'
   | 'converting'
   | 'uploading'
   | 'installing'
@@ -511,6 +513,8 @@ export class StickerMigration extends EventTarget {
    */
   async #faithfulCopy(entry: PackEntry): Promise<Uint8Array | null> {
     const { index, pictures } = this.#services;
+    Object.assign(entry, { state: 'checking', progress: null });
+    this.#changed();
     await index.refresh();
     const stickers = entry.pack.stickers;
     const original = {
@@ -521,7 +525,15 @@ export class StickerMigration extends EventTarget {
         format: stickers[i].format,
       })),
     };
-    return index.findFaithful({ lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original }, pictures);
+    const pack = { lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original };
+    try {
+      return await index.findFaithful(pack, pictures, (done, total) => {
+        Object.assign(entry, { state: 'comparing', progress: { done, total } });
+        this.#changed();
+      });
+    } finally {
+      entry.progress = null;
+    }
   }
 
   /**
@@ -530,8 +542,6 @@ export class StickerMigration extends EventTarget {
    * that someone uploaded meanwhile.
    */
   async #chooseCopy(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
-    entry.state = 'checking';
-    this.#changed();
     // The pack key comes from the stickers themselves, and a copy is compared with them, so they are downloaded
     // before the index is asked.
     await this.#download(telegram, entry);
@@ -540,8 +550,6 @@ export class StickerMigration extends EventTarget {
       this.#plannedInstalls.delete(entry);
       this.#plannedUploads.add(entry);
       await this.#prepare(telegram, entry);
-      entry.state = 'checking';
-      this.#changed();
       entry.packId = await this.#faithfulCopy(entry);
     }
     if (!entry.packId) {
