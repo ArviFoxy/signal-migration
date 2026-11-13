@@ -17,7 +17,7 @@ import type { PackEntry } from '../migration';
 import { MAX_STICKERS } from '../upload';
 import { isOnSignal, MigrationView, packDescription } from './view';
 
-type Filter = 'all' | 'signal' | 'upload';
+type Filter = 'all' | 'mine' | 'others' | 'upload';
 
 /** Object URLs of each pack's preview images, made once per pack. */
 const previewUrls = new WeakMap<PackEntry, string[]>();
@@ -37,9 +37,11 @@ function packStatus(entry: PackEntry) {
   const [colour, text] =
     entry.state === 'checking'
       ? ['bg-line-strong', 'Checking…']
-      : isOnSignal(entry.state)
-        ? ['bg-accent', 'On Signal']
-        : ['bg-upload', 'Upload needed'];
+      : entry.state === 'in-signal'
+        ? ['bg-accent', 'In your Signal']
+        : entry.state === 'available'
+          ? ['bg-accent/50', 'Uploaded by someone else']
+          : ['bg-upload', 'Upload needed'];
   return html`<span class="flex items-center gap-1.5 text-xs text-muted">
     <span class="size-2 flex-none rounded-full ${colour}"></span>${text}
   </span>`;
@@ -55,7 +57,8 @@ export class StickerPacksStep extends MigrationView {
   private visible(): PackEntry[] {
     const query = this.search.trim().toLowerCase();
     return (this.migration?.entries ?? []).filter((entry) => {
-      if (this.filter === 'signal' && !isOnSignal(entry.state)) return false;
+      if (this.filter === 'mine' && entry.state !== 'in-signal') return false;
+      if (this.filter === 'others' && entry.state !== 'available') return false;
       if (this.filter === 'upload' && (isOnSignal(entry.state) || entry.state === 'checking')) return false;
       return query === '' || entry.pack.title.toLowerCase().includes(query);
     });
@@ -67,10 +70,14 @@ export class StickerPacksStep extends MigrationView {
 
   private card(entry: PackEntry) {
     const tooLarge = entry.pack.stickers.length > MAX_STICKERS;
+    // A pack that is in the user's Signal has nothing left to choose: its box is ticked and cannot be changed.
+    const mine = entry.state === 'in-signal';
     const urls = previews(entry);
     return html`<li>
       <label
-        class="flex h-full cursor-pointer flex-col gap-2 rounded-xl p-2.5 ring-1 ring-card-line ring-inset hover:ring-line-strong has-checked:bg-accent-soft/60 has-checked:ring-accent/40"
+        class="flex h-full flex-col gap-2 rounded-xl p-2.5 ring-1 ring-card-line ring-inset ${
+          mine ? '' : 'cursor-pointer hover:ring-line-strong has-checked:bg-accent-soft/60 has-checked:ring-accent/40'
+        }"
       >
         <span class="flex items-start justify-between gap-2">
           <span class="grid w-16 flex-none grid-cols-2 gap-0.5">
@@ -85,9 +92,9 @@ export class StickerPacksStep extends MigrationView {
             <input
               type="checkbox"
               class="size-4 accent-accent"
-              aria-label=${`Add ${entry.pack.title} to your Signal`}
-              .checked=${entry.selected}
-              ?disabled=${tooLarge}
+              aria-label=${mine ? `${entry.pack.title} is in your Signal` : `Add ${entry.pack.title} to your Signal`}
+              .checked=${entry.selected || mine}
+              ?disabled=${tooLarge || mine}
               @change=${(event: Event) => this.select([entry], (event.target as HTMLInputElement).checked)}
             />
           </span>
@@ -116,19 +123,25 @@ export class StickerPacksStep extends MigrationView {
     const readProgress = this.migration?.readProgress ?? null;
     const reading = entries.length === 0;
     const checking = entries.filter((entry) => entry.state === 'checking').length;
-    const onSignal = entries.filter((entry) => isOnSignal(entry.state)).length;
+    const mine = entries.filter((entry) => entry.state === 'in-signal').length;
+    const byOthers = entries.filter((entry) => entry.state === 'available').length;
     const selected = entries.filter((entry) => entry.selected).length;
+    const toAdd = entries.filter((entry) => entry.selected && entry.state !== 'in-signal').length;
     const toUpload = entries.filter(
       (entry) => entry.selected && entry.state !== 'checking' && !isOnSignal(entry.state),
     ).length;
     const tabs: { id: Filter; label: string }[] = [
       { id: 'all', label: `All · ${entries.length}` },
-      { id: 'signal', label: `On Signal · ${onSignal}` },
-      { id: 'upload', label: `Upload needed · ${entries.length - onSignal - checking}` },
+      { id: 'mine', label: `In your Signal · ${mine}` },
+      { id: 'others', label: `Uploaded by others · ${byOthers}` },
+      { id: 'upload', label: `Upload needed · ${entries.length - mine - byOthers - checking}` },
     ];
     const visible = this.visible();
-    const allVisibleSelected =
-      visible.length > 0 && visible.every((entry) => entry.selected || entry.pack.stickers.length > MAX_STICKERS);
+    // "Select all" is about the packs that can still be chosen: not those in the user's Signal, nor those too large.
+    const choosable = visible.filter(
+      (entry) => entry.state !== 'in-signal' && entry.pack.stickers.length <= MAX_STICKERS,
+    );
+    const allVisibleSelected = visible.length > 0 && choosable.every((entry) => entry.selected);
     if (reading) {
       return html`${stepHeader(4, 'Sticker packs', 'Reading your packs from Telegram…')}
       ${
@@ -188,7 +201,8 @@ export class StickerPacksStep extends MigrationView {
                 type="checkbox"
                 class="size-4 accent-accent"
                 .checked=${allVisibleSelected}
-                @change=${(event: Event) => this.select(visible, (event.target as HTMLInputElement).checked)}
+                ?disabled=${choosable.length === 0}
+                @change=${(event: Event) => this.select(choosable, (event.target as HTMLInputElement).checked)}
               />Select all${this.filter !== 'all' || this.search ? ' shown' : ''}
             </label>
           </div>
@@ -210,7 +224,7 @@ export class StickerPacksStep extends MigrationView {
     }
     ${stickyFooter(
       html`<span class="text-sm text-muted">
-          <strong class="font-semibold text-ink">${selected}</strong> of ${entries.length} packs to
+          <strong class="font-semibold text-ink">${toAdd}</strong> of ${entries.length - mine} packs to
           add${
             toUpload > 0
               ? html`, <strong class="font-semibold text-ink">${toUpload}</strong> of them to upload`

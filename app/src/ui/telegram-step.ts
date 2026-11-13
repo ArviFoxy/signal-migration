@@ -178,6 +178,7 @@ export class TelegramStep extends LightElement {
             ${state.kind === 'off' && state.signedOut ? 'Signed out of Telegram.' : 'Not connected.'}
           </p>`;
     }
+    if (this.endedByTelegram) return nothing;
     if (
       state.kind === 'signing-out' ||
       state.kind === 'ending-by-itself' ||
@@ -270,14 +271,22 @@ export class TelegramStep extends LightElement {
     }
   }
 
+  /** Telegram ended a login of this visit, and the page is removing it. */
+  private get endedByTelegram(): boolean {
+    const state = this.login.state;
+    return (state.kind === 'ending-by-itself' || state.kind === 'deleting') && state.byTelegram;
+  }
+
   render() {
     const login = this.login;
     const ready = login.state.kind === 'signed-in';
     const description = ready
       ? 'Telegram is connected.'
-      : login.method === 'qr'
-        ? 'Scan the code with the Telegram app on your phone.'
-        : 'Sign in with your phone number.';
+      : this.endedByTelegram
+        ? 'Telegram ended this login. Removing it from your browser…'
+        : login.method === 'qr'
+          ? 'Scan the code with the Telegram app on your phone.'
+          : 'Sign in with your phone number.';
     return html`${stepHeader(2, 'Connect Telegram', description)} ${this.body()}
     ${stickyFooter(
       html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>

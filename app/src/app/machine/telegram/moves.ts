@@ -14,6 +14,7 @@ export const deleting = (state: WithInstance, signedOut = false, error: string |
   method: state.method,
   instance: state.instance,
   signedOut,
+  byTelegram: state.kind === 'ending-by-itself' && state.byTelegram,
   error,
 });
 
@@ -68,7 +69,14 @@ export function afterReport(state: Running, auth: Td.AuthorizationState): Telegr
   if (auth._ === 'authorizationStateReady')
     return { kind: 'saving', method: state.method, instance: state.instance, attempt: state.attempt };
   if (auth._ === 'authorizationStateLoggingOut')
-    return { kind: 'ending-by-itself', method: state.method, instance: state.instance, attempt: state.attempt };
+    return {
+      kind: 'ending-by-itself',
+      method: state.method,
+      instance: state.instance,
+      attempt: state.attempt,
+      // The first report of a kept instance is its own unfinished sign-out. Any later one is Telegram's doing.
+      byTelegram: state.kind !== 'starting',
+    };
   if (CLOSED_STATES.has(auth._)) return stopped(state, 'the Telegram connection was closed');
   return state;
 }
