@@ -189,7 +189,7 @@ export class StickerPacksStep extends MigrationView {
                 class="size-4 accent-accent"
                 .checked=${allVisibleSelected}
                 @change=${(event: Event) => this.select(visible, (event.target as HTMLInputElement).checked)}
-              />Add all${this.filter !== 'all' || this.search ? ' shown' : ''}
+              />Select all${this.filter !== 'all' || this.search ? ' shown' : ''}
             </label>
           </div>
         </div>

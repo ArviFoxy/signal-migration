@@ -35,20 +35,6 @@ export function packDescription(entry: PackEntry): string {
 /** Whether the pack is already on Signal (in the user's account, or uploaded by someone). */
 export const isOnSignal = (state: PackState) => state === 'in-signal' || state === 'available';
 
-const CHIP = 'self-start rounded-full px-2.5 py-1 text-xs font-semibold';
-export const chips = {
-  onSignal: html`<span class="${CHIP} bg-accent-chip text-accent-chip-text">On Signal · no upload</span>`,
-  upload: html`<span class="${CHIP} bg-upload-chip text-upload-text">Not on Signal · upload</span>`,
-  failed: html`<span class="${CHIP} bg-[#FBE4E1] text-danger">Failed</span>`,
-  checking: html`<span class="${CHIP} bg-segment text-muted">Checking</span>`,
-};
-
-export function stateChip(state: PackState): TemplateResult {
-  if (state === 'checking') return chips.checking;
-  if (state === 'failed') return chips.failed;
-  return isOnSignal(state) ? chips.onSignal : chips.upload;
-}
-
 /** What converting a pack changed, such as "12 animated stickers · 60 → 30 fps · 384 px". */
 export function conversionDescription(conversion: ConversionSummary | null): string | null {
   if (!conversion || (conversion.animated === 0 && conversion.reencoded === 0)) return null;
