@@ -13,7 +13,8 @@ import {
   SyncMessage_FetchLatest_Type,
   SyncMessage_StickerPackOperation_Type,
 } from '../gen/SignalService_pb';
-import { OwnDeviceSessions } from '../wasm/signal_migration_wasm';
+import { randomBytes } from '../core/random';
+import { OwnDeviceSessions, randomInt } from '../wasm/signal_migration_wasm';
 import type { ChatChannel } from './transport';
 
 const fromBase64 = (text: string) => Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
@@ -37,8 +38,7 @@ export function padMessageBody(body: Uint8Array): Uint8Array {
 }
 
 /** Random padding inside a sync message, as Signal's clients add, so that its size says little about its content. */
-const syncPadding = () =>
-  crypto.getRandomValues(new Uint8Array(1 + (crypto.getRandomValues(new Uint8Array(1))[0] % 64)));
+const syncPadding = () => randomBytes(randomInt(1, 64));
 
 /** A sync message that installs sticker packs on the account's other devices. */
 export function installStickerPacksMessage(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Uint8Array {

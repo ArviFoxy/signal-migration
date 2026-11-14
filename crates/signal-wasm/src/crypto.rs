@@ -15,8 +15,8 @@ use std::str::FromStr;
 use base64::Engine;
 use hkdf::Hkdf;
 use libsignal_account_keys::{AccountEntropyPool, SvrKey};
-use rand::TryRngCore;
 use rand::rngs::OsRng;
+use rand::{Rng, TryRngCore};
 use sha2::Sha256;
 use signal_crypto::{
     Aes256GcmDecryption, Aes256GcmEncryption, CryptographicMac, aes_256_cbc_decrypt, aes_256_cbc_encrypt,
@@ -38,6 +38,21 @@ fn random_bytes<const N: usize>() -> [u8; N] {
         .try_fill_bytes(&mut bytes)
         .expect("the browser provides randomness");
     bytes
+}
+
+/// A whole number from `min` to `max`, each equally likely, drawn with the `rand` library from the browser's
+/// generator. `rand` draws again where a remainder would make some numbers more likely than others.
+fn uniform(min: u32, max: u32) -> u32 {
+    OsRng.unwrap_err().random_range(min..=max)
+}
+
+/// A random whole number from `min` to `max`, each equally likely.
+#[wasm_bindgen(js_name = randomInt)]
+pub fn random_int(min: u32, max: u32) -> Result<u32, JsError> {
+    if min > max {
+        return Err(JsError::new("the smallest number is above the largest"));
+    }
+    Ok(uniform(min, max))
 }
 
 fn key32(bytes: &[u8]) -> Result<[u8; 32], JsError> {
@@ -136,4 +151,19 @@ pub fn decrypt_sticker_file(data: &[u8], pack_key: &[u8]) -> Result<Vec<u8>, JsE
     }
     let (iv, ciphertext) = authenticated.split_at(16);
     aes_256_cbc_decrypt(ciphertext, &aes_key, iv).map_err(js_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Detects: a number outside the range, or a range whose last number never comes up because its end was left
+    // out. Missing an end of a range of four numbers by chance in 2000 draws has a likelihood below 10^-240.
+    #[test]
+    fn a_random_number_stays_in_its_range_and_reaches_both_ends() {
+        let drawn: Vec<u32> = (0..2000).map(|_| uniform(7, 10)).collect();
+        assert!(drawn.iter().all(|number| (7..=10).contains(number)));
+        assert!(drawn.contains(&7) && drawn.contains(&10));
+        assert_eq!(uniform(5, 5), 5);
+    }
 }
