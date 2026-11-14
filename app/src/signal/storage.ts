@@ -25,6 +25,7 @@ import {
   storageRecordKey,
 } from '../wasm/signal_migration_wasm';
 import { httpsRequest } from './http-client';
+import { randomBytes } from '../core/random';
 import { basicAuthorization } from './session';
 import type { ChatChannel, HttpsRequest } from './transport';
 import { loadSignalWasm } from './wasm';
@@ -136,7 +137,7 @@ export class StorageClient {
     const identifiers = snapshot.manifest.identifiers.filter((id) => !removed.has(base64(id.raw)));
     const insertItem = [];
     for (const write of writes) {
-      const recordId = crypto.getRandomValues(new Uint8Array(16));
+      const recordId = randomBytes(16);
       const record = create(StorageRecordSchema, {
         record: {
           case: 'installedStickerPack',

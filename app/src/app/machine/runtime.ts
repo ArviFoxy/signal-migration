@@ -12,12 +12,10 @@ import type { AppServices } from '../services';
 import { runWork, type Resources } from './activities';
 import { type AppState, appTransition, appWork, recordOf } from './app';
 import type { Context } from './core';
+import { randomHex } from '../../core/random';
 import type { AppEvent } from './events';
 import { recordText } from './record';
 import type { Work } from './work';
-
-const randomHex = (byteCount: number) =>
-  Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 

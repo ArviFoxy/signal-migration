@@ -10,6 +10,7 @@
 import { create, toBinary } from '@bufbuild/protobuf';
 import { StickerPackSchema, StickerPack_StickerSchema } from '../../gen/Stickers_pb';
 import { httpsRequest } from '../../signal/http-client';
+import { randomHex } from '../../core/random';
 import { type ChatChannel, chatHeader, type HttpsRequest } from '../../signal/transport';
 import { loadSignalWasm } from '../../signal/wasm';
 import { encryptStickerFile } from '../../wasm/signal_migration_wasm';
@@ -75,7 +76,7 @@ export function multipartBody(item: UploadFormItem, file: Uint8Array, boundary: 
 }
 
 async function postToCdn(https: HttpsRequest, item: UploadFormItem, file: Uint8Array): Promise<void> {
-  const boundary = `----------------${Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('')}`;
+  const boundary = `----------------${randomHex(16)}`;
   const response = await https(
     CDN_HOST,
     'POST',

@@ -12,9 +12,11 @@ import {
   generateKyberLastResortPreKey,
   generateSignedPreKey,
   ProvisioningReceiver,
+  randomInt,
   storageServiceKeyFromAccountEntropyPool,
   storageServiceKeyFromMasterKey,
 } from '../wasm/signal_migration_wasm';
+import { randomHex } from '../core/random';
 import { basicAuthorization, type DeviceCredentials } from './session';
 import { connectChat } from './socket';
 import { DEFAULT_DEVICE_NAME } from './device-name';
@@ -52,9 +54,6 @@ export function storageServiceKeyOf(provision: Pick<ProvisionMessage, 'accountEn
 }
 
 const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
-const randomHex = (byteCount: number) =>
-  Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), (b) => b.toString(16).padStart(2, '0')).join('');
-const randomInt = (min: number, max: number) => min + (crypto.getRandomValues(new Uint32Array(1))[0] % (max - min + 1));
 
 /** Reports progress events that contain no secrets (request paths, close codes). */
 export type LinkEvents = (event: string) => void;
