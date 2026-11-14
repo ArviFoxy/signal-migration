@@ -9,13 +9,24 @@ import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
 import type { SignalState, UnlinkReason } from '../app/machine/signal';
 import type { TelegramState } from '../app/machine/telegram';
-import { STEPS, type Workflow } from '../app/workflow';
+import type { Step, Workflow } from '../app/workflow';
+import '../kinds/friends/ui/friends-step';
 import '../kinds/stickers/ui/migrate-step';
 import '../kinds/stickers/ui/packs-step';
 import '../kinds/stickers/ui/review-step';
 import type { Connection, ConnectionState } from './connections-panel';
 import './connections-panel';
-import { icons, LightElement, primaryButton, secondaryButton, STEP_LABELS, stepHeader, stickyFooter } from './layout';
+import {
+  icons,
+  LightElement,
+  primaryButton,
+  secondaryButton,
+  stepHeader,
+  stepLabels,
+  stepPosition,
+  stepsFor,
+  stickyFooter,
+} from './layout';
 import './signal-step';
 import './telegram-step';
 
@@ -146,7 +157,14 @@ export class MigrationApp extends LightElement {
 
   /** The entry of the step list that is current: the last one ("Done and logged out") once the migration finished. */
   private currentEntry(): number {
-    return this.workflow.state.kind === 'done' ? STEP_LABELS.length - 1 : STEPS.indexOf(this.workflow.step);
+    const steps = stepsFor(this.workflow.chosen);
+    return this.workflow.state.kind === 'done' ? steps.length : steps.indexOf(this.workflow.step);
+  }
+
+  /** The step before (-1) or after (1) `step` among the steps for what the user chose. */
+  private beside(step: Step, direction: -1 | 1): Step {
+    const steps = stepsFor(this.workflow.chosen);
+    return steps[steps.indexOf(step) + direction] ?? step;
   }
 
   private nav() {
@@ -160,7 +178,7 @@ export class MigrationApp extends LightElement {
         Telegram to Signal Migration 🔒🦊
       </div>
       <ol class="flex flex-col gap-4">
-        ${STEP_LABELS.map((label, i) => {
+        ${stepLabels(this.workflow.chosen).map((label, i) => {
           const active = i === current;
           const done = i < current || (finished && active);
           const circle = done
@@ -185,7 +203,8 @@ export class MigrationApp extends LightElement {
   /** The bar that replaces the sidebar on narrow screens. */
   private topBar() {
     const current = this.currentEntry();
-    const label = `Step ${current + 1} of ${STEP_LABELS.length} · ${STEP_LABELS[current]}`;
+    const labels = stepLabels(this.workflow.chosen);
+    const label = `Step ${current + 1} of ${labels.length} · ${labels[current]}`;
     return html`<header
       class="flex items-center justify-between gap-3 border-b border-line bg-panel px-4 py-3 lg:hidden"
     >
@@ -206,24 +225,37 @@ export class MigrationApp extends LightElement {
 
   private startStep() {
     const w = this.workflow;
-    return html`${stepHeader(1, 'What to move', 'Copies what you choose from Telegram into your Signal account.')}
+    const chosen = w.chosen;
+    const changeable = w.state.kind === 'setup';
+    const choice = (what: 'stickers' | 'friends', title: string) => {
+      const frame = chosen[what] ? 'bg-accent-soft ring-2 ring-accent' : 'bg-white ring-1 ring-line-strong';
+      return html`<label class="flex cursor-pointer items-center gap-4 rounded-xl px-5 py-[18px] ring-inset ${frame}">
+        <input
+          type="checkbox"
+          class="size-5 flex-none cursor-pointer accent-accent"
+          .checked=${chosen[what]}
+          ?disabled=${!changeable}
+          @change=${(event: Event) => w.choose(what, (event.target as HTMLInputElement).checked)}
+        />
+        <span class="text-base font-semibold">${title}</span>
+      </label>`;
+    };
+    return html`${stepHeader(
+        stepPosition('start', chosen),
+        'What to move',
+        'Copies what you choose from Telegram into your Signal account.',
+      )}
       <fieldset class="flex min-w-0 flex-col gap-3">
         <legend class="mb-3 text-sm font-semibold">From Telegram</legend>
-        <label class="flex items-center gap-4 rounded-xl bg-accent-soft px-5 py-[18px] ring-2 ring-accent ring-inset">
-          <input type="checkbox" class="size-5 flex-none accent-accent" checked disabled />
-          <span class="flex flex-col gap-0.5">
-            <span class="text-base font-semibold">Sticker packs</span>
-            <span class="text-sm text-muted">Installed packs, in your Telegram order</span>
-          </span>
-        </label>
+        ${choice('stickers', 'Sticker packs')} ${choice('friends', 'Find your Telegram friends on Signal')}
       </fieldset>
       ${stickyFooter(
         html`<span></span>
           <button
             type="button"
             class=${primaryButton}
-            ?disabled=${w.state.kind !== 'setup'}
-            @click=${() => w.goTo('packs')}
+            ?disabled=${!changeable || !(chosen.stickers || chosen.friends)}
+            @click=${() => w.goTo(this.beside('signal', 1))}
           >
             Start
           </button>`,
@@ -293,6 +325,7 @@ export class MigrationApp extends LightElement {
       case 'end-failed':
         return this.endFailed(state.telegramError, state.signalError);
     }
+    const position = stepPosition(w.state.kind === 'done' ? 'done' : w.step, w.chosen);
     switch (w.step) {
       case 'start':
         return this.startStep();
@@ -300,39 +333,61 @@ export class MigrationApp extends LightElement {
         return html`<telegram-step
           class="contents"
           .login=${w.telegram}
+          .position=${position}
           @back=${() => w.goTo('start')}
-          @next=${() => w.goTo('packs')}
+          @next=${() => w.goTo(this.beside('signal', 1))}
         ></telegram-step>`;
+      case 'signal':
+        return html`<signal-step
+          class="contents"
+          .link=${w.signal}
+          .position=${position}
+          @back=${() => w.goTo('telegram')}
+          @next=${() => w.goTo(this.beside('signal', 1))}
+        ></signal-step>`;
       case 'packs':
         return html`<sticker-packs-step
           class="contents"
           .migration=${w.stickers}
+          .position=${position}
           .canTryAgain=${w.canTryAgain}
           @try-again=${() => w.tryAgain()}
           @select=${(event: CustomEvent<{ entries: never[]; selected: boolean }>) =>
             w.setSelected(event.detail.entries, event.detail.selected)}
           @back=${() => w.goTo('signal')}
-          @next=${() => w.goTo('review')}
+          @next=${() => w.goTo(this.beside('packs', 1))}
         ></sticker-packs-step>`;
-      case 'signal':
-        return html`<signal-step
+      case 'friends':
+        return html`<friends-step
           class="contents"
-          .link=${w.signal}
-          @back=${() => w.goTo('telegram')}
-          @next=${() => w.goTo('packs')}
-        ></signal-step>`;
+          .friends=${w.friends}
+          .unticked=${w.untickedFriends}
+          .position=${position}
+          @tick=${(event: CustomEvent<{ userIds: number[]; ticked: boolean }>) =>
+            w.tickFriends(event.detail.userIds, event.detail.ticked)}
+          @try-again=${() => w.tryAgain()}
+          @back=${() => w.goTo(this.beside('friends', -1))}
+          @next=${() => w.goTo('review')}
+        ></friends-step>`;
       case 'review':
         return html`<sticker-review-step
           class="contents"
           .migration=${w.stickers}
-          .ready=${w.packsReady}
-          @back=${() => w.goTo('packs')}
+          .position=${position}
+          .stickers=${w.chosen.stickers}
+          .friends=${w.chosen.friends ? w.friendsToAdd : null}
+          .ready=${w.ready}
+          @back=${() => w.goTo(this.beside('review', -1))}
           @start=${() => w.startMigration()}
         ></sticker-review-step>`;
       case 'migrate':
         return html`<sticker-migrate-step
           class="contents"
           .migration=${w.stickers}
+          .position=${position}
+          .stickers=${w.chosen.stickers}
+          .friends=${w.chosen.friends ? { toAdd: w.friendsToAdd, added: w.friendsAdded } : null}
+          .failed=${w.runFailed}
           .finished=${w.state.kind === 'done'}
           .ending=${w.state.kind === 'ending'}
           @retry=${() => w.tryAgain()}

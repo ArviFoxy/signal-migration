@@ -95,9 +95,9 @@ describe('the people of a Telegram account', () => {
     ]);
     const { chats } = await source.readPeople(() => undefined);
     expect(chats).toEqual([
-      { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [3, 6] },
+      { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [3, 6], memberCount: 2 },
       { kind: 'person', userId: 2 },
-      { kind: 'group', chatId: 102, title: 'Hiking crew', memberIds: [2, 6] },
+      { kind: 'group', chatId: 102, title: 'Hiking crew', memberIds: [2, 6], memberCount: 2 },
       { kind: 'person', userId: 3 },
     ]);
   });
@@ -122,7 +122,7 @@ describe('the people of a Telegram account', () => {
       { basicGroup: 'Flat 12', members: [SELF, 4, 5, 6] },
     ]);
     const { chats, people } = await source.readPeople(() => undefined);
-    expect(chats).toEqual([{ kind: 'group', chatId: 103, title: 'Flat 12', memberIds: [6] }]);
+    expect(chats).toEqual([{ kind: 'group', chatId: 103, title: 'Flat 12', memberIds: [6], memberCount: 1 }]);
     expect([...people.keys()]).toEqual([6]);
   });
 
@@ -143,7 +143,9 @@ describe('the people of a Telegram account', () => {
     const users = Object.fromEntries(members.map((id) => [id, { name: ['Member', String(id)] } as FakeUser]));
     const { source, requests } = account({ ...USERS, ...users }, [{ supergroup: 'Big', members }]);
     const { chats } = await source.readPeople(() => undefined);
-    expect(chats).toEqual([{ kind: 'group', chatId: 100, title: 'Big', memberIds: members }]);
+    expect(chats).toEqual([
+      { kind: 'group', chatId: 100, title: 'Big', memberIds: members, memberCount: members.length },
+    ]);
     expect(requests.filter((request) => request === 'getSupergroupMembers')).toHaveLength(3);
   });
 });

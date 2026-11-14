@@ -17,7 +17,15 @@ export const nameOf = (person: Person) => [person.givenName, person.familyName].
 
 /** One row of the chat list: a one-to-one chat, or a group with the people in it. */
 export type ChatEntry =
-  { kind: 'person'; userId: number } | { kind: 'group'; chatId: number; title: string; memberIds: number[] };
+  | { kind: 'person'; userId: number }
+  | {
+      kind: 'group';
+      chatId: number;
+      title: string;
+      memberIds: number[];
+      /** How many people the group has. A list made from this one can keep fewer of them in `memberIds`. */
+      memberCount: number;
+    };
 
 export type TelegramPeople = {
   /** In the order of the user's chat list. */
@@ -118,7 +126,14 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
           if (!members) continue;
           const present: number[] = [];
           for (const userId of members) if (await isPerson(userId)) present.push(userId);
-          if (present.length > 0) chats.push({ kind: 'group', chatId, title: chat.title, memberIds: present });
+          if (present.length > 0)
+            chats.push({
+              kind: 'group',
+              chatId,
+              title: chat.title,
+              memberIds: present,
+              memberCount: present.length,
+            });
         }
       }
       onProgress(ids.length, ids.length);

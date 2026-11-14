@@ -80,6 +80,12 @@ export class StickerMigrateStep extends MigrationView {
   @property({ attribute: false }) finished = false;
   /** Unlinking Signal and signing out of Telegram, before `finished`. */
   @property({ attribute: false }) ending = false;
+  /** Whether sticker packs are among what the user chose to move. */
+  @property({ attribute: false }) stickers = true;
+  /** The friends chosen to be added and how many the run has added, once it has; null when friends are not chosen. */
+  @property({ attribute: false }) friends: { toAdd: number; added: number | null } | null = null;
+  /** The run stopped with an error. */
+  @property({ attribute: false }) failed = false;
   @state() private filter: Filter = 'all';
   /** Where the current pack's row is: in the list's view, or above or below it. */
   @state() private currentIs: 'in-view' | 'above' | 'below' = 'in-view';
@@ -323,12 +329,60 @@ export class StickerMigrateStep extends MigrationView {
     return html`<span class="text-muted">${current ? `Working on ${current.pack.title}` : 'Working'}</span>`;
   }
 
+  /** What happens to the chosen friends: one line, beside the packs or on its own. */
+  private friendsBlock() {
+    const friends = this.friends;
+    if (!friends) return nothing;
+    const count = `${friends.toAdd} friend${friends.toAdd === 1 ? '' : 's'}`;
+    const text =
+      friends.toAdd === 0
+        ? 'Nobody to add'
+        : friends.added !== null
+          ? `${count} added to your Signal contacts`
+          : this.failed
+            ? `${count} not added to your Signal contacts yet`
+            : `Adding ${count} to your Signal contacts…`;
+    return html`<section
+      aria-label="Friends"
+      class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+    >
+      <span class="text-sm font-semibold">Friends</span>
+      <span class="text-sm text-muted">${text}</span>
+    </section>`;
+  }
+
+  /** The migration of friends alone, when the user did not choose sticker packs. */
+  private withoutPacks() {
+    const title = this.finished ? 'Done and logged out' : this.ending ? 'Migration finished' : 'Migrating';
+    const description = this.finished
+      ? 'Logged out of Telegram and Signal. Nothing is kept in your browser.'
+      : this.ending
+        ? 'Logging out of Telegram and Signal…'
+        : 'Keep this tab open until it finishes.';
+    const action = this.finished
+      ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>Start over</button>`
+      : this.ending
+        ? html`<button type="button" class=${primaryButton} disabled>Finishing…</button>`
+        : this.failed
+          ? html`<button type="button" class=${primaryButton} @click=${() => this.emit('retry')}>Try again</button>`
+          : html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
+              Back to start
+            </button>`;
+    return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()}
+    ${stickyFooter(html`<span></span>${action}`)}`;
+  }
+
   render() {
+    if (!this.stickers) return this.withoutPacks();
     const migration = this.migration;
     if (!migration)
       return this.finished
-        ? stepHeader(7, 'Done and logged out', 'Logged out of Telegram and Signal. Nothing is kept in your browser.')
-        : stepHeader(6, 'Migrating', 'Reading your packs from Telegram…');
+        ? stepHeader(
+            this.position,
+            'Done and logged out',
+            'Logged out of Telegram and Signal. Nothing is kept in your browser.',
+          )
+        : stepHeader(this.position, 'Migrating', 'Reading your packs from Telegram…');
     const selected = migration.selected;
     const ended = migration.phase === 'done' || migration.phase === 'stopped';
     const done = selected.filter((entry) => entry.state === 'in-signal').length;
@@ -354,7 +408,7 @@ export class StickerMigrateStep extends MigrationView {
         : 'Keep this tab open until the uploads finish. After a reload, it continues where it stopped.';
     const title = this.finished ? 'Done and logged out' : ended || this.ending ? 'Migration finished' : 'Migrating';
 
-    return html`${stepHeader(this.finished ? 7 : 6, title, description)}
+    return html`${stepHeader(this.position, title, description)}
     ${stickyBar(
       html`<div class="flex flex-col gap-1.5">
           <div class="flex justify-between gap-3 text-sm">
@@ -386,6 +440,7 @@ export class StickerMigrateStep extends MigrationView {
           </div>
         </div>`,
     )}
+    ${this.friendsBlock()}
     ${migration.stopReason ? html`<p class="text-danger" role="alert">${migration.stopReason}.</p>` : nothing}
     ${
       shown.length === 0

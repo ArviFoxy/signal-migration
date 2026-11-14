@@ -81,11 +81,11 @@ describe('the source that asks about phone numbers', () => {
 
 describe('the friend search', () => {
   const chats: ChatEntry[] = [
-    { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [3, 6] },
+    { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [3, 6], memberCount: 2 },
     { kind: 'person', userId: 3 },
-    { kind: 'group', chatId: 101, title: 'Hiking crew', memberIds: [2, 3] },
+    { kind: 'group', chatId: 101, title: 'Hiking crew', memberIds: [2, 3], memberCount: 2 },
     { kind: 'person', userId: 2 },
-    { kind: 'group', chatId: 102, title: 'Nobody here', memberIds: [3] },
+    { kind: 'group', chatId: 102, title: 'Nobody here', memberIds: [3], memberCount: 1 },
   ];
 
   it('keeps the chats with someone found, in the order of the chat list, each group with its found members', async () => {
@@ -94,8 +94,8 @@ describe('the friend search', () => {
     const source = finding({ 2: { phoneNumberIdentity: id(2) }, 6: { accountId: id(6) } });
     const search = await findFriends(telegram(chats, [MARA, JONAS, AIKO]), account, [source], () => undefined);
     expect(search.chats).toEqual([
-      { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [6] },
-      { kind: 'group', chatId: 101, title: 'Hiking crew', memberIds: [2] },
+      { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [6], memberCount: 2 },
+      { kind: 'group', chatId: 101, title: 'Hiking crew', memberIds: [2], memberCount: 2 },
       { kind: 'person', userId: 2 },
     ]);
     expect([...search.found.keys()]).toEqual([2, 6]);

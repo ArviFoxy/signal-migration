@@ -187,6 +187,17 @@ export class Workflow extends Runtime {
     return device === null || state.packs.signalRead === device.deviceId;
   }
 
+  /** Each kind the user chose is ready for the migration: the packs are read, the friends are looked for. */
+  get ready(): boolean {
+    const chosen = this.chosen;
+    return (!chosen.stickers || this.packsReady) && (!chosen.friends || this.friends.kind === 'found');
+  }
+
+  /** The run stopped with an error. */
+  get runFailed(): boolean {
+    return this.state.kind === 'migrating' && this.state.run.status === 'failed';
+  }
+
   /** The newest failure of background work: reading the packs or Signal's packs, the run. */
   get error(): string | null {
     const state = this.state;

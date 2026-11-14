@@ -9,6 +9,8 @@ import type { SignalState } from '../src/app/machine/signal';
 import type { TelegramState } from '../src/app/machine/telegram';
 import type { AppServices, StoredDevice } from '../src/app/services';
 import { Workflow } from '../src/app/workflow';
+import type { FriendSearch } from '../src/kinds/friends/search';
+import type { ChatEntry, Person } from '../src/kinds/friends/telegram-people';
 import { type PackEntry, type PackState, StickerMigration } from '../src/kinds/stickers/migration';
 import type { PackIndex } from '../src/kinds/stickers/pack-index';
 import type { StickerFormat } from '../src/kinds/stickers/telegram-packs';
@@ -169,6 +171,38 @@ async function migrating(done: number): Promise<{ state: AppState; migration: St
     run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
   };
   return { state, migration };
+}
+
+const BOTH = { stickers: true, friends: true };
+const FRIENDS_ONLY = { stickers: false, friends: true };
+
+/** A finished search: seven people found in three groups and four one-to-one chats, two of them in Signal already. */
+function foundFriends(): Extract<Session['friends'], { kind: 'found' }> {
+  const names: [number, string, string, boolean][] = [
+    [1, 'Mara', 'Lindqvist', true],
+    [2, 'Jonas', 'Weber', false],
+    [3, 'Priya', 'Raman', true],
+    [4, 'Aiko', 'Tanaka', false],
+    [5, 'Leon', 'Fischer', false],
+    [6, 'Ines', 'Duarte', false],
+    [7, 'Karim', 'Haddad', false],
+  ];
+  const found: FriendSearch['found'] = new Map(
+    names.map(([userId, givenName, familyName, inSignal]) => {
+      const person: Person = { userId, givenName, familyName, phoneNumber: null };
+      return [userId, { person, signal: { accountId: null, phoneNumberIdentity: null, phoneNumber: null }, inSignal }];
+    }),
+  );
+  const chats: ChatEntry[] = [
+    { kind: 'group', chatId: 100, title: 'Hiking crew', memberIds: [1, 2, 3, 4, 5], memberCount: 8 },
+    { kind: 'person', userId: 1 },
+    { kind: 'group', chatId: 101, title: 'Flat 12', memberIds: [2, 4, 5], memberCount: 4 },
+    { kind: 'person', userId: 2 },
+    { kind: 'group', chatId: 102, title: 'Board games night', memberIds: [3, 4, 5, 6, 7], memberCount: 8 },
+    { kind: 'person', userId: 3 },
+    { kind: 'person', userId: 6 },
+  ];
+  return { kind: 'found', instance: 'fixture', deviceId: 3, attempt: 1, search: { chats, found, looked: 214 } };
 }
 
 const FIXTURES: Record<string, Fixture> = {
@@ -333,6 +367,78 @@ const FIXTURES: Record<string, Fixture> = {
         kind: 'done',
       };
     },
+  },
+  'start-both': {
+    state: () => setup('start', { chosen: BOTH }),
+  },
+  'friends-looking': {
+    state: () =>
+      setup('friends', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: { kind: 'looking', instance: 'fixture', deviceId: 3, attempt: 1, progress: { done: 120, total: 214 } },
+      }),
+  },
+  'friends-found': {
+    state: () =>
+      setup('friends', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: foundFriends(),
+        untickedFriends: [5],
+      }),
+    then: (app) => (app.querySelector('button[aria-expanded]') as HTMLButtonElement).click(),
+  },
+  'friends-nobody': {
+    state: () =>
+      setup('friends', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: {
+          kind: 'found',
+          instance: 'fixture',
+          deviceId: 3,
+          attempt: 1,
+          search: { chats: [], found: new Map(), looked: 214 },
+        },
+      }),
+  },
+  'review-with-friends': {
+    async state() {
+      const migration = await withPacks(40);
+      migration.entries.forEach((entry, rank) => rank % 3 === 1 && (entry.state = 'available'));
+      return setup('review', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: BOTH,
+        packs: read(migration),
+        friends: foundFriends(),
+      });
+    },
+  },
+  'review-friends-only': {
+    state: () => setup('review', { telegram: signedIn, signal: linked, chosen: FRIENDS_ONLY, friends: foundFriends() }),
+  },
+  'migrate-with-friends': {
+    async state() {
+      const { state } = await migrating(40);
+      return {
+        ...state,
+        chosen: BOTH,
+        friends: foundFriends(),
+        run: { attempt: 1, status: 'running', friendsAdded: 5, error: null },
+      };
+    },
+  },
+  'migrate-friends-only': {
+    state: () => ({
+      ...session({ telegram: signedIn, signal: linked, chosen: FRIENDS_ONLY, friends: foundFriends() }),
+      kind: 'migrating',
+      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+    }),
   },
   'end-failed': {
     async state() {

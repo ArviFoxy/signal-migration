@@ -14,12 +14,15 @@ import {
   qrBox,
   secondaryButton,
   stepHeader,
+  type StepPosition,
   stickyFooter,
 } from './layout';
 
 @customElement('signal-step')
 export class SignalStep extends LightElement {
   @property({ attribute: false }) link!: SignalView;
+  /** Where the step stands in the step list. */
+  @property({ attribute: false }) position: StepPosition | null = null;
   /** The QR code image, drawn from the link it shows. */
   @state() private qrImage: { url: string; image: string } | null = null;
   #onChange = () => this.requestUpdate();
@@ -65,7 +68,7 @@ export class SignalStep extends LightElement {
           }
         </div>`
       : nothing;
-    return html`${stepHeader(3, 'Connect Signal', 'Links your browser as a device of your Signal account.')}
+    return html`${stepHeader(this.position, 'Connect Signal', 'Links your browser as a device of your Signal account.')}
     ${
       device
         ? html`<div class="flex flex-col gap-3">
