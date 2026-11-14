@@ -38,8 +38,11 @@ const notLinked: SignalState = {
 const session = (parts: Partial<Session> = {}): Session => ({
   telegram: notConnected,
   signal: notLinked,
+  chosen: { stickers: true, friends: false },
   packs: { kind: 'none' },
   deselected: [],
+  friends: { kind: 'none' },
+  untickedFriends: [],
   notice: null,
   ...parts,
 });
@@ -163,7 +166,7 @@ async function migrating(done: number): Promise<{ state: AppState; migration: St
   const state: AppState = {
     ...session({ telegram: signedIn, signal: linked, packs: read(migration) }),
     kind: 'migrating',
-    run: { attempt: 1, status: 'running', error: null },
+    run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
   };
   return { state, migration };
 }

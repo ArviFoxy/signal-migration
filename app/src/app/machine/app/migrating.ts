@@ -2,6 +2,7 @@
 // rules (settle.ts) end the migration once every selected pack is in Signal and the other devices were told, and go
 // back to the setup when a login is lost.
 
+import { contactsToAdd } from '../../../kinds/friends/search';
 import type { Context, Variant, VariantHandlers } from '../core';
 import type { AppEvent } from '../events';
 import type { Work } from '../work';
@@ -16,7 +17,15 @@ export const migrating: VariantHandlers<AppState, 'migrating', AppEvent, Context
     ...state,
     run: { ...state.run, status: 'failed', error: `The migration stopped: ${event.error}` },
   }),
-  'run/retry': (state) => ({ ...state, run: { attempt: state.run.attempt + 1, status: 'running', error: null } }),
+  'run/friends-added': (state, event) => ({ ...state, run: { ...state.run, friendsAdded: event.count } }),
+  'run/friends-failed': (state, event) => ({
+    ...state,
+    run: { ...state.run, status: 'failed', error: `Adding your friends to Signal failed: ${event.error}` },
+  }),
+  'run/retry': (state) => ({
+    ...state,
+    run: { ...state.run, attempt: state.run.attempt + 1, status: 'running', error: null },
+  }),
   finish: (state, _, context) => beginEnding(state, 'finish', context),
   clear: (state, _, context) => beginEnding(state, 'clear', context),
   'telegram/stop': (state) => ({ ...sessionOf(state), kind: 'setup', step: 'start' }),
@@ -24,12 +33,24 @@ export const migrating: VariantHandlers<AppState, 'migrating', AppEvent, Context
   'go-to': (state, event) => ({ ...sessionOf(state), kind: 'setup', step: event.step }),
 };
 
-/** The run, once the packs and Signal's installed packs are read. */
+/**
+ * The run of each chosen kind. Sticker packs: once the packs and Signal's installed packs are read. Friends: once
+ * they are looked for, until the contacts are written.
+ */
 export function migratingWork(state: Migrating): Work[] {
   const instance = signedInInstance(state.telegram);
   const device = linkedDevice(state.signal);
-  const packs = state.packs;
-  if (state.run.status !== 'running' || !instance || !device || state.signal.kind !== 'linked') return [];
-  if (packs.kind !== 'read' || packs.signalRead !== device.deviceId) return [];
-  return [{ kind: 'run', key: `run:${state.run.attempt}`, instance, migration: packs.migration, device }];
+  const { chosen, packs, friends, run } = state;
+  if (run.status === 'failed' || !instance || !device || state.signal.kind !== 'linked') return [];
+  const work: Work[] = [];
+  if (chosen.friends && friends.kind === 'found' && run.friendsAdded === null)
+    work.push({
+      kind: 'add-friends',
+      key: `add-friends:${run.attempt}`,
+      contacts: contactsToAdd(friends.search, state.untickedFriends),
+      device,
+    });
+  if (chosen.stickers && run.status === 'running' && packs.kind === 'read' && packs.signalRead === device.deviceId)
+    work.push({ kind: 'run', key: `run:${run.attempt}`, instance, migration: packs.migration, device });
+  return work;
 }

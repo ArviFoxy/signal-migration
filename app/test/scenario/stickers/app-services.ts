@@ -221,6 +221,8 @@ export function appServices(
           return { _: 'ok' };
         }) as unknown as Td.Invoke,
         source: user.stickers,
+        // The simulated account has no chats.
+        people: { readPeople: () => Promise.resolve({ chats: [], people: new Map() }) },
         async checkpoint() {
           if (browser.instances.has(instance)) browser.instances.set(instance, { ...live });
         },
@@ -284,6 +286,7 @@ export function appServices(
 
   const services: AppServices = {
     telegram,
+    friends: { sources: () => [] },
     signal: {
       async link(showQrCode, _deviceName, cancel) {
         showQrCode('sgnl://linkdevice?uuid=simulated');

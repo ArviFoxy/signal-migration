@@ -6,12 +6,15 @@ import { createStore, del, get, set } from 'idb-keyval';
 import type * as Td from 'tdlib-types';
 import { systemClock } from '../core/clock';
 import { fetchWithTimeLimit, SERVER_TIME_LIMIT_S } from '../core/time-limit';
+import { type FriendSource, phoneNumberSource } from '../kinds/friends/search';
+import { type PeopleSource, peopleOf } from '../kinds/friends/telegram-people';
 import { browserPictures } from '../kinds/stickers/compare-pictures';
 import { convertSticker } from '../kinds/stickers/convert';
 import type { MigrationServices } from '../kinds/stickers/migration';
 import { PackIndex } from '../kinds/stickers/pack-index';
 import { type TelegramSource, telegramSource } from '../kinds/stickers/telegram-packs';
 import { SignalConnection, type StoredDevice } from '../signal/connection';
+import { discoverAccounts } from '../signal/contact-discovery';
 import type { SignalAccount } from '../signal/transport';
 import {
   deleteTelegramInstance,
@@ -29,6 +32,8 @@ export interface TelegramSession {
   readonly instance: string;
   invoke: Td.Invoke;
   readonly source: TelegramSource;
+  /** The people of the account: its one-to-one chats and the members of its groups. */
+  readonly people: PeopleSource;
   /** Saves the login in this browser now. */
   checkpoint(): Promise<void>;
   /** Ends the session on Telegram's side; resolves once Telegram has answered. */
@@ -85,6 +90,10 @@ export type AppServices = {
   telegram: TelegramServices;
   signal: SignalServices;
   migration(): MigrationServices;
+  friends: {
+    /** The ways of finding the Signal accounts of Telegram people, over the linked device `account`. */
+    sources(account: SignalAccount): FriendSource[];
+  };
   snapshots: SnapshotStore;
   /**
    * Takes the lock that lets one tab run the migration, held until the page closes. Resolves true once held; with
@@ -128,6 +137,7 @@ export const realServices: AppServices = {
         instance,
         invoke: client.invoke,
         source: telegramSource(client),
+        people: peopleOf(client),
         checkpoint: () => client.checkpoint(),
         logOut: () => client.logOut(),
         terminate: () => client.terminate(),
@@ -140,6 +150,9 @@ export const realServices: AppServices = {
   signal: {
     link: (showQrCode, deviceName, cancel) => SignalConnection.link(showQrCode, deviceName, cancel),
     restore: (stored) => SignalConnection.restore(stored),
+  },
+  friends: {
+    sources: (account) => [phoneNumberSource((phoneNumbers) => discoverAccounts(account, phoneNumbers))],
   },
   migration: () => ({
     clock: systemClock,

@@ -3,17 +3,22 @@
 
 import type { Context } from '../core';
 import type { AppEvent } from '../events';
+import { friendsTransition, type FriendsEvent, type FriendsState } from '../friends';
 import { packsTransition, type PacksEvent, type PacksState } from '../packs';
 import { signalTransition, signalWork, type SignalEvent, type SignalState } from '../signal';
 import { telegramTransition, telegramWork, type TelegramEvent, type TelegramState } from '../telegram';
 import type { Work } from '../work';
 import { type EndReason, type Session, type SessionState, sessionOf } from './state';
-import { setupStepShown, type Step } from './steps';
+import { type Chosen, setupStepShown, type Step } from './steps';
+
+/** What a new visit starts with: sticker packs. Looking for friends asks Signal about phone numbers, so the user chooses it. */
+export const INITIAL_CHOICE: Chosen = { stickers: true, friends: false };
 
 const isTelegramEvent = (event: AppEvent): event is TelegramEvent =>
   event.type.startsWith('telegram/') || event.type.startsWith('record/');
 const isSignalEvent = (event: AppEvent): event is SignalEvent => event.type.startsWith('signal/');
 const isPacksEvent = (event: AppEvent): event is PacksEvent => event.type.startsWith('packs/');
+const isFriendsEvent = (event: AppEvent): event is FriendsEvent => event.type.startsWith('friends/');
 
 /** The notice an event brings, or the current one. */
 function noticeAfter(notice: string | null, event: AppEvent): string | null {
@@ -31,10 +36,15 @@ const withoutError = <S extends { error?: string | null }>(state: S): S =>
 
 /** Passes `event` to the session's machines; each ignores the events that are not its own. */
 export function toMachines<S extends SessionState>(state: S, event: AppEvent, context: Context): S {
-  let { telegram, signal, packs } = state;
+  let { telegram, signal, packs, friends, untickedFriends } = state;
   if (isTelegramEvent(event)) telegram = telegramTransition(telegram, event, context);
   if (isSignalEvent(event)) signal = signalTransition(signal, event, context);
   if (isPacksEvent(event)) packs = packsTransition(packs, event, context);
+  if (isFriendsEvent(event)) friends = friendsTransition(friends, event, context);
+  if (event.type === 'tick-friends') {
+    const others = untickedFriends.filter((userId) => !event.userIds.includes(userId));
+    untickedFriends = event.ticked ? others : [...others, ...event.userIds];
+  }
   if (event.type === 'dismiss') {
     // Errors that offer nothing to do; a stopped login keeps its error, which goes with "Try again".
     if (telegram.kind === 'off' || telegram.kind === 'signed-in') telegram = withoutError(telegram);
@@ -44,9 +54,14 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
   // Telegram ended a login of this visit and the page has removed it: the sign-in that follows says why.
   if (state.telegram.kind === 'deleting' && state.telegram.byTelegram && telegram.kind === 'off')
     notice = 'Telegram ended the last login. Sign in again.';
-  if (telegram === state.telegram && signal === state.signal && packs === state.packs && notice === state.notice)
-    return state;
-  return { ...state, telegram, signal, packs, notice };
+  const same =
+    telegram === state.telegram &&
+    signal === state.signal &&
+    packs === state.packs &&
+    friends === state.friends &&
+    untickedFriends === state.untickedFriends &&
+    notice === state.notice;
+  return same ? state : { ...state, telegram, signal, packs, friends, untickedFriends, notice };
 }
 
 export { sessionOf };
@@ -61,7 +76,12 @@ export const linkedDevice = (signal: SignalState) =>
 export function stepOf(state: SessionState): Step {
   switch (state.kind) {
     case 'setup':
-      return setupStepShown(state.step, signedInInstance(state.telegram) !== null, linkedDevice(state.signal) !== null);
+      return setupStepShown(
+        state.step,
+        signedInInstance(state.telegram) !== null,
+        linkedDevice(state.signal) !== null,
+        state.chosen,
+      );
     case 'ending':
     case 'end-failed':
       return state.reason === 'clear' ? 'start' : 'migrate';
@@ -71,9 +91,12 @@ export function stepOf(state: SessionState): Step {
   }
 }
 
-/** The packs follow the login: read for each new signed-in instance, dropped when there is none. */
+/**
+ * The packs follow the login: read for each new signed-in instance, dropped when there is none. They are not read
+ * at all when the user did not choose sticker packs.
+ */
 export function packsFollowLogin(session: Session): Session {
-  const instance = signedInInstance(session.telegram);
+  const instance = session.chosen.stickers ? signedInInstance(session.telegram) : null;
   const packs = session.packs;
   const current = packs.kind === 'none' ? null : packs.instance;
   if (instance === current) return session;
@@ -84,6 +107,26 @@ export function packsFollowLogin(session: Session): Session {
       : session.deselected;
   const next: PacksState = instance ? { kind: 'reading', instance, attempt: 1 } : { kind: 'none' };
   return { ...session, packs: next, deselected };
+}
+
+/**
+ * The friends follow both accounts: looked for once friends are chosen, Telegram is signed in and a Signal device is
+ * linked, and again for another login or device. Without one of the three there is no search.
+ */
+export function friendsFollowAccounts(session: Session): Session {
+  const instance = signedInInstance(session.telegram);
+  const device = session.signal.kind === 'linked' ? session.signal.device : null;
+  const friends = session.friends;
+  if (!session.chosen.friends || !instance || !device) {
+    if (friends.kind === 'none') return session;
+    // A login being saved, or a device being unlinked at the end, is not gone yet.
+    if (session.chosen.friends && (session.telegram.kind === 'saving' || session.signal.kind === 'unlinking'))
+      return session;
+    return { ...session, friends: { kind: 'none' } };
+  }
+  if (friends.kind !== 'none' && friends.instance === instance && friends.deviceId === device.deviceId) return session;
+  const looking: FriendsState = { kind: 'looking', instance, deviceId: device.deviceId, attempt: 1, progress: null };
+  return { ...session, friends: looking };
 }
 
 /** A Signal device linked by an earlier version is unlinked, so that the user links again. */
@@ -104,9 +147,19 @@ export function beginEnding(state: SessionState, reason: EndReason, context: Con
           context,
         );
   const telegram = telegramTransition(state.telegram, { type: 'telegram/stop' }, context);
-  const packs: PacksState = reason === 'clear' ? { kind: 'none' } : state.packs;
-  const deselected = reason === 'clear' ? [] : state.deselected;
-  return { kind: 'ending', reason, telegram, signal, packs, deselected, notice: state.notice };
+  const cleared = reason === 'clear';
+  return {
+    kind: 'ending',
+    reason,
+    telegram,
+    signal,
+    chosen: cleared ? INITIAL_CHOICE : state.chosen,
+    packs: cleared ? { kind: 'none' } : state.packs,
+    deselected: cleared ? [] : state.deselected,
+    friends: cleared ? { kind: 'none' } : state.friends,
+    untickedFriends: cleared ? [] : state.untickedFriends,
+    notice: state.notice,
+  };
 }
 
 /** A new session, after a clear. */
@@ -119,8 +172,11 @@ export function freshSession(state: Session): Session {
       error: null,
     },
     signal: state.signal,
+    chosen: INITIAL_CHOICE,
     packs: { kind: 'none' },
     deselected: [],
+    friends: { kind: 'none' },
+    untickedFriends: [],
     notice: state.notice,
   };
 }
@@ -131,6 +187,14 @@ export function sessionWork(state: SessionState): Work[] {
   const packs = state.packs;
   const active = state.kind === 'setup' || state.kind === 'migrating';
   if (!active) return work;
+  const friends = state.friends;
+  if (friends.kind === 'looking' && state.signal.kind === 'linked')
+    work.push({
+      kind: 'find-friends',
+      key: `find-friends:${friends.instance}:${friends.deviceId}:${friends.attempt}`,
+      instance: friends.instance,
+      device: state.signal.device,
+    });
   if (packs.kind === 'reading')
     work.push({
       kind: 'read-packs',

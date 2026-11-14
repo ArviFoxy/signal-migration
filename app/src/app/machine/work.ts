@@ -4,6 +4,7 @@
 // it is not started again.
 
 import type { StickerMigration } from '../../kinds/stickers/migration';
+import type { NewContact } from '../../signal/storage';
 import type { StoredDevice } from '../services';
 import type { AppEvent } from './events';
 import type { LoginQuery } from './telegram/state';
@@ -32,5 +33,9 @@ export type Work =
   | { kind: 'load-previews'; key: string; instance: string; migration: StickerMigration }
   /** Reads which packs the Signal account has. */
   | { kind: 'read-signal'; key: string; migration: StickerMigration; device: StoredDevice }
+  /** Reads the people of the Telegram account and looks for their Signal accounts. */
+  | { kind: 'find-friends'; key: string; instance: string; device: StoredDevice }
+  /** Adds the chosen friends to the Signal contacts. */
+  | { kind: 'add-friends'; key: string; contacts: NewContact[]; device: StoredDevice }
   /** Migrates the selected packs. */
   | { kind: 'run'; key: string; instance: string; migration: StickerMigration; device: StoredDevice };

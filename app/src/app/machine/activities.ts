@@ -3,6 +3,7 @@
 // and work that holds something (TDLib, a preview loader) lets go of it.
 
 import { withTimeLimit } from '../../core/time-limit';
+import { addContacts, findFriends } from '../../kinds/friends/search';
 import { StickerMigration } from '../../kinds/stickers/migration';
 import { LinkingCancelledError } from '../../signal/link';
 import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from '../services';
@@ -204,6 +205,28 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         emit({ type: 'packs/signal-read', deviceId: work.device.deviceId });
       } catch (error) {
         emit({ type: 'packs/signal-failed', error: message(error) });
+      }
+      return;
+    case 'find-friends':
+      try {
+        const device = deviceOf(context, work.device);
+        const search = await findFriends(
+          sessionOf(resources, work.instance).people,
+          device,
+          services.friends.sources(device),
+          (done, total) => emit({ type: 'friends/progress', done, total }),
+        );
+        emit({ type: 'friends/found', search });
+      } catch (error) {
+        emit({ type: 'friends/failed', error: message(error) });
+      }
+      return;
+    case 'add-friends':
+      try {
+        await addContacts(deviceOf(context, work.device), work.contacts);
+        emit({ type: 'run/friends-added', count: work.contacts.length });
+      } catch (error) {
+        if (!cancel.aborted) emit({ type: 'run/friends-failed', error: message(error) });
       }
       return;
     case 'run':

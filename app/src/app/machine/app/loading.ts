@@ -9,7 +9,7 @@ import type { Record } from '../record';
 import { initialSignal, type SignalState } from '../signal';
 import { initialTelegram, type TelegramState } from '../telegram';
 import type { Work } from '../work';
-import { beginEnding } from './session';
+import { beginEnding, INITIAL_CHOICE } from './session';
 import type { AppState, Session } from './state';
 
 type Loading = Variant<AppState, 'loading'>;
@@ -24,8 +24,11 @@ export function fromRecord(record: Record | null, context: Context): AppState {
   const session: Session = {
     telegram,
     signal,
+    chosen: record?.chosen ?? INITIAL_CHOICE,
     packs: { kind: 'none' },
     deselected: record?.deselected ?? [],
+    friends: { kind: 'none' },
+    untickedFriends: record?.untickedFriends ?? [],
     notice: null,
   };
   if (!record) return { ...session, kind: 'setup', step: 'start' };
@@ -33,7 +36,11 @@ export function fromRecord(record: Record | null, context: Context): AppState {
     case 'setup':
       return { ...session, kind: 'setup', step: record.step };
     case 'migrating':
-      return { ...session, kind: 'migrating', run: { attempt: 1, status: 'running', error: null } };
+      return {
+        ...session,
+        kind: 'migrating',
+        run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      };
     case 'ending':
       return beginEnding({ ...session, kind: 'setup', step: 'start' }, record.why ?? 'clear', context);
   }

@@ -22,7 +22,7 @@ import { setup } from './setup';
 import { type AppState, isSession } from './state';
 
 export * from './state';
-export { stepOf, linkedDevice, signedInInstance } from './session';
+export { INITIAL_CHOICE, stepOf, linkedDevice, signedInInstance } from './session';
 export * from './steps';
 
 const byPhase = byVariant<AppState, AppEvent, Context>({
@@ -77,12 +77,14 @@ export function recordOf(state: AppState): Record | null | undefined {
   const ending = state.kind === 'ending' || state.kind === 'end-failed' || state.kind === 'done';
   if (ending && nothingKept) return null;
   return {
-    version: 3,
+    version: 4,
     phase: ending ? 'ending' : state.kind === 'migrating' ? 'migrating' : 'setup',
     step: state.kind === 'setup' ? state.step : 'review',
     why: state.kind === 'ending' || state.kind === 'end-failed' ? state.reason : ending ? 'finish' : null,
     telegram,
     signal,
+    chosen: state.chosen,
     deselected,
+    untickedFriends: state.untickedFriends,
   };
 }

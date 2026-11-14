@@ -13,6 +13,7 @@ import { telegramTransition, type TelegramState } from '../telegram';
 import {
   beginEnding,
   freshSession,
+  friendsFollowAccounts,
   linkedDevice,
   packsFollowLogin,
   sessionOf,
@@ -28,7 +29,7 @@ function withSession<S extends SessionState>(state: S, session: Session): S {
 }
 
 function settleSetup(state: Extract<AppState, { kind: 'setup' }>, context: Context): AppState {
-  let next = withSession(state, packsFollowLogin(unlinkOldDevice(sessionOf(state), context)));
+  let next = withSession(state, friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(sessionOf(state), context))));
   const step = stepOf(next);
   if (step === 'telegram' && next.telegram.kind === 'off' && !next.telegram.error)
     next = { ...next, telegram: telegramTransition(next.telegram, { type: 'telegram/start' }, context) };
@@ -40,19 +41,24 @@ function settleSetup(state: Extract<AppState, { kind: 'setup' }>, context: Conte
 }
 
 function settleMigrating(state: Extract<AppState, { kind: 'migrating' }>, context: Context): AppState {
-  const next = withSession(state, packsFollowLogin(unlinkOldDevice(sessionOf(state), context)));
+  const next = withSession(state, friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(sessionOf(state), context))));
   // A login lost during the migration (signed out elsewhere, unlinked from the phone): the setup shows the step to
   // log in again, and the user starts the migration again from the review. A login being restored after a reload
   // (starting, within its time limit) or saved is not lost.
   const telegramLost = !['starting', 'saving', 'signed-in'].includes(next.telegram.kind);
   if (telegramLost || next.signal.kind !== 'linked') return { ...sessionOf(next), kind: 'setup', step: 'review' };
-  const packs = next.packs;
-  if (next.run.status !== 'ended' || packs.kind !== 'read') return next;
-  const migration = packs.migration;
-  // Done once every pack is in Signal and the other devices were told; the phone shows nothing otherwise.
-  if (migration.selected.every((entry) => entry.state === 'in-signal') && migration.unannounced === 0)
-    return beginEnding(next, 'finish', context);
-  return next;
+  // Done once each chosen kind is done. Sticker packs: every pack is in Signal and the other devices were told; the
+  // phone shows nothing otherwise. Friends: the contacts are written.
+  if (next.chosen.friends && next.run.friendsAdded === null) return next;
+  if (next.chosen.stickers) {
+    const packs = next.packs;
+    if (next.run.status !== 'ended' || packs.kind !== 'read') return next;
+    const migration = packs.migration;
+    if (!migration.selected.every((entry) => entry.state === 'in-signal') || migration.unannounced !== 0) return next;
+  } else if (next.run.status === 'failed') {
+    return next;
+  }
+  return beginEnding(next, 'finish', context);
 }
 
 /** A login state that is not on its way to its end, so the end asks for it again. */
