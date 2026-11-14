@@ -10,11 +10,19 @@ use std::time::{Duration, SystemTime};
 
 use wasm_bindgen::prelude::*;
 
+mod contact_discovery;
 #[cfg(target_arch = "wasm32")]
 mod system_calls;
 
 fn error(reason: impl std::fmt::Display) -> JsError {
     JsError::new(&reason.to_string())
+}
+
+fn time_from_unix_seconds(unix_seconds: f64) -> Result<SystemTime, JsError> {
+    if !unix_seconds.is_finite() || unix_seconds < 0.0 {
+        return Err(error("the time of the check is not a time after 1970"));
+    }
+    Ok(SystemTime::UNIX_EPOCH + Duration::from_secs_f64(unix_seconds))
 }
 
 /// The ID of the enclave code that Signal's contact discovery runs in production.
@@ -37,10 +45,7 @@ impl EnclaveHandshake {
         attestation: &[u8],
         unix_seconds: f64,
     ) -> Result<EnclaveHandshake, JsError> {
-        if !unix_seconds.is_finite() || unix_seconds < 0.0 {
-            return Err(error("the time of the check is not a time after 1970"));
-        }
-        let now = SystemTime::UNIX_EPOCH + Duration::from_secs_f64(unix_seconds);
+        let now = time_from_unix_seconds(unix_seconds)?;
         attest::cds2::new_handshake(enclave_id, attestation, now)
             .map(EnclaveHandshake)
             .map_err(error)

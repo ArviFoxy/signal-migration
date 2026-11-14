@@ -11,6 +11,7 @@
     "screens": "node build.mjs --fixtures && node fixtures/screens.mjs",
     "check": "npm run generate && npm run build:wasm && npm run build:attestation && tsc --noEmit",
     "test": "npm run generate && vitest run",
+    "test:attestation": "../scripts/test-attestation-wasm.sh",
     "test:integration": "vitest run --config vitest.integration.config.ts",
     "format": "prettier --write . && (cd ../crates/server && cargo fmt) && (cd ../crates/signal-wasm && cargo fmt) && (cd ../crates/attestation-wasm && cargo fmt)",
     "format:check": "prettier --check . && (cd ../crates/server && cargo fmt --check) && (cd ../crates/signal-wasm && cargo fmt --check) && (cd ../crates/attestation-wasm && cargo fmt --check)",

@@ -165,6 +165,10 @@ jobs:
       - name: Tests
         working-directory: app
         run: npm test
+      # The lookup at contact discovery against a stand-in enclave; compiled to WebAssembly and run in Node.js.
+      - name: Tests of the attestation module
+        working-directory: app
+        run: npm run test:attestation
       - name: Screenshots of the screen fixtures
         if: github.event_name == 'pull_request'
         working-directory: app

@@ -31,6 +31,8 @@ pub struct TlsWebSocket {
     state: State,
     messages: Vec<Vec<u8>>,
     close_code: Option<u16>,
+    /// The text the server sent with its close code.
+    close_reason: String,
     /// The HTTP status of the server's answer when it refused the WebSocket upgrade.
     refused_status: Option<u16>,
 }
@@ -68,6 +70,7 @@ impl TlsWebSocket {
             state,
             messages: Vec::new(),
             close_code: None,
+            close_reason: String::new(),
             refused_status: None,
         })
     }
@@ -133,6 +136,12 @@ impl TlsWebSocket {
         self.close_code
     }
 
+    /// The text the server sent with its close code; empty when it sent none.
+    #[wasm_bindgen(getter, js_name = closeReason)]
+    pub fn close_reason(&self) -> String {
+        self.close_reason.clone()
+    }
+
     fn drive(&mut self) -> Result<(), JsError> {
         loop {
             match std::mem::replace(&mut self.state, State::Closed) {
@@ -154,6 +163,9 @@ impl TlsWebSocket {
                         match socket.read() {
                             Ok(Message::Binary(bytes)) => self.messages.push(bytes.to_vec()),
                             Ok(Message::Close(frame)) => {
+                                if let Some(frame) = &frame {
+                                    self.close_reason = frame.reason.to_string();
+                                }
                                 self.close_code = Some(frame.map_or(1005, |f| f.code.into()));
                             }
                             Ok(_) => {}
