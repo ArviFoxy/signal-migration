@@ -24,8 +24,8 @@ export type Session = {
   /** Telegram sticker set IDs the user deselected, kept for when the packs are read again. */
   deselected: string[];
   friends: FriendsState;
-  /** Telegram user IDs of found friends the user unticked, kept for when the friends are looked for again. */
-  untickedFriends: number[];
+  /** Telegram user IDs of found friends the user ticked, kept for when the friends are looked for again. */
+  tickedFriends: number[];
   /** Something the user should know, until dismissed: TDLib was restarted, the record could not be written. */
   notice: string | null;
 };
@@ -75,6 +75,6 @@ export const sessionOf = (state: SessionState): Session => ({
   packs: state.packs,
   deselected: state.deselected,
   friends: state.friends,
-  untickedFriends: state.untickedFriends,
+  tickedFriends: state.tickedFriends,
   notice: state.notice,
 });

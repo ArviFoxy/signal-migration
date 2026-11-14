@@ -44,7 +44,7 @@ const session = (parts: Partial<Session> = {}): Session => ({
   packs: { kind: 'none' },
   deselected: [],
   friends: { kind: 'none' },
-  untickedFriends: [],
+  tickedFriends: [],
   notice: null,
   ...parts,
 });
@@ -177,6 +177,9 @@ const BOTH = { stickers: true, friends: true };
 const FRIENDS_ONLY = { stickers: false, friends: true };
 
 /** A finished search: seven people found in three groups and four one-to-one chats, two of them in Signal already. */
+/** The found friends the fixtures show as ticked. */
+const TICKED_FRIENDS = [2, 4, 6, 7, 8];
+
 function foundFriends(): Extract<Session['friends'], { kind: 'found' }> {
   const names: [number, string, string, boolean][] = [
     [1, 'Mara', 'Lindqvist', true],
@@ -390,7 +393,7 @@ const FIXTURES: Record<string, Fixture> = {
           instance: 'fixture',
           deviceId: 3,
           attempt: 1,
-          progress: { part: 'telegram', done: 120, total: 214, secondsLeft: 95 },
+          progress: { part: 'telegram', groupsRead: 88, groups: 164, share: 0.55, people: 2310, secondsLeft: 95 },
         },
       }),
   },
@@ -416,7 +419,7 @@ const FIXTURES: Record<string, Fixture> = {
         signal: linked,
         chosen: FRIENDS_ONLY,
         friends: foundFriends(),
-        untickedFriends: [5],
+        tickedFriends: TICKED_FRIENDS,
       }),
     then: (app) => (app.querySelector('button[aria-expanded]') as HTMLButtonElement).click(),
   },
@@ -427,7 +430,7 @@ const FIXTURES: Record<string, Fixture> = {
         signal: linked,
         chosen: FRIENDS_ONLY,
         friends: foundFriends(),
-        untickedFriends: [5],
+        tickedFriends: TICKED_FRIENDS,
       }),
     then: (app) =>
       [...app.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')]
@@ -441,7 +444,7 @@ const FIXTURES: Record<string, Fixture> = {
         signal: linked,
         chosen: FRIENDS_ONLY,
         friends: foundFriends(),
-        untickedFriends: [5],
+        tickedFriends: TICKED_FRIENDS,
       }),
     then: (app) =>
       [...app.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')]
@@ -474,11 +477,19 @@ const FIXTURES: Record<string, Fixture> = {
         chosen: BOTH,
         packs: read(migration),
         friends: foundFriends(),
+        tickedFriends: TICKED_FRIENDS,
       });
     },
   },
   'review-friends-only': {
-    state: () => setup('review', { telegram: signedIn, signal: linked, chosen: FRIENDS_ONLY, friends: foundFriends() }),
+    state: () =>
+      setup('review', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: foundFriends(),
+        tickedFriends: TICKED_FRIENDS,
+      }),
   },
   'migrate-with-friends': {
     async state() {
@@ -487,13 +498,20 @@ const FIXTURES: Record<string, Fixture> = {
         ...state,
         chosen: BOTH,
         friends: foundFriends(),
+        tickedFriends: TICKED_FRIENDS,
         run: { attempt: 1, status: 'running', friendsAdded: 5, error: null },
       };
     },
   },
   'migrate-friends-only': {
     state: () => ({
-      ...session({ telegram: signedIn, signal: linked, chosen: FRIENDS_ONLY, friends: foundFriends() }),
+      ...session({
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: foundFriends(),
+        tickedFriends: TICKED_FRIENDS,
+      }),
       kind: 'migrating',
       run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
     }),

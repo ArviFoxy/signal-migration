@@ -61,8 +61,8 @@ function pictureUrl(bytes: Uint8Array): string {
 @customElement('friends-step')
 export class FriendsStep extends LightElement {
   @property({ attribute: false }) friends!: FriendsState;
-  /** The Telegram user IDs of found people the user unticked. */
-  @property({ attribute: false }) unticked: readonly number[] = [];
+  /** The Telegram user IDs of found people the user ticked. Nobody is ticked until the user ticks them. */
+  @property({ attribute: false }) ticked: readonly number[] = [];
   /** Where the step stands in the step list. */
   @property({ attribute: false }) position: StepPosition | null = null;
   /** The chat ID of the group whose members are shown. */
@@ -116,7 +116,7 @@ export class FriendsStep extends LightElement {
       type="checkbox"
       class="size-5 flex-none cursor-pointer accent-accent"
       aria-label="Add ${name} to Signal"
-      .checked=${!this.unticked.includes(userId)}
+      .checked=${this.ticked.includes(userId)}
       @change=${(event: Event) => this.tick([userId], (event.target as HTMLInputElement).checked)}
     />`;
   }
@@ -137,7 +137,7 @@ export class FriendsStep extends LightElement {
     const search = found.search;
     const members = chat.memberIds.map((userId) => search.found.get(userId)!);
     const addable = members.filter((friend) => !friend.inSignal).map((friend) => friend.person.userId);
-    const ticked = addable.filter((userId) => !this.unticked.includes(userId)).length;
+    const ticked = addable.filter((userId) => this.ticked.includes(userId)).length;
     const all = addable.length > 0 && ticked === addable.length;
     const expanded = this.open === chat.chatId;
     return html`<li class="border-b border-line last:border-b-0">
@@ -237,14 +237,14 @@ export class FriendsStep extends LightElement {
             >${progress.phoneNumbers} phone number${progress.phoneNumbers === 1 ? '' : 's'}</span
           >`
         : html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
-            >${progress.done} of ${progress.total} groups</span
+            >${progress.groupsRead} of ${progress.groups} groups</span
           >`;
     const bar = !progress
       ? progressBar(label, 0, 0)
       : progress.part === 'signal'
         ? html`<div class="animate-pulse">${progressBar(label, 1, 1)}</div>`
-        : progressBar(label, progress.done, progress.total);
-    // The line for the time left is there from the start, so nothing moves when the estimate appears.
+        : progressBar(label, Math.round(progress.share * 100), 100);
+    // The line below the bar is there from the start, so nothing moves when the estimate appears on it.
     return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
       <div class="flex flex-col gap-1.5">
         <div class="flex justify-between gap-3 text-sm">
@@ -252,9 +252,12 @@ export class FriendsStep extends LightElement {
           ${count}
         </div>
         ${bar}
-        <span class="min-h-5 text-sm text-muted"
-          >${progress?.part === 'telegram' ? timeLeft(progress.secondsLeft) : nothing}</span
-        >
+        <div class="flex min-h-5 justify-between gap-3 text-sm text-muted">
+          <span>${progress?.part === 'telegram' ? timeLeft(progress.secondsLeft) : nothing}</span>
+          <span class="flex-none whitespace-nowrap tabular-nums"
+            >${progress?.part === 'telegram' ? `${people(progress.people)} scanned` : nothing}</span
+          >
+        </div>
       </div>
       ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
   }
@@ -300,7 +303,7 @@ export class FriendsStep extends LightElement {
     const search = friends.search;
     const everyone = [...search.found.values()];
     const addable = everyone.filter((friend) => !friend.inSignal).map((friend) => friend.person.userId);
-    const toAdd = addable.filter((userId) => !this.unticked.includes(userId)).length;
+    const toAdd = addable.filter((userId) => this.ticked.includes(userId)).length;
     const all = addable.length > 0 && toAdd === addable.length;
     const query = this.search.trim().toLowerCase();
     const matches = (name: string) => name.toLowerCase().includes(query);

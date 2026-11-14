@@ -49,13 +49,25 @@ export type TelegramPeople = {
  */
 export const GROUP_SIZE_LIMIT = 1000;
 
+/** How far the reading is. Only groups are counted: one-to-one chats and the contact list take no time to read. */
+export type ReadingProgress = {
+  /** How many groups are read to the end, of `groups` in all. */
+  groupsRead: number;
+  groups: number;
+  /**
+   * The part of the groups that is read, from 0 to 1. A group being read counts with the part of its members that
+   * has arrived, so this moves with every answer from Telegram.
+   */
+  share: number;
+  /** How many people are read so far, each counted once. */
+  people: number;
+  /** The seconds the rest should take, once enough is read to estimate that. */
+  secondsLeft: number | null;
+};
+
 /** Where the people come from: the user's account in the app, simulated data in tests. */
 export interface PeopleSource {
-  /**
-   * `onProgress` gets how many of the groups are read, and how many seconds the rest should take once enough is read
-   * to estimate that. Only groups are counted: one-to-one chats take no time to read.
-   */
-  readPeople(onProgress: (done: number, total: number, secondsLeft: number | null) => void): Promise<TelegramPeople>;
+  readPeople(onProgress: (progress: ReadingProgress) => void): Promise<TelegramPeople>;
   /** The bytes of a picture, by the file number a person or a group carries. */
   readPhoto(fileId: number): Promise<Uint8Array>;
 }
@@ -141,19 +153,25 @@ export function peopleOf(
   const userIdsOf = (members: readonly Td.chatMember[]) =>
     members.flatMap((member) => (member.member_id._ === 'messageSenderUser' ? [member.member_id.user_id] : []));
 
-  /** The user IDs of a group's members, or null when the group is too large or does not show its members. */
-  async function memberIds(type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup): Promise<number[] | null> {
+  /**
+   * Reads the members of a group. Each answer from Telegram is handed to `take`: the user IDs in it, and the part
+   * of the group, from 0 to 1, that has arrived with it. Nothing is handed over for a group above the size limit.
+   * Telegram refuses the request for a group that does not show its members.
+   */
+  async function readMembers(
+    type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup,
+    take: (userIds: number[], part: number) => Promise<void>,
+  ): Promise<void> {
     if (type._ === 'chatTypeBasicGroup') {
-      return userIdsOf((await invoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id })).members);
+      const info = await invoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id });
+      return take(userIdsOf(info.members), 1);
     }
     // What TDLib already knows of the group answers without a request to Telegram's servers. The size is 0 there
     // when TDLib does not know it.
     const known = await invoke({ _: 'getSupergroup', supergroup_id: type.supergroup_id });
-    if (known.member_count > GROUP_SIZE_LIMIT) return null;
-    const info = await invoke({ _: 'getSupergroupFullInfo', supergroup_id: type.supergroup_id });
-    if (!info.can_get_members || info.member_count > GROUP_SIZE_LIMIT) return null;
-    const ids: number[] = [];
-    for (let offset = 0; offset < info.member_count; offset += MEMBERS_PER_REQUEST) {
+    if (known.member_count > GROUP_SIZE_LIMIT) return;
+    // Every answer names the size of the group, so the first one says whether the group is read at all.
+    for (let offset = 0; ; offset += MEMBERS_PER_REQUEST) {
       const page = await invoke({
         _: 'getSupergroupMembers',
         supergroup_id: type.supergroup_id,
@@ -161,10 +179,12 @@ export function peopleOf(
         offset,
         limit: MEMBERS_PER_REQUEST,
       });
-      ids.push(...userIdsOf(page.members));
-      if (page.members.length === 0) break;
+      if (page.total_count > GROUP_SIZE_LIMIT) return;
+      const arrived = offset + MEMBERS_PER_REQUEST;
+      const last = page.members.length === 0 || arrived >= page.total_count;
+      await take(userIdsOf(page.members), last ? 1 : arrived / page.total_count);
+      if (last) return;
     }
-    return ids;
   }
 
   return {
@@ -226,19 +246,40 @@ export function peopleOf(
       const contactIds: number[] = [];
       for (const userId of (await invoke({ _: 'getContacts' })).user_ids)
         if (await isPerson(userId)) contactIds.push(userId);
-      onProgress(0, groups.length, null);
 
       // Then the groups, whose members Telegram's servers are asked for: a few groups at a time.
       const groupsStarted = now();
       let groupsRead = 0;
+      /** Of each group being read, the part of its members that has arrived. */
+      const partsArrived = new Map<number, number>();
+      const tell = () => {
+        let arrived = groupsRead;
+        for (const part of partsArrived.values()) arrived += part;
+        const seconds = (now() - groupsStarted) / 1000;
+        const estimable = groupsRead >= GROUPS_BEFORE_ESTIMATE && seconds >= SECONDS_BEFORE_ESTIMATE;
+        onProgress({
+          groupsRead,
+          groups: groups.length,
+          share: groups.length > 0 ? arrived / groups.length : 1,
+          people: people.size,
+          secondsLeft: estimable ? Math.round((seconds / arrived) * (groups.length - arrived)) : null,
+        });
+      };
+      tell();
       const readGroup = async (group: (typeof groups)[number]) => {
-        // A group whose members Telegram refuses to give is passed over, and the rest is still read.
-        const members = await memberIds(group.type).catch((error: unknown) => {
-          if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
+        const present: number[] = [];
+        // A group whose members Telegram refuses to give is passed over, and the rest is still read. What arrived
+        // of a group before a refusal is kept.
+        await readMembers(group.type, async (userIds, part) => {
+          for (const userId of userIds) if (await isPerson(userId)) present.push(userId);
+          if (part < 1) {
+            partsArrived.set(group.chatId, part);
+            tell();
+          }
+        }).catch((error: unknown) => {
+          if (error instanceof TelegramError && error.code !== TOO_FAST) return;
           throw error;
         });
-        const present: number[] = [];
-        for (const userId of members ?? []) if (await isPerson(userId)) present.push(userId);
         if (present.length > 0)
           entries[group.index] = {
             kind: 'group',
@@ -249,11 +290,9 @@ export function peopleOf(
             ...(group.photoFileId === undefined ? {} : { photoFileId: group.photoFileId }),
             ...(group.photoPreview === undefined ? {} : { photoPreview: group.photoPreview }),
           };
+        partsArrived.delete(group.chatId);
         groupsRead++;
-        const seconds = (now() - groupsStarted) / 1000;
-        const estimable = groupsRead >= GROUPS_BEFORE_ESTIMATE && seconds >= SECONDS_BEFORE_ESTIMATE;
-        const secondsLeft = estimable ? Math.round((seconds / groupsRead) * (groups.length - groupsRead)) : null;
-        onProgress(groupsRead, groups.length, secondsLeft);
+        tell();
       };
       const waiting = [...groups];
       await Promise.all(

@@ -20,7 +20,7 @@ export const setup: VariantHandlers<AppState, 'setup', AppEvent, Context> = {
     if (chosen.friends && friends.kind !== 'found') return state;
     const packCount = chosen.stickers && packs.kind === 'read' ? packs.migration.selected.length : 0;
     const friendCount =
-      chosen.friends && friends.kind === 'found' ? contactsToAdd(friends.search, state.untickedFriends).length : 0;
+      chosen.friends && friends.kind === 'found' ? contactsToAdd(friends.search, state.tickedFriends).length : 0;
     if (packCount + friendCount === 0) return state;
     return {
       ...sessionOf(state),

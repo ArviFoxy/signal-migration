@@ -151,19 +151,19 @@ export class Workflow extends Runtime {
     return isSession(this.state) ? this.state.friends : { kind: 'none' };
   }
 
-  /** The Telegram user IDs of found friends the user unticked. */
-  get untickedFriends(): readonly number[] {
-    return isSession(this.state) ? this.state.untickedFriends : [];
+  /** The Telegram user IDs of found friends the user ticked. */
+  get tickedFriends(): readonly number[] {
+    return isSession(this.state) ? this.state.tickedFriends : [];
   }
 
   tickFriends(userIds: number[], ticked: boolean): void {
     this.dispatch({ type: 'tick-friends', userIds, ticked });
   }
 
-  /** How many friends are chosen to be added: found, not in Signal yet, and left ticked. */
+  /** How many friends are chosen to be added: found, not in Signal yet, and ticked. */
   get friendsToAdd(): number {
     const friends = this.friends;
-    return friends.kind === 'found' ? contactsToAdd(friends.search, this.untickedFriends).length : 0;
+    return friends.kind === 'found' ? contactsToAdd(friends.search, this.tickedFriends).length : 0;
   }
 
   /** How many friends the run has added to the Signal contacts, once it has; null before, and without a run. */

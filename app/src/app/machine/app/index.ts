@@ -85,6 +85,6 @@ export function recordOf(state: AppState): Record | null | undefined {
     signal,
     chosen: state.chosen,
     deselected,
-    untickedFriends: state.untickedFriends,
+    tickedFriends: state.tickedFriends,
   };
 }

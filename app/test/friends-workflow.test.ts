@@ -94,8 +94,8 @@ const contactNumbers = async (user: StickerUser) =>
   (await (await user.phone.storage()).readContacts()).contacts.map((contact) => contact.phoneNumber);
 
 describe('finding friends', () => {
-  // Detects: the flow not reaching its end without sticker packs, friends not being written, an unticked friend
-  // being added anyway, and the phone not being told.
+  // Detects: the flow not reaching its end without sticker packs, friends not being written, a friend the user
+  // did not tick being added anyway, and the phone not being told.
   it('adds the ticked friends to the Signal contacts when friends are all the user chose', async () => {
     const world = new StickerWorld();
     const alice = world.user([]);
@@ -104,8 +104,9 @@ describe('finding friends', () => {
     page.workflow.choose('friends', true);
     await connectAndLook(page);
     expect(page.workflow.friends.kind).toBe('found');
-    expect(page.workflow.friendsToAdd).toBe(2);
+    expect(page.workflow.friendsToAdd).toBe(0);
 
+    page.workflow.tickFriends([MARA.userId, AIKO.userId], true);
     page.workflow.tickFriends([AIKO.userId], false);
     expect(page.workflow.friendsToAdd).toBe(1);
     await migrate(page);
@@ -137,6 +138,7 @@ describe('finding friends', () => {
     const page = await openPage(alice, new Browser(), source().friendSource);
     page.workflow.choose('friends', true);
     await connectAndLook(page);
+    page.workflow.tickFriends([MARA.userId, AIKO.userId], true);
     await migrate(page);
 
     expect((await contactNumbers(alice)).sort()).toEqual([MARA.phoneNumber, AIKO.phoneNumber].sort());
@@ -172,11 +174,12 @@ describe('finding friends', () => {
 
     page.workflow.tryAgain();
     await until(() => page.workflow.friends.kind === 'found', 'the second search');
+    page.workflow.tickFriends([MARA.userId, AIKO.userId], true);
     expect(page.workflow.friendsToAdd).toBe(2);
   });
 
-  // Detects: a reload forgetting what the user chose to move or whom they unticked.
-  it('keeps the choice and the unticked friends over a reload', async () => {
+  // Detects: a reload forgetting what the user chose to move or whom they ticked.
+  it('keeps the choice and the ticked friends over a reload', async () => {
     const world = new StickerWorld();
     const alice = world.user([]);
     const browser = new Browser();
@@ -184,7 +187,7 @@ describe('finding friends', () => {
     first.workflow.choose('stickers', false);
     first.workflow.choose('friends', true);
     await connectAndLook(first);
-    first.workflow.tickFriends([AIKO.userId], false);
+    first.workflow.tickFriends([AIKO.userId], true);
     await first.workflow.settled();
     browser.closePage();
 

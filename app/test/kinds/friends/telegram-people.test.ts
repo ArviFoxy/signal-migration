@@ -3,7 +3,7 @@
 
 import type * as Td from 'tdlib-types';
 import { describe, expect, it } from 'vitest';
-import { GROUP_SIZE_LIMIT, peopleOf } from '../../../src/kinds/friends/telegram-people';
+import { GROUP_SIZE_LIMIT, peopleOf, type ReadingProgress } from '../../../src/kinds/friends/telegram-people';
 import { TelegramError } from '../../../src/telegram/client';
 
 type UserKind = 'userTypeRegular' | 'userTypeBot' | 'userTypeDeleted';
@@ -14,9 +14,11 @@ type FakeChat =
   | {
       supergroup: string;
       members: number[];
+      /** The size Telegram names, when it is not the number of members listed here. */
       memberCount?: number;
       hidden?: boolean;
       refused?: boolean;
+      /** The size TDLib knows without asking Telegram's servers. */
       knownSize?: number;
     }
   | { channel: string };
@@ -85,19 +87,20 @@ function account(
         const chat = chatAt(query.supergroup_id as number) as Extract<FakeChat, { supergroup: string }>;
         return { member_count: chat.knownSize ?? 0 };
       }
-      case 'getSupergroupFullInfo': {
+      case 'getSupergroupMembers': {
         const chat = chatAt(query.supergroup_id as number) as Extract<FakeChat, { supergroup: string }>;
         if (chat.refused) throw new TelegramError(400, 'CHANNEL_PRIVATE');
+        // Telegram refuses the member list of a group that hides its members.
+        if (chat.hidden) throw new TelegramError(400, 'CHAT_ADMIN_REQUIRED');
         if (tooFast) {
           tooFast = false;
           throw new TelegramError(429, 'Too Many Requests: retry after 0');
         }
-        return { member_count: chat.memberCount ?? chat.members.length, can_get_members: !chat.hidden };
-      }
-      case 'getSupergroupMembers': {
-        const chat = chatAt(query.supergroup_id as number) as Extract<FakeChat, { supergroup: string }>;
         const offset = query.offset as number;
-        return { members: chat.members.slice(offset, offset + (query.limit as number)).map(member) };
+        return {
+          total_count: chat.memberCount ?? chat.members.length,
+          members: chat.members.slice(offset, offset + (query.limit as number)).map(member),
+        };
       }
       default:
         throw new Error(`unexpected request ${query._}`);
@@ -184,9 +187,11 @@ describe('the people of a Telegram account', () => {
       { supergroup: 'Hidden', members: [2], hidden: true },
       { private: 6 },
     ]);
-    const { chats } = await source.readPeople(() => undefined);
+    const { chats, people } = await source.readPeople(() => undefined);
     expect(chats).toEqual([{ kind: 'person', userId: 6 }]);
-    expect(requests).not.toContain('getSupergroupMembers');
+    // The size of a group comes with the first of its members; they are not taken from a group that is too large.
+    expect([...people.keys()]).toEqual([6]);
+    expect(requests.filter((request) => request === 'getSupergroupMembers')).toHaveLength(2);
   });
 
   it('passes over a member the library holds no record of, and keeps the others', async () => {
@@ -207,7 +212,7 @@ describe('the people of a Telegram account', () => {
     });
     const { chats } = await source.readPeople(() => undefined);
     expect(chats).toEqual([{ kind: 'group', chatId: 100, title: 'Hiking crew', memberIds: [2, 6], memberCount: 2 }]);
-    expect(requests.filter((request) => request === 'getSupergroupFullInfo')).toHaveLength(2);
+    expect(requests.filter((request) => request === 'getSupergroupMembers')).toHaveLength(2);
   });
 
   it('does not ask the servers about a group that is already known to be too large', async () => {
@@ -217,7 +222,7 @@ describe('the people of a Telegram account', () => {
     ]);
     const { chats } = await source.readPeople(() => undefined);
     expect(chats).toEqual([{ kind: 'person', userId: 6 }]);
-    expect(requests).not.toContain('getSupergroupFullInfo');
+    expect(requests).not.toContain('getSupergroupMembers');
   });
 
   it('counts the groups it reads, and estimates the time left once several are read', async () => {
@@ -228,12 +233,13 @@ describe('the people of a Telegram account', () => {
       members: [2],
     }));
     const { source } = account(USERS, [{ private: 6 }, { private: 3 }, ...groups], { now: () => 1000 * seconds++ });
-    const reported: { done: number; secondsLeft: number | null }[] = [];
-    await source.readPeople((done, total, secondsLeft) => {
-      expect(total).toBe(8);
-      reported.push({ done, secondsLeft });
+    const reported: ReadingProgress[] = [];
+    await source.readPeople((progress) => {
+      expect(progress.groups).toBe(8);
+      reported.push(progress);
     });
-    expect(reported.map((progress) => progress.done)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(reported.map((progress) => progress.groupsRead)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
+    expect(reported.map((progress) => progress.share)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8].map((read) => read / 8));
     // No estimate before five groups are read; one for every group after that, ending at nothing left.
     expect(reported.slice(0, 5).map((progress) => progress.secondsLeft)).toEqual([null, null, null, null, null]);
     for (const progress of reported.slice(5)) expect(progress.secondsLeft).toBeGreaterThanOrEqual(0);
@@ -261,5 +267,21 @@ describe('the people of a Telegram account', () => {
       { kind: 'group', chatId: 100, title: 'Big', memberIds: members, memberCount: members.length },
     ]);
     expect(requests.filter((request) => request === 'getSupergroupMembers')).toHaveLength(3);
+  });
+
+  // Detects: a display that stands still while a large group is read, and a count of people that jumps at its end.
+  it('reports each answer about a large group: the part of it that arrived and the people read so far', async () => {
+    const members = Array.from({ length: 450 }, (_, index) => 1000 + index);
+    const users = Object.fromEntries(members.map((id) => [id, { name: ['Member', String(id)] } as FakeUser]));
+    const { source } = account({ ...USERS, ...users }, [{ private: 2 }, { supergroup: 'Big', members }]);
+    const reported: ReadingProgress[] = [];
+    await source.readPeople((progress) => reported.push(progress));
+    expect(reported.map((progress) => [progress.groupsRead, progress.people])).toEqual([
+      [0, 1],
+      [0, 201],
+      [0, 401],
+      [1, 451],
+    ]);
+    expect(reported.map((progress) => progress.share)).toEqual([0, 200 / 450, 400 / 450, 1]);
   });
 });

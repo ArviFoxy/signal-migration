@@ -36,14 +36,14 @@ const withoutError = <S extends { error?: string | null }>(state: S): S =>
 
 /** Passes `event` to the session's machines; each ignores the events that are not its own. */
 export function toMachines<S extends SessionState>(state: S, event: AppEvent, context: Context): S {
-  let { telegram, signal, packs, friends, untickedFriends } = state;
+  let { telegram, signal, packs, friends, tickedFriends } = state;
   if (isTelegramEvent(event)) telegram = telegramTransition(telegram, event, context);
   if (isSignalEvent(event)) signal = signalTransition(signal, event, context);
   if (isPacksEvent(event)) packs = packsTransition(packs, event, context);
   if (isFriendsEvent(event)) friends = friendsTransition(friends, event, context);
   if (event.type === 'tick-friends') {
-    const others = untickedFriends.filter((userId) => !event.userIds.includes(userId));
-    untickedFriends = event.ticked ? others : [...others, ...event.userIds];
+    const others = tickedFriends.filter((userId) => !event.userIds.includes(userId));
+    tickedFriends = event.ticked ? [...others, ...event.userIds] : others;
   }
   if (event.type === 'dismiss') {
     // Errors that offer nothing to do; a stopped login keeps its error, which goes with "Try again".
@@ -59,9 +59,9 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
     signal === state.signal &&
     packs === state.packs &&
     friends === state.friends &&
-    untickedFriends === state.untickedFriends &&
+    tickedFriends === state.tickedFriends &&
     notice === state.notice;
-  return same ? state : { ...state, telegram, signal, packs, friends, untickedFriends, notice };
+  return same ? state : { ...state, telegram, signal, packs, friends, tickedFriends, notice };
 }
 
 export { sessionOf };
@@ -157,7 +157,7 @@ export function beginEnding(state: SessionState, reason: EndReason, context: Con
     packs: cleared ? { kind: 'none' } : state.packs,
     deselected: cleared ? [] : state.deselected,
     friends: cleared ? { kind: 'none' } : state.friends,
-    untickedFriends: cleared ? [] : state.untickedFriends,
+    tickedFriends: cleared ? [] : state.tickedFriends,
     notice: state.notice,
   };
 }
@@ -176,7 +176,7 @@ export function freshSession(state: Session): Session {
     packs: { kind: 'none' },
     deselected: [],
     friends: { kind: 'none' },
-    untickedFriends: [],
+    tickedFriends: [],
     notice: state.notice,
   };
 }

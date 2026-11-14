@@ -19,12 +19,12 @@ export type Record = {
   chosen: Chosen;
   /** Telegram sticker set IDs the user deselected. */
   deselected: string[];
-  /** Telegram user IDs of found friends the user unticked. */
-  untickedFriends: number[];
+  /** Telegram user IDs of found friends the user ticked. */
+  tickedFriends: number[];
 };
 
 /** The records of earlier versions, which a reload still continues from. Sticker packs were all they moved. */
-type RecordVersion3 = Omit<Record, 'version' | 'chosen' | 'untickedFriends'> & { version: 3 };
+type RecordVersion3 = Omit<Record, 'version' | 'chosen' | 'tickedFriends'> & { version: 3 };
 
 type RecordVersion2 = {
   version: 2;
@@ -39,7 +39,7 @@ type RecordVersion2 = {
 export function readRecord(value: unknown): Record | null {
   const record = value as Record | RecordVersion3 | RecordVersion2 | null;
   if (!record || typeof record !== 'object' || !SETUP_STEPS.includes(record.step)) return null;
-  const stickersOnly = { chosen: { stickers: true, friends: false }, untickedFriends: [] };
+  const stickersOnly = { chosen: { stickers: true, friends: false }, tickedFriends: [] };
   if (record.version === 4 && ['setup', 'migrating', 'ending'].includes(record.phase)) return record;
   if (record.version === 3 && ['setup', 'migrating', 'ending'].includes(record.phase))
     return { ...record, version: 4, ...stickersOnly };

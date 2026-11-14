@@ -7,7 +7,7 @@
 import type { DiscoveredAccount } from '../../signal/contact-discovery';
 import type { KnownAccount, NewContact, StoredContact } from '../../signal/storage';
 import type { SignalAccount } from '../../signal/transport';
-import { type ChatEntry, nameOf, type PeopleSource, type Person } from './telegram-people';
+import { type ChatEntry, nameOf, type PeopleSource, type Person, type ReadingProgress } from './telegram-people';
 
 /** The identifiers of a Signal account, as far as a source learned them. */
 export type SignalIdentifiers = StoredContact;
@@ -65,9 +65,7 @@ export type FriendSearch = {
 };
 
 /** How far a search is: reading the chats of the Telegram account, or asking Signal about the phone numbers found. */
-export type SearchProgress =
-  | { part: 'telegram'; done: number; total: number; secondsLeft: number | null }
-  | { part: 'signal'; phoneNumbers: number };
+export type SearchProgress = ({ part: 'telegram' } & ReadingProgress) | { part: 'signal'; phoneNumbers: number };
 
 /** Whether two sets of identifiers name the same account. */
 const sameAccount = (one: SignalIdentifiers, other: SignalIdentifiers) =>
@@ -92,9 +90,7 @@ export async function findFriends(
   sources: FriendSource[],
   onProgress: (progress: SearchProgress) => void,
 ): Promise<FriendSearch> {
-  const telegram = await people.readPeople((done, total, secondsLeft) =>
-    onProgress({ part: 'telegram', done, total, secondsLeft }),
-  );
+  const telegram = await people.readPeople((progress) => onProgress({ part: 'telegram', ...progress }));
   const everyone = [...telegram.people.values()];
   onProgress({ part: 'signal', phoneNumbers: everyone.filter((person) => person.phoneNumber !== null).length });
   const { contacts: inSignal, knownAccounts } = await (await account.storage()).readContacts();
@@ -122,10 +118,10 @@ export async function findFriends(
   return { chats, found, contacts, looked: everyone.length };
 }
 
-/** The contacts to add: everyone found who is not in Signal yet and whom the user left ticked. */
-export function contactsToAdd(search: FriendSearch, unticked: readonly number[]): NewContact[] {
+/** The contacts to add: everyone found who is not in Signal yet and whom the user ticked. */
+export function contactsToAdd(search: FriendSearch, ticked: readonly number[]): NewContact[] {
   return [...search.found.values()]
-    .filter((friend) => !friend.inSignal && !unticked.includes(friend.person.userId))
+    .filter((friend) => !friend.inSignal && ticked.includes(friend.person.userId))
     .map((friend) => ({
       ...friend.signal,
       nickname: { given: friend.person.givenName, family: friend.person.familyName },

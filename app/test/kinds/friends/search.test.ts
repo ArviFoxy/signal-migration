@@ -132,16 +132,16 @@ describe('the friend search', () => {
     const reading: PeopleSource = {
       readPhoto: () => Promise.reject(new Error('no pictures here')),
       readPeople(onProgress) {
-        onProgress(1, 2, null);
-        onProgress(2, 2, 40);
+        onProgress({ groupsRead: 1, groups: 2, share: 0.5, people: 3, secondsLeft: null });
+        onProgress({ groupsRead: 2, groups: 2, share: 1, people: 3, secondsLeft: 40 });
         return telegram(chats, [MARA, JONAS, AIKO]).readPeople(onProgress);
       },
     };
     const reported: unknown[] = [];
     await findFriends(reading, account, [finding({})], (progress) => reported.push(progress));
     expect(reported).toEqual([
-      { part: 'telegram', done: 1, total: 2, secondsLeft: null },
-      { part: 'telegram', done: 2, total: 2, secondsLeft: 40 },
+      { part: 'telegram', groupsRead: 1, groups: 2, share: 0.5, people: 3, secondsLeft: null },
+      { part: 'telegram', groupsRead: 2, groups: 2, share: 1, people: 3, secondsLeft: 40 },
       { part: 'signal', phoneNumbers: 2 },
     ]);
   });
@@ -218,9 +218,10 @@ describe('adding the chosen friends to Signal', () => {
       () => undefined,
     );
 
-  it('leaves out the people the user unticked, and names each contact as on Telegram', async () => {
+  it('adds only the people the user ticked, and names each contact as on Telegram', async () => {
     const world = new World();
-    const contacts = contactsToAdd(await search(new User(world)), [AIKO.userId]);
+    expect(contactsToAdd(await search(new User(world)), [])).toEqual([]);
+    const contacts = contactsToAdd(await search(new User(world)), [MARA.userId]);
     expect(contacts).toEqual([
       {
         accountId: null,
@@ -235,7 +236,7 @@ describe('adding the chosen friends to Signal', () => {
     const world = new World();
     const user = new User(world);
     const account = user.linkDevice();
-    expect(await addContacts(account, contactsToAdd(await search(user), []))).toBe(2);
+    expect(await addContacts(account, contactsToAdd(await search(user), [MARA.userId, AIKO.userId]))).toBe(2);
 
     const { contacts } = await (await user.phone.storage()).readContacts();
     expect(contacts.map((contact) => contact.phoneNumber)).toEqual([MARA.phoneNumber, AIKO.phoneNumber]);
@@ -246,7 +247,7 @@ describe('adding the chosen friends to Signal', () => {
     const world = new World();
     const user = new User(world);
     const account = user.linkDevice();
-    const contacts = contactsToAdd(await search(user), []);
+    const contacts = contactsToAdd(await search(user), [MARA.userId, AIKO.userId]);
     await addContacts(account, contacts);
     expect(await addContacts(account, contacts)).toBe(0);
 
@@ -258,7 +259,7 @@ describe('adding the chosen friends to Signal', () => {
     const world = new World();
     const user = new User(world);
     const account = user.linkDevice();
-    const contacts = contactsToAdd(await search(user), []);
+    const contacts = contactsToAdd(await search(user), [MARA.userId, AIKO.userId]);
     const manifest = (await (await user.phone.storage()).readContacts()).manifest;
     world.signal.beforeNextStorageWrite(() =>
       user.phone.writeRecords(manifest, [], [signalContact({ pni: id(2), e164: MARA.phoneNumber! })]),

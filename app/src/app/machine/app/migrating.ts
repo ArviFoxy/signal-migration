@@ -47,7 +47,7 @@ export function migratingWork(state: Migrating): Work[] {
     work.push({
       kind: 'add-friends',
       key: `add-friends:${run.attempt}`,
-      contacts: contactsToAdd(friends.search, state.untickedFriends),
+      contacts: contactsToAdd(friends.search, state.tickedFriends),
       device,
     });
   if (chosen.stickers && run.status === 'running' && packs.kind === 'read' && packs.signalRead === device.deviceId)

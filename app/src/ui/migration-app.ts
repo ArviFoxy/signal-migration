@@ -361,7 +361,7 @@ export class MigrationApp extends LightElement {
         return html`<friends-step
           class="contents"
           .friends=${w.friends}
-          .unticked=${w.untickedFriends}
+          .ticked=${w.tickedFriends}
           .position=${position}
           @tick=${(event: CustomEvent<{ userIds: number[]; ticked: boolean }>) =>
             w.tickFriends(event.detail.userIds, event.detail.ticked)}
