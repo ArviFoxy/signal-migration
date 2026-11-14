@@ -1,10 +1,13 @@
 // The app's state machine as the views use it: the runtime (machine/runtime.ts) with what the views read from the
 // state, and the user's actions as events. Nothing here holds state of its own.
 
+import { contactsToAdd } from '../kinds/friends/search';
 import type { PackEntry, StickerMigration } from '../kinds/stickers/migration';
 import { DEFAULT_DEVICE_NAME } from '../signal/device-name';
 import {
   type AppState,
+  type Chosen,
+  INITIAL_CHOICE,
   isSession,
   linkedDevice,
   type SetupStep,
@@ -14,12 +17,14 @@ import {
   stepOf,
 } from './machine/app';
 import type { Context } from './machine/core';
+import type { FriendsState } from './machine/friends';
 import { Runtime } from './machine/runtime';
 import { initialSignal, type SignalState } from './machine/signal';
 import { initialTelegram, type LoginMethod, type LoginQuery, type TelegramState } from './machine/telegram';
 import type { AppServices, StoredDevice } from './services';
 
-export { STEPS, type SetupStep, type Step } from './machine/app';
+export { type Chosen, STEPS, type SetupStep, type Step, stepIncluded } from './machine/app';
+export type { FriendsState };
 export type { AppState };
 
 /** The Telegram login as the Telegram step shows it. */
@@ -123,8 +128,49 @@ export class Workflow extends Runtime {
     const state = this.state;
     if (state.kind !== 'setup' || step === 'migrate') return step === this.step;
     return (
-      setupStepShown(step, signedInInstance(state.telegram) !== null, linkedDevice(state.signal) !== null) === step
+      setupStepShown(
+        step,
+        signedInInstance(state.telegram) !== null,
+        linkedDevice(state.signal) !== null,
+        state.chosen,
+      ) === step
     );
+  }
+
+  /** What the user chose to move. */
+  get chosen(): Chosen {
+    return isSession(this.state) ? this.state.chosen : INITIAL_CHOICE;
+  }
+
+  choose(what: keyof Chosen, chosen: boolean): void {
+    this.dispatch({ type: 'choose', what, chosen });
+  }
+
+  /** The search for friends: none while friends are not chosen or an account is not connected. */
+  get friends(): FriendsState {
+    return isSession(this.state) ? this.state.friends : { kind: 'none' };
+  }
+
+  /** The Telegram user IDs of found friends the user ticked. */
+  get tickedFriends(): readonly number[] {
+    return isSession(this.state) ? this.state.tickedFriends : [];
+  }
+
+  tickFriends(userIds: number[], ticked: boolean): void {
+    this.dispatch({ type: 'tick-friends', userIds, ticked });
+  }
+
+  /** How many friends are chosen to be added: found, not in Signal yet, and ticked. */
+  get friendsToAdd(): number {
+    const friends = this.friends;
+    return friends.kind === 'found' ? contactsToAdd(friends.search, this.tickedFriends).length : 0;
+  }
+
+  /** How many friends the run has added to the Signal contacts, once it has; null before, and without a run. */
+  get friendsAdded(): number | null {
+    const state = this.state;
+    if (state.kind === 'migrating') return state.run.friendsAdded;
+    return state.kind === 'done' && state.chosen.friends ? this.friendsToAdd : null;
   }
 
   /** The pack list, once read. */
@@ -141,10 +187,22 @@ export class Workflow extends Runtime {
     return device === null || state.packs.signalRead === device.deviceId;
   }
 
+  /** Each kind the user chose is ready for the migration: the packs are read, the friends are looked for. */
+  get ready(): boolean {
+    const chosen = this.chosen;
+    return (!chosen.stickers || this.packsReady) && (!chosen.friends || this.friends.kind === 'found');
+  }
+
+  /** The run stopped with an error. */
+  get runFailed(): boolean {
+    return this.state.kind === 'migrating' && this.state.run.status === 'failed';
+  }
+
   /** The newest failure of background work: reading the packs or Signal's packs, the run. */
   get error(): string | null {
     const state = this.state;
     if (!isSession(state)) return null;
+    if (state.friends.kind === 'failed') return state.friends.error;
     if (state.packs.kind === 'failed') return state.packs.error;
     if (state.packs.kind === 'read' && state.packs.signalError) return state.packs.signalError;
     if (state.kind === 'migrating' && state.run.error) return state.run.error;
@@ -193,6 +251,7 @@ export class Workflow extends Runtime {
       this.dispatch({ type: 'run/retry' });
     } else {
       this.dispatch({ type: 'packs/try-again' });
+      this.dispatch({ type: 'friends/try-again' });
     }
   }
 

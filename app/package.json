@@ -6,13 +6,15 @@
   "scripts": {
     "generate": "buf generate && tdl-install-types -o src/gen/tdlib-types.d.ts ../third_party/td/td/generate/scheme/td_api.tl",
     "build:wasm": "cd ../crates/signal-wasm && cargo build --release && wasm-bindgen --target web --out-dir ../../app/src/wasm target/wasm32-unknown-unknown/release/signal_migration_wasm.wasm && cd ../../app && wasm-opt -Oz --strip-debug --strip-producers src/wasm/signal_migration_wasm_bg.wasm -o src/wasm/signal_migration_wasm_bg.wasm",
-    "build": "npm run generate && npm run build:wasm && node build.mjs",
+    "build:attestation": "../scripts/build-attestation-wasm.sh",
+    "build": "npm run generate && npm run build:wasm && npm run build:attestation && node build.mjs",
     "screens": "node build.mjs --fixtures && node fixtures/screens.mjs",
-    "check": "npm run generate && npm run build:wasm && tsc --noEmit",
+    "check": "npm run generate && npm run build:wasm && npm run build:attestation && tsc --noEmit",
     "test": "npm run generate && vitest run",
+    "test:attestation": "../scripts/test-attestation-wasm.sh",
     "test:integration": "vitest run --config vitest.integration.config.ts",
-    "format": "prettier --write . && (cd ../crates/server && cargo fmt) && (cd ../crates/signal-wasm && cargo fmt)",
-    "format:check": "prettier --check . && (cd ../crates/server && cargo fmt --check) && (cd ../crates/signal-wasm && cargo fmt --check)",
+    "format": "prettier --write . && (cd ../crates/server && cargo fmt) && (cd ../crates/signal-wasm && cargo fmt) && (cd ../crates/attestation-wasm && cargo fmt)",
+    "format:check": "prettier --check . && (cd ../crates/server && cargo fmt --check) && (cd ../crates/signal-wasm && cargo fmt --check) && (cd ../crates/attestation-wasm && cargo fmt --check)",
     "prepare": "if git rev-parse --git-dir >/dev/null 2>&1; then git config core.hooksPath .githooks; fi"
   },
   "dependencies": {

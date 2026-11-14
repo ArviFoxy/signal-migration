@@ -94,6 +94,10 @@ export class SignalConnection implements SignalAccount {
     });
   }
 
+  announceStorageChange(): Promise<void> {
+    return this.announceStickerPacks([]);
+  }
+
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device, or `cancel`. */
   static async link(
     showQrCode: (url: string) => void,

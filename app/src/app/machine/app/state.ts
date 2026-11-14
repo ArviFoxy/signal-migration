@@ -8,24 +8,39 @@
 //
 // "Disconnect and clear" ends the same way as the migration's end, and then goes back to the start.
 
+import type { FriendsState } from '../friends/state';
 import type { PacksState } from '../packs/state';
 import type { Record } from '../record';
 import type { SignalState } from '../signal/state';
 import type { TelegramState } from '../telegram/state';
-import type { SetupStep } from './steps';
+import type { Chosen, SetupStep } from './steps';
 
 export type Session = {
   telegram: TelegramState;
   signal: SignalState;
+  /** What the user chose to move. */
+  chosen: Chosen;
   packs: PacksState;
   /** Telegram sticker set IDs the user deselected, kept for when the packs are read again. */
   deselected: string[];
+  friends: FriendsState;
+  /** Telegram user IDs of found friends the user ticked, kept for when the friends are looked for again. */
+  tickedFriends: number[];
   /** Something the user should know, until dismissed: TDLib was restarted, the record could not be written. */
   notice: string | null;
 };
 
-/** The migration run; `attempt` counts the runs, so that each is new work. `error`: why the last one stopped. */
-export type Run = { attempt: number; status: 'running' | 'ended' | 'failed'; error: string | null };
+/**
+ * The migration run; `attempt` counts the runs, so that each is new work. `status` is that of the sticker packs' run.
+ * `friendsAdded`: how many friends were added to the Signal contacts, once that is done. `error`: why the last run
+ * stopped.
+ */
+export type Run = {
+  attempt: number;
+  status: 'running' | 'ended' | 'failed';
+  friendsAdded: number | null;
+  error: string | null;
+};
 
 /** Why the migration ends: it finished, or the user asked to disconnect and clear. */
 export type EndReason = 'finish' | 'clear';
@@ -56,7 +71,10 @@ export const isSession = (state: AppState): state is SessionState => 'telegram' 
 export const sessionOf = (state: SessionState): Session => ({
   telegram: state.telegram,
   signal: state.signal,
+  chosen: state.chosen,
   packs: state.packs,
   deselected: state.deselected,
+  friends: state.friends,
+  tickedFriends: state.tickedFriends,
   notice: state.notice,
 });

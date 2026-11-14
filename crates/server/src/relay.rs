@@ -27,6 +27,8 @@ impl RelayTargets {
             "cdn.signal.org",
             "cdn2.signal.org",
             "cdn3.signal.org",
+            // Contact discovery: finding the Signal accounts of phone numbers.
+            "cdsi.signal.org",
         ];
         Self(Arc::new(
             hosts.iter().map(|h| (h.to_string(), format!("{h}:443"))).collect(),

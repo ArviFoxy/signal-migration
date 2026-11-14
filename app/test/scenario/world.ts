@@ -46,6 +46,10 @@ export class SimulatedAccount implements SignalAccount {
   async announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void> {
     this.signal.deliverToOtherDevices(this.aci, this.deviceId, packs);
   }
+
+  async announceStorageChange(): Promise<void> {
+    this.signal.deliverToOtherDevices(this.aci, this.deviceId, []);
+  }
 }
 
 /** The user's primary device (device 1), which reads and changes the account as Signal on a phone does. */

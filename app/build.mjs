@@ -55,6 +55,7 @@ if (fixtures) {
 }
 fs.copyFileSync('public/index.html', `${outdir}/index.html`);
 fs.copyFileSync('src/wasm/signal_migration_wasm_bg.wasm', `${outdir}/signal_migration_wasm_bg.wasm`);
+fs.copyFileSync('src/wasm/attestation_wasm_bg.wasm', `${outdir}/attestation_wasm_bg.wasm`);
 fs.copyFileSync(path.join(webmDecoder, 'webm-decoder.wasm'), `${outdir}/webm-decoder.wasm`);
 for (const file of fs.readdirSync(tdwebDist)) {
   if (file !== 'tdweb.js') fs.copyFileSync(path.join(tdwebDist, file), path.join(outdir, file));

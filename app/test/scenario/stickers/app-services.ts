@@ -13,6 +13,8 @@
 // The Telegram server side (which sessions are active) and the Signal account outlive pages; the browser's storage
 // (Browser) outlives a reload.
 
+import type { FriendSource } from '../../../src/kinds/friends/search';
+import type { PeopleSource } from '../../../src/kinds/friends/telegram-people';
 import type * as Td from 'tdlib-types';
 import type {
   AppServices,
@@ -98,6 +100,10 @@ export function appServices(
     loadFailures?: number;
     /** Writing the record to the browser fails. */
     saveFails?: boolean;
+    /** The people of the Telegram account; none when left out. */
+    people?: PeopleSource;
+    /** The ways of finding Signal accounts; none when left out. */
+    friendSources?: FriendSource[];
   } = {},
 ) {
   const { world } = user;
@@ -221,6 +227,10 @@ export function appServices(
           return { _: 'ok' };
         }) as unknown as Td.Invoke,
         source: user.stickers,
+        people: options.people ?? {
+          readPeople: () => Promise.resolve({ chats: [], people: new Map(), contactIds: [] }),
+          readPhoto: () => Promise.reject(new Error('the simulated account has no pictures')),
+        },
         async checkpoint() {
           if (browser.instances.has(instance)) browser.instances.set(instance, { ...live });
         },
@@ -267,6 +277,7 @@ export function appServices(
       withChat: (action) => account.withChat(action),
       storage: () => account.storage(),
       announceStickerPacks: (packs) => account.announceStickerPacks(packs),
+      announceStorageChange: () => account.announceStorageChange(),
       async unlink() {
         if (options.unlinkNever) await new Promise(() => undefined);
         if (world.signal.failUnlinks > 0) {
@@ -283,6 +294,7 @@ export function appServices(
 
   const services: AppServices = {
     telegram,
+    friends: { sources: () => options.friendSources ?? [] },
     signal: {
       async link(showQrCode, _deviceName, cancel) {
         showQrCode('sgnl://linkdevice?uuid=simulated');

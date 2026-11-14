@@ -13,12 +13,25 @@ const COLLAPSED_ROWS = 6;
 export class StickerReviewStep extends MigrationView {
   /** The packs are read from Telegram, the index and Signal. */
   @property({ attribute: false }) ready = false;
+  /** Whether sticker packs are among what the user chose to move. */
+  @property({ attribute: false }) stickers = true;
+  /** How many friends will be added to the Signal contacts; null when the user did not choose friends. */
+  @property({ attribute: false }) friends: number | null = null;
   @state() private showAll = false;
 
   render() {
-    if (!this.migration) return stepHeader(5, 'Review', 'Reading your packs…');
-    const selected = this.migration.selected;
+    if (this.stickers && !this.migration) return stepHeader(this.position, 'Review', 'Reading your packs…');
+    const selected = this.migration?.selected ?? [];
+    const friends = this.friends;
     const inSignal = selected.filter((entry) => entry.state === 'in-signal').length;
+    const summary = [
+      ...(this.stickers
+        ? [
+            `${selected.length} sticker pack${selected.length === 1 ? '' : 's'} selected${inSignal > 0 ? `, ${inSignal} already in your Signal` : ''}`,
+          ]
+        : []),
+      ...(friends === null ? [] : [`${friends} friend${friends === 1 ? '' : 's'} to add to your Signal contacts`]),
+    ];
     const install = selected.filter((entry) => entry.state === 'available').length;
     const toUpload = selected.filter((entry) => entry.state !== 'in-signal' && entry.state !== 'available');
     const wait = estimatedUploadWaitMs(toUpload.length);
@@ -35,22 +48,23 @@ export class StickerReviewStep extends MigrationView {
         <span class="font-display text-4xl font-semibold">${value}</span>
         <span class="text-sm text-muted">${detail}</span>
       </li>`;
-    return html`${stepHeader(
-        5,
-        'Review',
-        `${selected.length} sticker pack${selected.length === 1 ? '' : 's'} selected${inSignal > 0 ? `, ${inSignal} already in your Signal` : ''}.`,
-      )}
+    return html`${stepHeader(this.position, 'Review', `${summary.join('. ')}.`)}
       <ul class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3.5">
-        ${card('bg-accent-soft [&>span:first-child]:text-accent', 'Verify and install', String(install), 'packs someone else uploaded')}
-        ${card('bg-upload-soft [&>span:first-child]:text-upload-text', 'Upload', String(toUpload.length), 'packs new to Signal')}
-        ${card(
-          'bg-panel ring-1 ring-line ring-inset [&>span:first-child]:text-muted',
-          'Waiting for Signal',
-          wait === 0 ? 'None' : `≈ ${formatDuration(wait)}`,
-          `${UPLOAD_BURST} uploads at once, then 1 per ${UPLOAD_INTERVAL_MS / 60_000} min`,
-        )}
+        ${friends === null ? nothing : card('bg-accent-soft [&>span:first-child]:text-accent', 'Add to your contacts', String(friends), 'friends found on Signal')}
+        ${
+          !this.stickers
+            ? nothing
+            : html` ${card('bg-accent-soft [&>span:first-child]:text-accent', 'Verify and install', String(install), 'packs someone else uploaded')}
+              ${card('bg-upload-soft [&>span:first-child]:text-upload-text', 'Upload', String(toUpload.length), 'packs new to Signal')}
+              ${card(
+                'bg-panel ring-1 ring-line ring-inset [&>span:first-child]:text-muted',
+                'Waiting for Signal',
+                wait === 0 ? 'None' : `≈ ${formatDuration(wait)}`,
+                `${UPLOAD_BURST} uploads at once, then 1 per ${UPLOAD_INTERVAL_MS / 60_000} min`,
+              )}`
+        }
       </ul>
-      <p class="text-sm text-muted">
+      <p class="text-sm text-muted" ?hidden=${!this.stickers}>
         New packs go into your Signal sticker list in your Telegram order. Packs already in Signal keep their place.
         Keep this tab open while it uploads. After a reload, it continues where it stopped.
       </p>
@@ -88,7 +102,7 @@ export class StickerReviewStep extends MigrationView {
           <button
             type="button"
             class=${primaryButton}
-            ?disabled=${!this.ready || install + toUpload.length === 0}
+            ?disabled=${!this.ready || install + toUpload.length + (friends ?? 0) === 0}
             @click=${() => this.emit('start')}
           >
             Start migration

@@ -4,6 +4,7 @@
 // (src/styles.css) styles all of them.
 
 import { html, LitElement, nothing, svg, type TemplateResult } from 'lit';
+import { type Chosen, type Step, stepIncluded, STEPS } from '../app/workflow';
 
 export class LightElement extends LitElement {
   protected createRenderRoot(): HTMLElement {
@@ -15,16 +16,35 @@ export class LightElement extends LitElement {
   }
 }
 
-export const STEP_LABELS = [
-  'What to move',
-  'Telegram login',
-  'Signal login',
-  'Select sticker packs',
-  'Review',
-  'Migrate',
-  // Not a screen of its own: the migration screen's final state, once both logins are ended.
-  'Done and logged out',
+/** The name of each step in the step list. */
+export const STEP_LABEL: Record<Step, string> = {
+  start: 'What to move',
+  telegram: 'Telegram login',
+  signal: 'Signal login',
+  packs: 'Select sticker packs',
+  friends: 'Select friends',
+  review: 'Review',
+  migrate: 'Migrate',
+};
+/** The last entry of the step list. Not a screen of its own: the migration screen's final state, once both logins are ended. */
+export const DONE_LABEL = 'Done and logged out';
+
+/** The steps of the wizard for what the user chose to move. */
+export const stepsFor = (chosen: Chosen): Step[] => STEPS.filter((step) => stepIncluded(step, chosen));
+
+/** The entries of the step list: one per step, and the final state. */
+export const stepLabels = (chosen: Chosen): string[] => [
+  ...stepsFor(chosen).map((step) => STEP_LABEL[step]),
+  DONE_LABEL,
 ];
+
+/** Where a step stands in the step list: its number from 1, and how many entries the list has. */
+export type StepPosition = { number: number; of: number };
+
+export function stepPosition(step: Step | 'done', chosen: Chosen): StepPosition {
+  const steps = stepsFor(chosen);
+  return { number: step === 'done' ? steps.length + 1 : steps.indexOf(step) + 1, of: steps.length + 1 };
+}
 
 export const primaryButton =
   'inline-flex min-h-11 cursor-pointer items-center justify-center rounded-[10px] bg-accent px-6 text-[15px] font-semibold text-white hover:bg-accent-strong disabled:cursor-default disabled:opacity-50';
@@ -32,10 +52,14 @@ export const secondaryButton =
   'inline-flex min-h-11 cursor-pointer items-center justify-center rounded-[10px] bg-white px-[22px] text-[15px] font-semibold text-ink ring-1 ring-line-strong ring-inset hover:bg-panel disabled:cursor-default disabled:opacity-50';
 export const linkButton = 'cursor-pointer text-sm font-medium text-accent underline hover:text-accent-strong';
 
-/** The eyebrow, title and description at the top of a step. `step` is 1-based; null for the final screen. */
-export function stepHeader(step: number | null, title: string, description: string | TemplateResult): TemplateResult {
+/** The eyebrow, title and description at the top of a step. `position` is null for a screen outside the step list. */
+export function stepHeader(
+  position: StepPosition | null,
+  title: string,
+  description: string | TemplateResult,
+): TemplateResult {
   return html`<header class="flex flex-col gap-2">
-    ${step === null ? nothing : html`<p class="text-[13px] font-semibold tracking-[0.04em] text-accent uppercase">Step ${step} of ${STEP_LABELS.length}</p>`}
+    ${position === null ? nothing : html`<p class="text-[13px] font-semibold tracking-[0.04em] text-accent uppercase">Step ${position.number} of ${position.of}</p>`}
     <h1 class="font-display text-[34px] font-semibold tracking-[-0.01em]">${title}</h1>
     <p class="text-base text-muted">${description}</p>
   </header>`;
@@ -78,6 +102,7 @@ const icon = (paths: TemplateResult, size = 22, colour = 'currentColor', strokeW
   </svg>`;
 
 export const icons = {
+  chevronDown: () => icon(svg`<path d="M6 9l6 6 6-6"></path>`, 18, 'currentColor', 2),
   check: (size = 14) => icon(svg`<path d="M5 12l5 5L20 7"></path>`, size, 'currentColor', 3),
   computer: (size = 22) =>
     icon(svg`<rect x="4" y="5" width="16" height="11" rx="2"></rect><path d="M2 19h20"></path>`, size, '#1B1B1F'),
