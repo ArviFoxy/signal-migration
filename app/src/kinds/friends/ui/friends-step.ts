@@ -69,6 +69,8 @@ export class FriendsStep extends LightElement {
   @state() private open: number | null = null;
   @state() private search = '';
   @state() private view: View = 'chats';
+  /** Which list is shown: the chats, or the Telegram contact list. */
+  @state() private list: 'chats' | 'contacts' = 'chats';
 
   private tick(userIds: number[], ticked: boolean): void {
     this.emit('tick', { userIds, ticked });
@@ -190,6 +192,36 @@ export class FriendsStep extends LightElement {
     </li>`;
   }
 
+  /** A row of buttons of which one is chosen. The contact list has no groups, so its second row is switched off. */
+  private choice<T extends string>(
+    label: string,
+    options: { id: T; label: string }[],
+    chosen: T,
+    choose: (id: T) => void,
+    disabled = false,
+  ) {
+    return html`<div
+      role="group"
+      aria-label=${label}
+      class="inline-flex gap-1 rounded-[10px] bg-segment p-1 ${disabled ? 'opacity-50' : ''}"
+    >
+      ${options.map(
+        (option) =>
+          html`<button
+            type="button"
+            aria-pressed=${option.id === chosen}
+            ?disabled=${disabled}
+            class="min-h-9 rounded-lg px-3 text-[13px] font-medium ${disabled ? '' : 'cursor-pointer'} ${
+              option.id === chosen ? 'bg-white text-ink shadow-[0_1px_2px_rgba(20,20,30,0.12)]' : 'text-muted'
+            }"
+            @click=${() => choose(option.id)}
+          >
+            ${option.label}
+          </button>`,
+      )}
+    </div>`;
+  }
+
   /** The search while it runs: which of its two parts, and how far it is. */
   private looking(friends: Extract<FriendsState, { kind: 'none' | 'looking' }>) {
     const progress = friends.kind === 'looking' ? friends.progress : null;
@@ -280,29 +312,34 @@ export class FriendsStep extends LightElement {
     if (everyone.length === 0) {
       return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
         <p class="text-sm text-muted">
-          None of the ${people(search.looked)} in your Telegram chats was found on Signal.
+          None of the ${people(search.looked)} in your Telegram chats and contacts was found on Signal.
         </p>
         ${this.footer(next)}`;
     }
 
     const origins = this.origins(search);
     const rows =
-      this.view === 'people'
-        ? this.peopleInOrder(search)
+      this.list === 'contacts'
+        ? search.contacts
+            .map((userId) => search.found.get(userId)!)
             .filter((friend) => matches(nameOf(friend.person)))
-            .map((friend) => this.personRow(friends, friend, origins.get(friend.person.userId) ?? ''))
-        : search.chats
-            .filter((chat) =>
-              chat.kind === 'person'
-                ? matches(nameOf(search.found.get(chat.userId)!.person))
-                : matches(chat.title) ||
-                  chat.memberIds.some((userId) => matches(nameOf(search.found.get(userId)!.person))),
-            )
-            .map((chat) =>
-              chat.kind === 'person'
-                ? this.personRow(friends, search.found.get(chat.userId)!, 'Direct chat')
-                : this.groupRow(friends, chat),
-            );
+            .map((friend) => this.personRow(friends, friend, origins.get(friend.person.userId) || 'Telegram contact'))
+        : this.view === 'people'
+          ? this.peopleInOrder(search)
+              .filter((friend) => matches(nameOf(friend.person)))
+              .map((friend) => this.personRow(friends, friend, origins.get(friend.person.userId) ?? ''))
+          : search.chats
+              .filter((chat) =>
+                chat.kind === 'person'
+                  ? matches(nameOf(search.found.get(chat.userId)!.person))
+                  : matches(chat.title) ||
+                    chat.memberIds.some((userId) => matches(nameOf(search.found.get(userId)!.person))),
+              )
+              .map((chat) =>
+                chat.kind === 'person'
+                  ? this.personRow(friends, search.found.get(chat.userId)!, 'Direct chat')
+                  : this.groupRow(friends, chat),
+              );
     const views: { id: View; label: string }[] = [
       { id: 'chats', label: 'Users and groups' },
       { id: 'people', label: 'Users only' },
@@ -320,22 +357,20 @@ export class FriendsStep extends LightElement {
             @input=${(event: Event) => (this.search = (event.target as HTMLInputElement).value)}
           />
         </label>
-        <div class="flex flex-wrap items-center justify-between gap-2">
-          <div role="group" aria-label="What the list shows" class="inline-flex gap-1 rounded-[10px] bg-segment p-1">
-            ${views.map(
-              (view) =>
-                html`<button
-                  type="button"
-                  aria-pressed=${view.id === this.view}
-                  class="min-h-9 cursor-pointer rounded-lg px-3 text-[13px] font-medium ${
-                    view.id === this.view ? 'bg-white text-ink shadow-[0_1px_2px_rgba(20,20,30,0.12)]' : 'text-muted'
-                  }"
-                  @click=${() => (this.view = view.id)}
-                >
-                  ${view.label}
-                </button>`,
-            )}
-          </div>
+        <div class="flex flex-wrap items-center gap-2">
+          ${this.choice(
+            'Which list',
+            [
+              { id: 'chats', label: 'Chats' },
+              { id: 'contacts', label: 'Contacts' },
+            ],
+            this.list,
+            (list) => (this.list = list),
+          )}
+          ${this.choice('What the list shows', views, this.view, (view) => (this.view = view), this.list === 'contacts')}
+        </div>
+        <div class="flex min-h-9 items-center justify-between gap-2">
+          <span class="text-sm text-muted">${everyone.length} of ${people(search.looked)} are on Signal</span>
           ${
             addable.length > 0
               ? html`<button
@@ -348,12 +383,13 @@ export class FriendsStep extends LightElement {
               : nothing
           }
         </div>
-        <span class="text-sm text-muted">${everyone.length} of ${people(search.looked)} are on Signal</span>
         ${
           rows.length === 0
-            ? html`<p class="text-sm text-muted">Nothing matches.</p>`
+            ? html`<p class="text-sm text-muted">
+                ${query === '' ? 'None of your Telegram contacts was found on Signal.' : 'Nothing matches.'}
+              </p>`
             : html`<ul
-                aria-label=${this.view === 'people' ? 'People' : 'Chats'}
+                aria-label=${this.list === 'contacts' ? 'Contacts' : this.view === 'people' ? 'People' : 'Chats'}
                 class="flex shrink-0 flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset"
               >
                 ${rows}

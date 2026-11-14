@@ -228,7 +228,7 @@ export function appServices(
         }) as unknown as Td.Invoke,
         source: user.stickers,
         people: options.people ?? {
-          readPeople: () => Promise.resolve({ chats: [], people: new Map() }),
+          readPeople: () => Promise.resolve({ chats: [], people: new Map(), contactIds: [] }),
           readPhoto: () => Promise.reject(new Error('the simulated account has no pictures')),
         },
         async checkpoint() {

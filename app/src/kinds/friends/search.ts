@@ -7,7 +7,7 @@
 import type { DiscoveredAccount } from '../../signal/contact-discovery';
 import type { KnownAccount, NewContact, StoredContact } from '../../signal/storage';
 import type { SignalAccount } from '../../signal/transport';
-import type { ChatEntry, PeopleSource, Person } from './telegram-people';
+import { type ChatEntry, nameOf, type PeopleSource, type Person } from './telegram-people';
 
 /** The identifiers of a Signal account, as far as a source learned them. */
 export type SignalIdentifiers = StoredContact;
@@ -58,6 +58,8 @@ export type FriendSearch = {
   /** The chats with someone found, in the order of the Telegram chat list; a group lists its found members. */
   chats: ChatEntry[];
   found: Map<number, FoundFriend>;
+  /** The found people who are on the user's Telegram contact list, in the order of their names. */
+  contacts: number[];
   /** How many people were looked for. */
   looked: number;
 };
@@ -95,7 +97,7 @@ export async function findFriends(
   );
   const everyone = [...telegram.people.values()];
   onProgress({ part: 'signal', phoneNumbers: everyone.filter((person) => person.phoneNumber !== null).length });
-  const { contacts, knownAccounts } = await (await account.storage()).readContacts();
+  const { contacts: inSignal, knownAccounts } = await (await account.storage()).readContacts();
   const identifiers = new Map<number, SignalIdentifiers>();
   for (const source of sources) {
     for (const [userId, signal] of await source.find(everyone, knownAccounts)) {
@@ -106,14 +108,18 @@ export async function findFriends(
   for (const [userId, signal] of identifiers) {
     const person = telegram.people.get(userId);
     if (person)
-      found.set(userId, { person, signal, inSignal: contacts.some((contact) => sameAccount(contact, signal)) });
+      found.set(userId, { person, signal, inSignal: inSignal.some((contact) => sameAccount(contact, signal)) });
   }
   const chats = telegram.chats.flatMap((chat): ChatEntry[] => {
     if (chat.kind === 'person') return found.has(chat.userId) ? [chat] : [];
     const memberIds = chat.memberIds.filter((userId) => found.has(userId));
     return memberIds.length > 0 ? [{ ...chat, memberIds }] : [];
   });
-  return { chats, found, looked: everyone.length };
+  const name = (userId: number) => nameOf(found.get(userId)!.person);
+  const contacts = telegram.contactIds
+    .filter((userId) => found.has(userId))
+    .sort((one, other) => name(one).localeCompare(name(other)));
+  return { chats, found, contacts, looked: everyone.length };
 }
 
 /** The contacts to add: everyone found who is not in Signal yet and whom the user left ticked. */

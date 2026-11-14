@@ -27,7 +27,7 @@ const SELF = 1;
 function account(
   users: Record<number, FakeUser>,
   chats: FakeChat[],
-  options: { tooFastOnce?: boolean; now?: () => number; report?: (line: string) => void } = {},
+  options: { tooFastOnce?: boolean; now?: () => number; report?: (line: string) => void; contacts?: number[] } = {},
 ) {
   const requests: string[] = [];
   let loaded = 0;
@@ -42,6 +42,8 @@ function account(
     switch (query._) {
       case 'getMe':
         return { id: SELF };
+      case 'getContacts':
+        return { user_ids: options.contacts ?? [] };
       case 'loadChats': {
         // TDLib loads the list piece by piece and answers 404 once nothing is left.
         if (loaded >= chats.length) throw new TelegramError(404, 'Not Found');
@@ -152,6 +154,15 @@ describe('the people of a Telegram account', () => {
     expect(people.get(7)).toMatchObject({ photoFileId: 55, photoPreview: 'cHJldmlldw==' });
     expect(people.get(3)).not.toHaveProperty('photoFileId');
     expect(await source.readPhoto(55)).toEqual(Uint8Array.of(55));
+  });
+
+  it('reads the contact list, with people the user has no chat with', async () => {
+    const { source } = account(USERS, [{ private: 2 }], { contacts: [6, 2, 4] });
+    const { chats, people, contactIds } = await source.readPeople(() => undefined);
+    // The bot on the contact list is left out; Aiko has no chat and is a person to look for all the same.
+    expect(contactIds).toEqual([6, 2]);
+    expect(people.get(6)).toMatchObject({ givenName: 'Aiko', phoneNumber: '+447700900106' });
+    expect(chats).toEqual([{ kind: 'person', userId: 2 }]);
   });
 
   it('leaves out the user, bots and deleted accounts, as chats and as members', async () => {

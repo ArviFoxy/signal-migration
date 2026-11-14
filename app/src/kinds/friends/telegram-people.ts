@@ -38,6 +38,8 @@ export type ChatEntry =
 export type TelegramPeople = {
   /** In the order of the user's chat list. */
   chats: ChatEntry[];
+  /** The people of the user's Telegram contact list: those the user saved, with or without a chat. */
+  contactIds: number[];
   people: Map<number, Person>;
 };
 
@@ -220,6 +222,10 @@ export function peopleOf(
           });
         }
       }
+      // The contact list comes in one request, with the records of the people on it.
+      const contactIds: number[] = [];
+      for (const userId of (await invoke({ _: 'getContacts' })).user_ids)
+        if (await isPerson(userId)) contactIds.push(userId);
       onProgress(0, groups.length, null);
 
       // Then the groups, whose members Telegram's servers are asked for: a few groups at a time.
@@ -264,7 +270,7 @@ export function peopleOf(
           `${groups.length} of them groups. Requests: ${requests}. ` +
           `Waited ${waits} times because Telegram said the requests came too fast.`,
       );
-      return { chats: entries.filter((entry) => entry !== null), people };
+      return { chats: entries.filter((entry) => entry !== null), people, contactIds };
     },
   };
 }

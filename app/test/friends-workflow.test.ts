@@ -34,6 +34,7 @@ const people: PeopleSource = {
         { kind: 'person', userId: 3 },
       ],
       people: new Map([MARA, AIKO, JONAS].map((person) => [person.userId, person])),
+      contactIds: [],
     }),
 };
 

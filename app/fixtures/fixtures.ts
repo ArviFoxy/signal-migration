@@ -186,6 +186,7 @@ function foundFriends(): Extract<Session['friends'], { kind: 'found' }> {
     [5, 'Leon', 'Fischer', false],
     [6, 'Ines', 'Duarte', false],
     [7, 'Karim', 'Haddad', false],
+    [8, 'Dana', 'Novak', false],
   ];
   const found: FriendSearch['found'] = new Map(
     names.map(([userId, givenName, familyName, inSignal]) => {
@@ -207,7 +208,7 @@ function foundFriends(): Extract<Session['friends'], { kind: 'found' }> {
     instance: 'fixture',
     deviceId: 3,
     attempt: 1,
-    search: { chats, found, looked: 214 },
+    search: { chats, found, contacts: [8, 6, 7, 1], looked: 214 },
     photos: new Map(),
   };
 }
@@ -433,6 +434,20 @@ const FIXTURES: Record<string, Fixture> = {
         .find((button) => button.textContent?.includes('Users only'))
         ?.click(),
   },
+  'friends-found-contacts': {
+    state: () =>
+      setup('friends', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: foundFriends(),
+        untickedFriends: [5],
+      }),
+    then: (app) =>
+      [...app.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')]
+        .find((button) => button.textContent?.includes('Contacts'))
+        ?.click(),
+  },
   'friends-nobody': {
     state: () =>
       setup('friends', {
@@ -444,7 +459,7 @@ const FIXTURES: Record<string, Fixture> = {
           instance: 'fixture',
           deviceId: 3,
           attempt: 1,
-          search: { chats: [], found: new Map(), looked: 214 },
+          search: { chats: [], found: new Map(), contacts: [], looked: 214 },
           photos: new Map(),
         },
       }),

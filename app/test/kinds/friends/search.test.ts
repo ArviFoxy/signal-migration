@@ -31,8 +31,8 @@ const MARA = person(2, 'Mara', '+12025550102');
 const JONAS = person(3, 'Jonas');
 const AIKO = person(6, 'Aiko', '+447700900106');
 
-const telegram = (chats: ChatEntry[], people: Person[]): PeopleSource => ({
-  readPeople: () => Promise.resolve({ chats, people: new Map(people.map((one) => [one.userId, one])) }),
+const telegram = (chats: ChatEntry[], people: Person[], contactIds: number[] = []): PeopleSource => ({
+  readPeople: () => Promise.resolve({ chats, people: new Map(people.map((one) => [one.userId, one])), contactIds }),
   readPhoto: () => Promise.reject(new Error('no pictures here')),
 });
 
@@ -175,6 +175,18 @@ describe('the friend search', () => {
     };
     const search = await findFriends(telegram(chats, [MARA]), user.linkDevice(), [source], () => undefined);
     expect(search.found.get(MARA.userId)!.inSignal).toBe(true);
+  });
+
+  it('lists the found people of the Telegram contact list by name, with or without a chat', async () => {
+    const world = new World();
+    const account = new User(world).linkDevice();
+    const dana = person(8, 'Dana', '+12025550108');
+    const source = finding({ 2: { phoneNumberIdentity: id(2) }, 8: { phoneNumberIdentity: id(8) } });
+    // Dana is a contact without any chat; Jonas is a contact who was not found.
+    const everyone = telegram([{ kind: 'person', userId: 2 }], [MARA, JONAS, dana], [2, 3, 8]);
+    const search = await findFriends(everyone, account, [source], () => undefined);
+    expect(search.contacts).toEqual([8, 2]);
+    expect(search.chats).toEqual([{ kind: 'person', userId: 2 }]);
   });
 
   it('puts together what two sources found about one person', async () => {
