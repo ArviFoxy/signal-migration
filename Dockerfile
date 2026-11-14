@@ -5,9 +5,9 @@
 #
 #   docker build --output type=local,dest=out .
 #
-# writes out/signal-migration-server and out/dist/. The stages `tdweb`, `webm-decoder` and `boringssl-wasm` hold only
-# their output files, so each can be built alone (`--target tdweb --output ...`) and handed back to a later build in
-# its place (`--build-context tdweb=<folder>`).
+# writes out/signal-migration-server and out/dist/. The stages `tdweb` and `webm-decoder` hold only their output
+# files, so either can be built alone (`--target tdweb --output ...`) and handed back to a later build in its place
+# (`--build-context tdweb=<folder>`).
 
 FROM debian:trixie AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -61,7 +61,9 @@ RUN toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /tmp/rust-toolchain.toml) 
 
 # BoringSSL for WebAssembly, which the attestation module links. The script reads two files of libsignal: one names
 # the tag of the boring crate, the other the version of the libc crate. These stages stand below the Rust stage so
-# that the lines above it, which CI's cache keys for `tdweb` and `webm-decoder` cover, stay as they are.
+# that the lines above it, which CI's cache keys for `tdweb` and `webm-decoder` cover, stay as they are: a change to
+# any of those lines, a comment included, makes CI build TDLib again. Like those two, the stage `boringssl-wasm`
+# holds only its output files and can be built alone and handed back to a later build in its place.
 FROM base AS boringssl-wasm-build
 COPY scripts/build-boringssl-wasm.sh scripts/
 COPY crates/attestation-wasm/libc-wasm32-unknown.patch crates/attestation-wasm/

@@ -90,6 +90,23 @@ describe('a lookup at contact discovery', () => {
     expect(wasClosedByClient()).toBe(true);
   });
 
+  // Detects: a page that would send phone numbers to any genuine enclave, and not only to the code Signal runs for
+  // contact discovery in production. The attestation is a genuine one of the staging enclave, checked at the time
+  // of its recording, so the enclave's code is the only thing wrong with it.
+  it('sends nothing to a genuine enclave that runs other code than production contact discovery', async () => {
+    const recorded = (name: string) =>
+      new Uint8Array(
+        readFileSync(new URL(`../../third_party/libsignal/rust/attest/tests/data/cdsi.${name}`, import.meta.url)),
+      );
+    const recordedAtMs = 1000 * Number(new DataView(recorded('timestamp').buffer).getBigUint64(0));
+    const { open, sent, wasClosedByClient } = connection((channel) => channel.onMessage(recorded('handshakestart')));
+    await expect(discoverAccounts(withCredentials, ['+12025550100'], [], open, () => recordedAtMs)).rejects.toThrow(
+      /expected mrenclave/,
+    );
+    expect(sent).toHaveLength(0);
+    expect(wasClosedByClient()).toBe(true);
+  });
+
   it('fails when the connection closes before the enclave sent anything', async () => {
     const { open } = connection((channel) => channel.onClose(1000, ''));
     await expect(discoverAccounts(withCredentials, ['+12025550100'], [], open)).rejects.toThrow(
