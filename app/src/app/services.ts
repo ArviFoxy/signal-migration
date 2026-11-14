@@ -137,7 +137,7 @@ export const realServices: AppServices = {
         instance,
         invoke: client.invoke,
         source: telegramSource(client),
-        people: peopleOf(client),
+        people: peopleOf(client, (line) => console.info(line)),
         checkpoint: () => client.checkpoint(),
         logOut: () => client.logOut(),
         terminate: () => client.terminate(),

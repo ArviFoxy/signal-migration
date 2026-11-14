@@ -11,13 +11,24 @@ type FakeUser = { name: [string, string]; phone?: string; kind?: UserKind };
 type FakeChat =
   | { private: number }
   | { basicGroup: string; members: number[] }
-  | { supergroup: string; members: number[]; memberCount?: number; hidden?: boolean; refused?: boolean }
+  | {
+      supergroup: string;
+      members: number[];
+      memberCount?: number;
+      hidden?: boolean;
+      refused?: boolean;
+      knownSize?: number;
+    }
   | { channel: string };
 
 const SELF = 1;
 
 /** A Telegram account with these users and this chat list, answering the requests the reader sends. */
-function account(users: Record<number, FakeUser>, chats: FakeChat[], options: { tooFastOnce?: boolean } = {}) {
+function account(
+  users: Record<number, FakeUser>,
+  chats: FakeChat[],
+  options: { tooFastOnce?: boolean; now?: () => number; report?: (line: string) => void } = {},
+) {
   const requests: string[] = [];
   let loaded = 0;
   const member = (userId: number) => ({ member_id: { _: 'messageSenderUser', user_id: userId } });
@@ -64,6 +75,10 @@ function account(users: Record<number, FakeUser>, chats: FakeChat[], options: { 
         const chat = chatAt(query.basic_group_id as number) as Extract<FakeChat, { basicGroup: string }>;
         return { members: chat.members.map(member) };
       }
+      case 'getSupergroup': {
+        const chat = chatAt(query.supergroup_id as number) as Extract<FakeChat, { supergroup: string }>;
+        return { member_count: chat.knownSize ?? 0 };
+      }
       case 'getSupergroupFullInfo': {
         const chat = chatAt(query.supergroup_id as number) as Extract<FakeChat, { supergroup: string }>;
         if (chat.refused) throw new TelegramError(400, 'CHANNEL_PRIVATE');
@@ -82,7 +97,7 @@ function account(users: Record<number, FakeUser>, chats: FakeChat[], options: { 
         throw new Error(`unexpected request ${query._}`);
     }
   }) as unknown as Td.Invoke;
-  return { source: peopleOf({ invoke }), requests };
+  return { source: peopleOf({ invoke }, options.report, options.now), requests };
 }
 
 const USERS: Record<number, FakeUser> = {
@@ -160,6 +175,48 @@ describe('the people of a Telegram account', () => {
     const { chats } = await source.readPeople(() => undefined);
     expect(chats).toEqual([{ kind: 'group', chatId: 100, title: 'Hiking crew', memberIds: [2, 6], memberCount: 2 }]);
     expect(requests.filter((request) => request === 'getSupergroupFullInfo')).toHaveLength(2);
+  });
+
+  it('does not ask the servers about a group that is already known to be too large', async () => {
+    const { source, requests } = account(USERS, [
+      { supergroup: 'A city', members: [2], knownSize: GROUP_SIZE_LIMIT + 1 },
+      { private: 6 },
+    ]);
+    const { chats } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([{ kind: 'person', userId: 6 }]);
+    expect(requests).not.toContain('getSupergroupFullInfo');
+  });
+
+  it('counts the one-to-one chats as read at once, and estimates the time left once several groups are read', async () => {
+    // A clock on which every reading of the time is a second later than the last.
+    let seconds = 0;
+    const groups: FakeChat[] = Array.from({ length: 8 }, (_, index) => ({
+      supergroup: `Group ${index}`,
+      members: [2],
+    }));
+    const { source } = account(USERS, [{ private: 6 }, { private: 3 }, ...groups], { now: () => 1000 * seconds++ });
+    const reported: { done: number; secondsLeft: number | null }[] = [];
+    await source.readPeople((done, total, secondsLeft) => {
+      expect(total).toBe(10);
+      reported.push({ done, secondsLeft });
+    });
+    expect(reported.map((progress) => progress.done)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    // No estimate before five groups are read; one for every group after that, ending at nothing left.
+    expect(reported.slice(0, 5).map((progress) => progress.secondsLeft)).toEqual([null, null, null, null, null]);
+    for (const progress of reported.slice(5)) expect(progress.secondsLeft).toBeGreaterThanOrEqual(0);
+    expect(reported.at(-1)!.secondsLeft).toBe(0);
+  });
+
+  it('reports how long the requests took, without naming a chat or a person', async () => {
+    const lines: string[] = [];
+    const { source } = account(USERS, [{ supergroup: 'Hiking crew', members: [2, 6] }, { private: 3 }], {
+      report: (line) => lines.push(line),
+    });
+    await source.readPeople(() => undefined);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/for 2 chats, 1 of them groups/);
+    expect(lines[0]).toMatch(/getSupergroupMembers 1 times/);
+    for (const name of ['Hiking crew', 'Mara', 'Aiko', '12025550102']) expect(lines[0]).not.toContain(name);
   });
 
   it('reads the members of a large group in several requests', async () => {

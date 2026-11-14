@@ -59,7 +59,8 @@ export type FriendSearch = {
 
 /** How far a search is: reading the chats of the Telegram account, or asking Signal about the phone numbers found. */
 export type SearchProgress =
-  { part: 'telegram'; done: number; total: number } | { part: 'signal'; phoneNumbers: number };
+  | { part: 'telegram'; done: number; total: number; secondsLeft: number | null }
+  | { part: 'signal'; phoneNumbers: number };
 
 /** Whether two sets of identifiers name the same account. */
 const sameAccount = (one: SignalIdentifiers, other: SignalIdentifiers) =>
@@ -84,7 +85,9 @@ export async function findFriends(
   sources: FriendSource[],
   onProgress: (progress: SearchProgress) => void,
 ): Promise<FriendSearch> {
-  const telegram = await people.readPeople((done, total) => onProgress({ part: 'telegram', done, total }));
+  const telegram = await people.readPeople((done, total, secondsLeft) =>
+    onProgress({ part: 'telegram', done, total, secondsLeft }),
+  );
   const everyone = [...telegram.people.values()];
   onProgress({ part: 'signal', phoneNumbers: everyone.filter((person) => person.phoneNumber !== null).length });
   const identifiers = new Map<number, SignalIdentifiers>();

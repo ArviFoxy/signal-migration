@@ -41,7 +41,11 @@ export const GROUP_SIZE_LIMIT = 1000;
 
 /** Where the people come from: the user's account in the app, simulated data in tests. */
 export interface PeopleSource {
-  readPeople(onProgress: (done: number, total: number) => void): Promise<TelegramPeople>;
+  /**
+   * `onProgress` gets how many of the chats are read, and how many seconds the rest should take once enough is read
+   * to estimate that.
+   */
+  readPeople(onProgress: (done: number, total: number, secondsLeft: number | null) => void): Promise<TelegramPeople>;
 }
 
 /** How many chats Telegram is asked to load, and how many members of a large group it gives, in one request. */
@@ -57,8 +61,17 @@ const TOO_FAST = 429;
 const LONGEST_WAIT_S = 60;
 const WAITS_PER_REQUEST = 3;
 
-/** Sends a request, and again after the wait Telegram names when it says the requests come too fast. */
-async function patiently<T>(request: () => Promise<T>): Promise<T> {
+/** How many groups are read at the same time. */
+const GROUPS_AT_ONCE = 3;
+/** The time left is estimated once this many groups are read and this many seconds have passed. */
+const GROUPS_BEFORE_ESTIMATE = 5;
+const SECONDS_BEFORE_ESTIMATE = 5;
+
+/**
+ * Sends a request, and again after the wait Telegram names when it says the requests come too fast; `onWait` hears
+ * of each wait.
+ */
+async function patiently<T>(request: () => Promise<T>, onWait: () => void): Promise<T> {
   for (let waits = 0; ; waits++) {
     try {
       return await request();
@@ -67,6 +80,7 @@ async function patiently<T>(request: () => Promise<T>): Promise<T> {
         error instanceof TelegramError && error.code === TOO_FAST ? /retry after (\d+)/.exec(error.message) : null;
       const seconds = named ? Number(named[1]) : null;
       if (seconds === null || seconds > LONGEST_WAIT_S || waits >= WAITS_PER_REQUEST) throw error;
+      onWait();
       await new Promise((resolve) => setTimeout(resolve, seconds * 1000 + 250));
     }
   }
@@ -74,8 +88,29 @@ async function patiently<T>(request: () => Promise<T>): Promise<T> {
 
 const MAIN_LIST = { _: 'chatListMain' } as const;
 
-export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
-  const invoke = ((query: never) => patiently(() => untilNotRestarted(() => client.invoke(query)))) as Td.Invoke;
+/**
+ * The people of the account behind `client`. `report` gets one line when the reading is done, saying how long each
+ * kind of request took in all; `now` is the clock, in milliseconds.
+ */
+export function peopleOf(
+  client: Pick<TelegramClient, 'invoke'>,
+  report: (line: string) => void = () => undefined,
+  now: () => number = () => performance.now(),
+): PeopleSource {
+  const spent = new Map<string, { count: number; ms: number }>();
+  let waits = 0;
+  const invoke = (async (query: { _: string }) => {
+    const started = now();
+    try {
+      return await patiently(
+        () => untilNotRestarted(() => client.invoke(query as never)),
+        () => waits++,
+      );
+    } finally {
+      const kind = spent.get(query._) ?? { count: 0, ms: 0 };
+      spent.set(query._, { count: kind.count + 1, ms: kind.ms + now() - started });
+    }
+  }) as Td.Invoke;
 
   /** The IDs of all chats in the main list, in its order. */
   async function chatIds(): Promise<number[]> {
@@ -99,6 +134,10 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
     if (type._ === 'chatTypeBasicGroup') {
       return userIdsOf((await invoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id })).members);
     }
+    // What TDLib already knows of the group answers without a request to Telegram's servers. The size is 0 there
+    // when TDLib does not know it.
+    const known = await invoke({ _: 'getSupergroup', supergroup_id: type.supergroup_id });
+    if (known.member_count > GROUP_SIZE_LIMIT) return null;
     const info = await invoke({ _: 'getSupergroupFullInfo', supergroup_id: type.supergroup_id });
     if (!info.can_get_members || info.member_count > GROUP_SIZE_LIMIT) return null;
     const ids: number[] = [];
@@ -118,6 +157,7 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
 
   return {
     async readPeople(onProgress) {
+      const started = now();
       const self = (await invoke({ _: 'getMe' })).id;
       const people = new Map<number, Person>();
       /** Notes the person behind `userId` and says whether it is one: not the user, a bot or a deleted account. */
@@ -135,35 +175,69 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
         return true;
       };
 
+      // First what TDLib answers by itself: which chats are one-to-one chats and which are groups.
       const ids = await chatIds();
-      const chats: ChatEntry[] = [];
+      const entries: (ChatEntry | null)[] = ids.map(() => null);
+      const groups: {
+        index: number;
+        chatId: number;
+        title: string;
+        type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup;
+      }[] = [];
       for (const [index, chatId] of ids.entries()) {
-        onProgress(index, ids.length);
         const chat = await invoke({ _: 'getChat', chat_id: chatId });
         const type = chat.type;
         if (type._ === 'chatTypePrivate') {
-          if (await isPerson(type.user_id)) chats.push({ kind: 'person', userId: type.user_id });
+          if (await isPerson(type.user_id)) entries[index] = { kind: 'person', userId: type.user_id };
         } else if (type._ === 'chatTypeBasicGroup' || (type._ === 'chatTypeSupergroup' && !type.is_channel)) {
-          // A group whose members Telegram refuses to give is passed over, and the rest is still read.
-          const members = await memberIds(type).catch((error: unknown) => {
-            if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
-            throw error;
-          });
-          if (!members) continue;
-          const present: number[] = [];
-          for (const userId of members) if (await isPerson(userId)) present.push(userId);
-          if (present.length > 0)
-            chats.push({
-              kind: 'group',
-              chatId,
-              title: chat.title,
-              memberIds: present,
-              memberCount: present.length,
-            });
+          groups.push({ index, chatId, title: chat.title, type });
         }
       }
-      onProgress(ids.length, ids.length);
-      return { chats, people };
+      let done = ids.length - groups.length;
+      onProgress(done, ids.length, null);
+
+      // Then the groups, whose members Telegram's servers are asked for: a few groups at a time.
+      const groupsStarted = now();
+      let groupsRead = 0;
+      const readGroup = async (group: (typeof groups)[number]) => {
+        // A group whose members Telegram refuses to give is passed over, and the rest is still read.
+        const members = await memberIds(group.type).catch((error: unknown) => {
+          if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
+          throw error;
+        });
+        const present: number[] = [];
+        for (const userId of members ?? []) if (await isPerson(userId)) present.push(userId);
+        if (present.length > 0)
+          entries[group.index] = {
+            kind: 'group',
+            chatId: group.chatId,
+            title: group.title,
+            memberIds: present,
+            memberCount: present.length,
+          };
+        groupsRead++;
+        done++;
+        const seconds = (now() - groupsStarted) / 1000;
+        const estimable = groupsRead >= GROUPS_BEFORE_ESTIMATE && seconds >= SECONDS_BEFORE_ESTIMATE;
+        const secondsLeft = estimable ? Math.round((seconds / groupsRead) * (groups.length - groupsRead)) : null;
+        onProgress(done, ids.length, secondsLeft);
+      };
+      const waiting = [...groups];
+      await Promise.all(
+        Array.from({ length: GROUPS_AT_ONCE }, async () => {
+          for (let group = waiting.shift(); group; group = waiting.shift()) await readGroup(group);
+        }),
+      );
+
+      const requests = [...spent]
+        .map(([kind, { count, ms }]) => `${kind} ${count} times in ${(ms / 1000).toFixed(1)} s`)
+        .join(', ');
+      report(
+        `Reading the people from Telegram took ${((now() - started) / 1000).toFixed(1)} s for ${ids.length} chats, ` +
+          `${groups.length} of them groups. Requests: ${requests}. ` +
+          `Waited ${waits} times because Telegram said the requests came too fast.`,
+      );
+      return { chats: entries.filter((entry) => entry !== null), people };
     },
   };
 }

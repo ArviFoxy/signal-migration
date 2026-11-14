@@ -382,7 +382,7 @@ const FIXTURES: Record<string, Fixture> = {
           instance: 'fixture',
           deviceId: 3,
           attempt: 1,
-          progress: { part: 'telegram', done: 120, total: 214 },
+          progress: { part: 'telegram', done: 120, total: 214, secondsLeft: 95 },
         },
       }),
   },

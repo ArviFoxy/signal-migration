@@ -26,6 +26,14 @@ const TITLE = 'Friends on Signal';
 const DESCRIPTION = 'Select who to add to your Signal contacts.';
 const people = (count: number) => `${count} ${count === 1 ? 'person' : 'people'}`;
 
+/** The time left in words, once it can be estimated. */
+function timeLeft(seconds: number | null): string | typeof nothing {
+  if (seconds === null) return nothing;
+  if (seconds < 50) return 'Less than a minute left';
+  const minutes = Math.round(seconds / 60);
+  return `About ${minutes} minute${minutes === 1 ? '' : 's'} left`;
+}
+
 const initials = (name: string) =>
   name
     .split(/\s+/)
@@ -187,6 +195,9 @@ export class FriendsStep extends LightElement {
             ${count}
           </div>
           ${bar}
+          <span class="min-h-5 text-sm text-muted"
+            >${progress?.part === 'telegram' ? timeLeft(progress.secondsLeft) : nothing}</span
+          >
         </div>
         ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
     }

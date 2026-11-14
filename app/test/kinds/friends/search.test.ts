@@ -130,16 +130,16 @@ describe('the friend search', () => {
     const account = new User(world).linkDevice();
     const reading: PeopleSource = {
       readPeople(onProgress) {
-        onProgress(1, 2);
-        onProgress(2, 2);
+        onProgress(1, 2, null);
+        onProgress(2, 2, 40);
         return telegram(chats, [MARA, JONAS, AIKO]).readPeople(onProgress);
       },
     };
     const reported: unknown[] = [];
     await findFriends(reading, account, [finding({})], (progress) => reported.push(progress));
     expect(reported).toEqual([
-      { part: 'telegram', done: 1, total: 2 },
-      { part: 'telegram', done: 2, total: 2 },
+      { part: 'telegram', done: 1, total: 2, secondsLeft: null },
+      { part: 'telegram', done: 2, total: 2, secondsLeft: 40 },
       { part: 'signal', phoneNumbers: 2 },
     ]);
   });
