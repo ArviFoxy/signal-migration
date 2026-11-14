@@ -49,11 +49,33 @@ const CHATS_PER_REQUEST = 100;
 const MEMBERS_PER_REQUEST = 200;
 /** TDLib answers 404 to a request for more chats once it has loaded them all. */
 const ALL_LOADED = 404;
+/** More chats than an account has. TDLib takes the count as a 32-bit number, so it cannot be arbitrarily large. */
+const EVERY_CHAT = 1_000_000;
+
+/** Telegram answers 429 when requests come too fast, and names the seconds to wait before the next one. */
+const TOO_FAST = 429;
+const LONGEST_WAIT_S = 60;
+const WAITS_PER_REQUEST = 3;
+
+/** Sends a request, and again after the wait Telegram names when it says the requests come too fast. */
+async function patiently<T>(request: () => Promise<T>): Promise<T> {
+  for (let waits = 0; ; waits++) {
+    try {
+      return await request();
+    } catch (error) {
+      const named =
+        error instanceof TelegramError && error.code === TOO_FAST ? /retry after (\d+)/.exec(error.message) : null;
+      const seconds = named ? Number(named[1]) : null;
+      if (seconds === null || seconds > LONGEST_WAIT_S || waits >= WAITS_PER_REQUEST) throw error;
+      await new Promise((resolve) => setTimeout(resolve, seconds * 1000 + 250));
+    }
+  }
+}
 
 const MAIN_LIST = { _: 'chatListMain' } as const;
 
 export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
-  const invoke = ((query: never) => untilNotRestarted(() => client.invoke(query))) as Td.Invoke;
+  const invoke = ((query: never) => patiently(() => untilNotRestarted(() => client.invoke(query)))) as Td.Invoke;
 
   /** The IDs of all chats in the main list, in its order. */
   async function chatIds(): Promise<number[]> {
@@ -65,7 +87,7 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
         throw error;
       }
     }
-    return (await invoke({ _: 'getChats', chat_list: MAIN_LIST, limit: Number.MAX_SAFE_INTEGER })).chat_ids;
+    return (await invoke({ _: 'getChats', chat_list: MAIN_LIST, limit: EVERY_CHAT })).chat_ids;
   }
 
   /** The members of a group that are accounts of people: no bots, no deleted accounts, no channels writing as members. */
@@ -122,7 +144,11 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
         if (type._ === 'chatTypePrivate') {
           if (await isPerson(type.user_id)) chats.push({ kind: 'person', userId: type.user_id });
         } else if (type._ === 'chatTypeBasicGroup' || (type._ === 'chatTypeSupergroup' && !type.is_channel)) {
-          const members = await memberIds(type);
+          // A group whose members Telegram refuses to give is passed over, and the rest is still read.
+          const members = await memberIds(type).catch((error: unknown) => {
+            if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
+            throw error;
+          });
           if (!members) continue;
           const present: number[] = [];
           for (const userId of members) if (await isPerson(userId)) present.push(userId);

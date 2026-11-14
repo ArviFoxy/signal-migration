@@ -21,7 +21,9 @@ import {
 import type { FoundFriend, FriendSearch } from '../search';
 import { type ChatEntry, nameOf } from '../telegram-people';
 
+// One screen in every state: the same title and description, with the progress of the search where the list will be.
 const TITLE = 'Friends on Signal';
+const DESCRIPTION = 'Select who to add to your Signal contacts.';
 const people = (count: number) => `${count} ${count === 1 ? 'person' : 'people'}`;
 
 const initials = (name: string) =>
@@ -159,13 +161,13 @@ export class FriendsStep extends LightElement {
     const friends = this.friends;
     if (friends.kind === 'none' || friends.kind === 'looking') {
       const progress = friends.kind === 'looking' ? friends.progress : null;
-      return html`${stepHeader(this.position, TITLE, 'People from your Telegram chats who have a Signal account.')}
+      return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
         <div class="flex flex-col gap-1.5">
           <div class="flex justify-between gap-3 text-sm">
-            <span class="font-semibold">Looking through your chats</span>
+            <span class="font-semibold">Looking for Telegram contacts</span>
             ${
               progress
-                ? html`<span class="text-muted tabular-nums">${progress.done} of ${progress.total}</span>`
+                ? html`<span class="text-muted tabular-nums">${progress.done} of ${progress.total} chats</span>`
                 : nothing
             }
           </div>
@@ -174,7 +176,7 @@ export class FriendsStep extends LightElement {
         ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
     }
     if (friends.kind === 'failed') {
-      return html`${stepHeader(this.position, TITLE, 'People from your Telegram chats who have a Signal account.')}
+      return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
       ${this.footer(
         html`<button type="button" class=${primaryButton} @click=${() => this.emit('try-again')}>Try again</button>`,
       )}`;
@@ -198,14 +200,13 @@ export class FriendsStep extends LightElement {
     </span>`;
 
     if (everyone.length === 0) {
-      return html`${stepHeader(
-        this.position,
-        TITLE,
-        `None of the ${people(search.looked)} in your Telegram chats was found on Signal.`,
-      )}
-      ${this.footer(next)}`;
+      return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
+        <p class="text-sm text-muted">
+          None of the ${people(search.looked)} in your Telegram chats was found on Signal.
+        </p>
+        ${this.footer(next)}`;
     }
-    return html`${stepHeader(this.position, TITLE, 'Select who to add to your Signal contacts.')}
+    return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
       <div class="flex flex-col gap-2">
         <label class="flex min-h-11 items-center gap-2 rounded-xl bg-segment px-3">
           ${icons.search()}

@@ -11,19 +11,23 @@ type FakeUser = { name: [string, string]; phone?: string; kind?: UserKind };
 type FakeChat =
   | { private: number }
   | { basicGroup: string; members: number[] }
-  | { supergroup: string; members: number[]; memberCount?: number; hidden?: boolean }
+  | { supergroup: string; members: number[]; memberCount?: number; hidden?: boolean; refused?: boolean }
   | { channel: string };
 
 const SELF = 1;
 
 /** A Telegram account with these users and this chat list, answering the requests the reader sends. */
-function account(users: Record<number, FakeUser>, chats: FakeChat[]) {
+function account(users: Record<number, FakeUser>, chats: FakeChat[], options: { tooFastOnce?: boolean } = {}) {
   const requests: string[] = [];
   let loaded = 0;
   const member = (userId: number) => ({ member_id: { _: 'messageSenderUser', user_id: userId } });
   const chatAt = (chatId: number) => chats[chatId - 100]!;
+  let tooFast = options.tooFastOnce ?? false;
   const invoke = (async (query: { _: string } & Record<string, unknown>) => {
     requests.push(query._);
+    // TDLib takes counts as 32-bit numbers and refuses a request with a larger one.
+    for (const count of [query.limit, query.offset])
+      if (typeof count === 'number' && count > 2 ** 31 - 1) throw new Error(`${query._}: ${count} is no 32-bit number`);
     switch (query._) {
       case 'getMe':
         return { id: SELF };
@@ -62,6 +66,11 @@ function account(users: Record<number, FakeUser>, chats: FakeChat[]) {
       }
       case 'getSupergroupFullInfo': {
         const chat = chatAt(query.supergroup_id as number) as Extract<FakeChat, { supergroup: string }>;
+        if (chat.refused) throw new TelegramError(400, 'CHANNEL_PRIVATE');
+        if (tooFast) {
+          tooFast = false;
+          throw new TelegramError(429, 'Too Many Requests: retry after 0');
+        }
         return { member_count: chat.memberCount ?? chat.members.length, can_get_members: !chat.hidden };
       }
       case 'getSupergroupMembers': {
@@ -136,6 +145,21 @@ describe('the people of a Telegram account', () => {
     const { chats } = await source.readPeople(() => undefined);
     expect(chats).toEqual([{ kind: 'person', userId: 6 }]);
     expect(requests).not.toContain('getSupergroupMembers');
+  });
+
+  it('passes over a group whose members Telegram refuses to give, and reads the rest', async () => {
+    const { source } = account(USERS, [{ supergroup: 'Left long ago', members: [2], refused: true }, { private: 6 }]);
+    const { chats } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([{ kind: 'person', userId: 6 }]);
+  });
+
+  it('asks again after the wait when Telegram says the requests come too fast', async () => {
+    const { source, requests } = account(USERS, [{ supergroup: 'Hiking crew', members: [2, 6] }], {
+      tooFastOnce: true,
+    });
+    const { chats } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([{ kind: 'group', chatId: 100, title: 'Hiking crew', memberIds: [2, 6], memberCount: 2 }]);
+    expect(requests.filter((request) => request === 'getSupergroupFullInfo')).toHaveLength(2);
   });
 
   it('reads the members of a large group in several requests', async () => {
