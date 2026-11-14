@@ -6,10 +6,14 @@ import { type TelegramClient, TelegramError, untilNotRestarted } from '../../tel
 
 export type Person = {
   userId: number;
-  name: string;
+  /** The names as Telegram shows them to the user; the family name can be empty. */
+  givenName: string;
+  familyName: string;
   /** A plus sign and digits, when Telegram shows the user this person's phone number. */
   phoneNumber: string | null;
 };
+
+export const nameOf = (person: Person) => [person.givenName, person.familyName].filter(Boolean).join(' ');
 
 /** One row of the chat list: a one-to-one chat, or a group with the people in it. */
 export type ChatEntry =
@@ -94,7 +98,8 @@ export function peopleOf(client: Pick<TelegramClient, 'invoke'>): PeopleSource {
         if (user.type._ !== 'userTypeRegular') return false;
         people.set(userId, {
           userId,
-          name: [user.first_name, user.last_name].filter(Boolean).join(' '),
+          givenName: user.first_name,
+          familyName: user.last_name,
           phoneNumber: user.phone_number ? `+${user.phone_number}` : null,
         });
         return true;

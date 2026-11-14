@@ -105,8 +105,13 @@ describe('the people of a Telegram account', () => {
   it('gives a phone number only where Telegram shows one, with its plus sign', async () => {
     const { source } = account(USERS, [{ private: 2 }, { private: 3 }]);
     const { people } = await source.readPeople(() => undefined);
-    expect(people.get(2)).toEqual({ userId: 2, name: 'Mara Lindqvist', phoneNumber: '+12025550102' });
-    expect(people.get(3)).toEqual({ userId: 3, name: 'Jonas', phoneNumber: null });
+    expect(people.get(2)).toEqual({
+      userId: 2,
+      givenName: 'Mara',
+      familyName: 'Lindqvist',
+      phoneNumber: '+12025550102',
+    });
+    expect(people.get(3)).toEqual({ userId: 3, givenName: 'Jonas', familyName: '', phoneNumber: null });
   });
 
   it('leaves out the user, bots and deleted accounts, as chats and as members', async () => {
