@@ -214,7 +214,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           sessionOf(resources, work.instance).people,
           device,
           services.friends.sources(device),
-          (done, total) => emit({ type: 'friends/progress', done, total }),
+          (progress) => emit({ type: 'friends/progress', progress }),
         );
         emit({ type: 'friends/found', search });
       } catch (error) {

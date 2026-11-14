@@ -125,6 +125,25 @@ describe('the friend search', () => {
     expect(search.found.get(6)!.inSignal).toBe(false);
   });
 
+  it('says which part of the search runs: reading the chats, then asking about the phone numbers found', async () => {
+    const world = new World();
+    const account = new User(world).linkDevice();
+    const reading: PeopleSource = {
+      readPeople(onProgress) {
+        onProgress(1, 2);
+        onProgress(2, 2);
+        return telegram(chats, [MARA, JONAS, AIKO]).readPeople(onProgress);
+      },
+    };
+    const reported: unknown[] = [];
+    await findFriends(reading, account, [finding({})], (progress) => reported.push(progress));
+    expect(reported).toEqual([
+      { part: 'telegram', done: 1, total: 2 },
+      { part: 'telegram', done: 2, total: 2 },
+      { part: 'signal', phoneNumbers: 2 },
+    ]);
+  });
+
   it('puts together what two sources found about one person', async () => {
     const world = new World();
     const account = new User(world).linkDevice();

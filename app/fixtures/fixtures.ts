@@ -377,7 +377,28 @@ const FIXTURES: Record<string, Fixture> = {
         telegram: signedIn,
         signal: linked,
         chosen: FRIENDS_ONLY,
-        friends: { kind: 'looking', instance: 'fixture', deviceId: 3, attempt: 1, progress: { done: 120, total: 214 } },
+        friends: {
+          kind: 'looking',
+          instance: 'fixture',
+          deviceId: 3,
+          attempt: 1,
+          progress: { part: 'telegram', done: 120, total: 214 },
+        },
+      }),
+  },
+  'friends-asking-signal': {
+    state: () =>
+      setup('friends', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: {
+          kind: 'looking',
+          instance: 'fixture',
+          deviceId: 3,
+          attempt: 1,
+          progress: { part: 'signal', phoneNumbers: 37 },
+        },
       }),
   },
   'friends-found': {

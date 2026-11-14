@@ -4,7 +4,7 @@ import type { Context, VariantHandlers } from '../core';
 import type { FriendsEvent, FriendsState } from './state';
 
 export const looking: VariantHandlers<FriendsState, 'looking', FriendsEvent, Context> = {
-  'friends/progress': (state, event) => ({ ...state, progress: { done: event.done, total: event.total } }),
+  'friends/progress': (state, event) => ({ ...state, progress: event.progress }),
   'friends/found': (state, event) => ({
     kind: 'found',
     instance: state.instance,

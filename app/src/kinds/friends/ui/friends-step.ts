@@ -161,17 +161,32 @@ export class FriendsStep extends LightElement {
     const friends = this.friends;
     if (friends.kind === 'none' || friends.kind === 'looking') {
       const progress = friends.kind === 'looking' ? friends.progress : null;
+      // The search has two parts. Reading the chats has a known length; asking Signal is one request.
+      const asking = progress?.part === 'signal';
+      const label = asking
+        ? 'Looking up Signal accounts by phone number'
+        : 'Looking for Telegram contacts with a phone number';
+      const count = !progress
+        ? nothing
+        : progress.part === 'signal'
+          ? html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
+              >${progress.phoneNumbers} phone number${progress.phoneNumbers === 1 ? '' : 's'}</span
+            >`
+          : html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
+              >${progress.done} of ${progress.total} chats</span
+            >`;
+      const bar = !progress
+        ? progressBar(label, 0, 0)
+        : progress.part === 'signal'
+          ? html`<div class="animate-pulse">${progressBar(label, 1, 1)}</div>`
+          : progressBar(label, progress.done, progress.total);
       return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
         <div class="flex flex-col gap-1.5">
           <div class="flex justify-between gap-3 text-sm">
-            <span class="font-semibold">Looking for Telegram contacts</span>
-            ${
-              progress
-                ? html`<span class="text-muted tabular-nums">${progress.done} of ${progress.total} chats</span>`
-                : nothing
-            }
+            <span class="font-semibold">${label}</span>
+            ${count}
           </div>
-          ${progressBar('Chats looked through', progress?.done ?? 0, progress?.total ?? 0)}
+          ${bar}
         </div>
         ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
     }
