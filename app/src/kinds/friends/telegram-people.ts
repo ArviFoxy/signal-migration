@@ -11,6 +11,8 @@ export type Person = {
   familyName: string;
   /** A plus sign and digits, when Telegram shows the user this person's phone number. */
   phoneNumber: string | null;
+  /** The number of the small profile picture among the files of Telegram's library, when there is a picture. */
+  photoFileId?: number;
 };
 
 export const nameOf = (person: Person) => [person.givenName, person.familyName].filter(Boolean).join(' ');
@@ -25,6 +27,8 @@ export type ChatEntry =
       memberIds: number[];
       /** How many people the group has. A list made from this one can keep fewer of them in `memberIds`. */
       memberCount: number;
+      /** The number of the group's small picture among the files of Telegram's library, when there is one. */
+      photoFileId?: number;
     };
 
 export type TelegramPeople = {
@@ -46,6 +50,8 @@ export interface PeopleSource {
    * to estimate that.
    */
   readPeople(onProgress: (done: number, total: number, secondsLeft: number | null) => void): Promise<TelegramPeople>;
+  /** The bytes of a picture, by the file number a person or a group carries. */
+  readPhoto(fileId: number): Promise<Uint8Array>;
 }
 
 /** How many chats Telegram is asked to load, and how many members of a large group it gives, in one request. */
@@ -93,7 +99,7 @@ const MAIN_LIST = { _: 'chatListMain' } as const;
  * kind of request took in all; `now` is the clock, in milliseconds.
  */
 export function peopleOf(
-  client: Pick<TelegramClient, 'invoke'>,
+  client: Pick<TelegramClient, 'invoke' | 'readFile'>,
   report: (line: string) => void = () => undefined,
   now: () => number = () => performance.now(),
 ): PeopleSource {
@@ -156,6 +162,7 @@ export function peopleOf(
   }
 
   return {
+    readPhoto: (fileId) => client.readFile(fileId),
     async readPeople(onProgress) {
       const started = now();
       const self = (await invoke({ _: 'getMe' })).id;
@@ -171,6 +178,7 @@ export function peopleOf(
           givenName: user.first_name,
           familyName: user.last_name,
           phoneNumber: user.phone_number ? `+${user.phone_number}` : null,
+          ...(user.profile_photo ? { photoFileId: user.profile_photo.small.id } : {}),
         });
         return true;
       };
@@ -183,6 +191,7 @@ export function peopleOf(
         chatId: number;
         title: string;
         type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup;
+        photoFileId: number | undefined;
       }[] = [];
       for (const [index, chatId] of ids.entries()) {
         const chat = await invoke({ _: 'getChat', chat_id: chatId });
@@ -190,7 +199,7 @@ export function peopleOf(
         if (type._ === 'chatTypePrivate') {
           if (await isPerson(type.user_id)) entries[index] = { kind: 'person', userId: type.user_id };
         } else if (type._ === 'chatTypeBasicGroup' || (type._ === 'chatTypeSupergroup' && !type.is_channel)) {
-          groups.push({ index, chatId, title: chat.title, type });
+          groups.push({ index, chatId, title: chat.title, type, photoFileId: chat.photo?.small.id });
         }
       }
       let done = ids.length - groups.length;
@@ -214,6 +223,7 @@ export function peopleOf(
             title: group.title,
             memberIds: present,
             memberCount: present.length,
+            ...(group.photoFileId === undefined ? {} : { photoFileId: group.photoFileId }),
           };
         groupsRead++;
         done++;

@@ -202,7 +202,14 @@ function foundFriends(): Extract<Session['friends'], { kind: 'found' }> {
     { kind: 'person', userId: 3 },
     { kind: 'person', userId: 6 },
   ];
-  return { kind: 'found', instance: 'fixture', deviceId: 3, attempt: 1, search: { chats, found, looked: 214 } };
+  return {
+    kind: 'found',
+    instance: 'fixture',
+    deviceId: 3,
+    attempt: 1,
+    search: { chats, found, looked: 214 },
+    photos: new Map(),
+  };
 }
 
 const FIXTURES: Record<string, Fixture> = {
@@ -412,6 +419,20 @@ const FIXTURES: Record<string, Fixture> = {
       }),
     then: (app) => (app.querySelector('button[aria-expanded]') as HTMLButtonElement).click(),
   },
+  'friends-found-users': {
+    state: () =>
+      setup('friends', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: FRIENDS_ONLY,
+        friends: foundFriends(),
+        untickedFriends: [5],
+      }),
+    then: (app) =>
+      [...app.querySelectorAll<HTMLButtonElement>('button[aria-pressed]')]
+        .find((button) => button.textContent?.includes('Users only'))
+        ?.click(),
+  },
   'friends-nobody': {
     state: () =>
       setup('friends', {
@@ -424,6 +445,7 @@ const FIXTURES: Record<string, Fixture> = {
           deviceId: 3,
           attempt: 1,
           search: { chats: [], found: new Map(), looked: 214 },
+          photos: new Map(),
         },
       }),
   },

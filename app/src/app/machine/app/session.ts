@@ -195,6 +195,13 @@ export function sessionWork(state: SessionState): Work[] {
       instance: friends.instance,
       device: state.signal.device,
     });
+  if (friends.kind === 'found' && state.kind === 'setup')
+    work.push({
+      kind: 'load-friend-photos',
+      key: `friend-photos:${friends.instance}:${friends.deviceId}:${friends.attempt}`,
+      instance: friends.instance,
+      search: friends.search,
+    });
   if (packs.kind === 'reading')
     work.push({
       kind: 'read-packs',

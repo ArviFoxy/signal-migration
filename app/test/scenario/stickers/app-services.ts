@@ -227,7 +227,10 @@ export function appServices(
           return { _: 'ok' };
         }) as unknown as Td.Invoke,
         source: user.stickers,
-        people: options.people ?? { readPeople: () => Promise.resolve({ chats: [], people: new Map() }) },
+        people: options.people ?? {
+          readPeople: () => Promise.resolve({ chats: [], people: new Map() }),
+          readPhoto: () => Promise.reject(new Error('the simulated account has no pictures')),
+        },
         async checkpoint() {
           if (browser.instances.has(instance)) browser.instances.set(instance, { ...live });
         },

@@ -3,7 +3,7 @@
 //
 // The list follows the Telegram chat list: one-to-one chats and groups in its order. A group opens in place and
 // stands for the people found in it. What is chosen is a set of people: a person's tick is the same tick in their own
-// row and inside every group.
+// row and inside every group. The list can also show the people alone, each once, to see who is chosen.
 
 import { html, nothing, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -26,6 +26,11 @@ const TITLE = 'Friends on Signal';
 const DESCRIPTION = 'Select who to add to your Signal contacts.';
 const people = (count: number) => `${count} ${count === 1 ? 'person' : 'people'}`;
 
+type Found = Extract<FriendsState, { kind: 'found' }>;
+type Group = Extract<ChatEntry, { kind: 'group' }>;
+/** What the list shows: the chat list with its groups, or the people alone. */
+type View = 'chats' | 'people';
+
 /** The time left in words, once it can be estimated. */
 function timeLeft(seconds: number | null): string | typeof nothing {
   if (seconds === null) return nothing;
@@ -42,6 +47,17 @@ const initials = (name: string) =>
     .join('')
     .toUpperCase();
 
+/** An address for each picture's bytes, made once. Telegram's profile pictures are JPEG files. */
+const pictureUrls = new WeakMap<Uint8Array, string>();
+function pictureUrl(bytes: Uint8Array): string {
+  let url = pictureUrls.get(bytes);
+  if (!url) {
+    url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }));
+    pictureUrls.set(bytes, url);
+  }
+  return url;
+}
+
 @customElement('friends-step')
 export class FriendsStep extends LightElement {
   @property({ attribute: false }) friends!: FriendsState;
@@ -52,6 +68,7 @@ export class FriendsStep extends LightElement {
   /** The chat ID of the group whose members are shown. */
   @state() private open: number | null = null;
   @state() private search = '';
+  @state() private view: View = 'chats';
 
   private tick(userIds: number[], ticked: boolean): void {
     this.emit('tick', { userIds, ticked });
@@ -63,8 +80,12 @@ export class FriendsStep extends LightElement {
     );
   }
 
-  private avatar(name: string, small = false) {
+  /** The Telegram picture of a person or a group, or the initials of the name where there is none (yet). */
+  private avatar(name: string, picture: Uint8Array | undefined, small = false) {
     const size = small ? 'size-7 text-[11px]' : 'size-10 text-sm';
+    if (picture) {
+      return html`<img src=${pictureUrl(picture)} alt="" class="${size} flex-none rounded-full object-cover" />`;
+    }
     return html`<span
       aria-hidden="true"
       class="flex ${size} flex-none items-center justify-center rounded-full bg-accent-soft font-semibold text-accent"
@@ -94,20 +115,20 @@ export class FriendsStep extends LightElement {
     />`;
   }
 
-  private personRow(friend: FoundFriend) {
+  private personRow(found: Found, friend: FoundFriend, note: string) {
     const name = nameOf(friend.person);
     return html`<li class="flex min-h-16 items-center gap-3 border-b border-line px-4 last:border-b-0">
-      ${this.avatar(name)}
+      ${this.avatar(name, found.photos.get(`user:${friend.person.userId}`))}
       <span class="flex min-w-0 flex-1 flex-col">
         <span class="truncate text-[15px] font-semibold">${name}</span>
-        <span class="truncate text-[13px] text-muted">${friend.inSignal ? 'In your Signal' : 'Direct chat'}</span>
+        <span class="truncate text-[13px] text-muted">${friend.inSignal ? 'In your Signal' : note}</span>
       </span>
       ${this.personTick(friend)}
     </li>`;
   }
 
-  private groupRow(chat: Extract<ChatEntry, { kind: 'group' }>, search: FriendSearch) {
-    const memberCount = chat.memberCount;
+  private groupRow(found: Found, chat: Group) {
+    const search = found.search;
     const members = chat.memberIds.map((userId) => search.found.get(userId)!);
     const addable = members.filter((friend) => !friend.inSignal).map((friend) => friend.person.userId);
     const ticked = addable.filter((userId) => !this.unticked.includes(userId)).length;
@@ -115,11 +136,11 @@ export class FriendsStep extends LightElement {
     const expanded = this.open === chat.chatId;
     return html`<li class="border-b border-line last:border-b-0">
       <div class="flex min-h-16 items-center gap-3 px-4">
-        ${this.avatar(chat.title)}
+        ${this.avatar(chat.title, found.photos.get(`chat:${chat.chatId}`))}
         <span class="flex min-w-0 flex-1 flex-col">
           <span class="truncate text-[15px] font-semibold">${chat.title}</span>
           <span class="truncate text-[13px] text-muted"
-            >${members.length} of ${memberCount} member${memberCount === 1 ? '' : 's'} on Signal</span
+            >${members.length} of ${chat.memberCount} member${chat.memberCount === 1 ? '' : 's'} on Signal</span
           >
         </span>
         <button
@@ -151,7 +172,7 @@ export class FriendsStep extends LightElement {
               ${members.map((friend) => {
                 const name = nameOf(friend.person);
                 return html`<li class="flex min-h-11 items-center gap-2.5">
-                  ${this.avatar(name, true)}
+                  ${this.avatar(name, found.photos.get(`user:${friend.person.userId}`), true)}
                   <span class="flex min-w-0 flex-1 flex-col">
                     <span class="truncate text-sm">${name}</span>
                     ${friend.inSignal ? html`<span class="text-xs text-muted">In your Signal</span>` : nothing}
@@ -165,42 +186,74 @@ export class FriendsStep extends LightElement {
     </li>`;
   }
 
-  render() {
-    const friends = this.friends;
-    if (friends.kind === 'none' || friends.kind === 'looking') {
-      const progress = friends.kind === 'looking' ? friends.progress : null;
-      // The search has two parts. Reading the chats has a known length; asking Signal is one request.
-      const asking = progress?.part === 'signal';
-      const label = asking
+  /** The search while it runs: which of its two parts, and how far it is. */
+  private looking(friends: Extract<FriendsState, { kind: 'none' | 'looking' }>) {
+    const progress = friends.kind === 'looking' ? friends.progress : null;
+    // Reading the chats has a known length; asking Signal is one request.
+    const label =
+      progress?.part === 'signal'
         ? 'Looking up Signal accounts by phone number'
         : 'Looking for Telegram contacts with a phone number';
-      const count = !progress
-        ? nothing
-        : progress.part === 'signal'
-          ? html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
-              >${progress.phoneNumbers} phone number${progress.phoneNumbers === 1 ? '' : 's'}</span
-            >`
-          : html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
-              >${progress.done} of ${progress.total} chats</span
-            >`;
-      const bar = !progress
-        ? progressBar(label, 0, 0)
-        : progress.part === 'signal'
-          ? html`<div class="animate-pulse">${progressBar(label, 1, 1)}</div>`
-          : progressBar(label, progress.done, progress.total);
-      return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
-        <div class="flex flex-col gap-1.5">
-          <div class="flex justify-between gap-3 text-sm">
-            <span class="font-semibold">${label}</span>
-            ${count}
-          </div>
-          ${bar}
-          <span class="min-h-5 text-sm text-muted"
-            >${progress?.part === 'telegram' ? timeLeft(progress.secondsLeft) : nothing}</span
-          >
+    const count = !progress
+      ? nothing
+      : progress.part === 'signal'
+        ? html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
+            >${progress.phoneNumbers} phone number${progress.phoneNumbers === 1 ? '' : 's'}</span
+          >`
+        : html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
+            >${progress.done} of ${progress.total} chats</span
+          >`;
+    const bar = !progress
+      ? progressBar(label, 0, 0)
+      : progress.part === 'signal'
+        ? html`<div class="animate-pulse">${progressBar(label, 1, 1)}</div>`
+        : progressBar(label, progress.done, progress.total);
+    // The line for the time left is there from the start, so nothing moves when the estimate appears.
+    return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
+      <div class="flex flex-col gap-1.5">
+        <div class="flex justify-between gap-3 text-sm">
+          <span class="font-semibold">${label}</span>
+          ${count}
         </div>
-        ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
+        ${bar}
+        <span class="min-h-5 text-sm text-muted"
+          >${progress?.part === 'telegram' ? timeLeft(progress.secondsLeft) : nothing}</span
+        >
+      </div>
+      ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
+  }
+
+  /** Where the user knows each found person from: a one-to-one chat, or the groups they share. */
+  private origins(search: FriendSearch): Map<number, string> {
+    const direct = new Set<number>();
+    const groups = new Map<number, string[]>();
+    for (const chat of search.chats) {
+      if (chat.kind === 'person') direct.add(chat.userId);
+      else for (const userId of chat.memberIds) groups.set(userId, [...(groups.get(userId) ?? []), chat.title]);
     }
+    return new Map(
+      [...search.found.keys()].map((userId) => {
+        const titles = groups.get(userId) ?? [];
+        const others = titles.length - 1;
+        const fromGroups = others > 0 ? `${titles[0]} and ${others} more` : (titles[0] ?? '');
+        return [userId, direct.has(userId) ? 'Direct chat' : fromGroups];
+      }),
+    );
+  }
+
+  /** The found people, each once, in the order in which the chat list first shows them. */
+  private peopleInOrder(search: FriendSearch): FoundFriend[] {
+    const order = new Set<number>();
+    for (const chat of search.chats) {
+      if (chat.kind === 'person') order.add(chat.userId);
+      else for (const userId of chat.memberIds) order.add(userId);
+    }
+    return [...order].map((userId) => search.found.get(userId)!);
+  }
+
+  render() {
+    const friends = this.friends;
+    if (friends.kind === 'none' || friends.kind === 'looking') return this.looking(friends);
     if (friends.kind === 'failed') {
       return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
       ${this.footer(
@@ -215,11 +268,6 @@ export class FriendsStep extends LightElement {
     const all = addable.length > 0 && toAdd === addable.length;
     const query = this.search.trim().toLowerCase();
     const matches = (name: string) => name.toLowerCase().includes(query);
-    const rows = search.chats.filter((chat) =>
-      chat.kind === 'person'
-        ? matches(nameOf(search.found.get(chat.userId)!.person))
-        : matches(chat.title) || chat.memberIds.some((userId) => matches(nameOf(search.found.get(userId)!.person))),
-    );
     const next = html`<span class="flex items-center gap-4">
       <span class="text-sm text-muted">${toAdd === 0 ? 'Nobody to add' : `${people(toAdd)} to add`}</span>
       <button type="button" class=${primaryButton} @click=${() => this.emit('next')}>Continue</button>
@@ -232,11 +280,34 @@ export class FriendsStep extends LightElement {
         </p>
         ${this.footer(next)}`;
     }
+
+    const origins = this.origins(search);
+    const rows =
+      this.view === 'people'
+        ? this.peopleInOrder(search)
+            .filter((friend) => matches(nameOf(friend.person)))
+            .map((friend) => this.personRow(friends, friend, origins.get(friend.person.userId) ?? ''))
+        : search.chats
+            .filter((chat) =>
+              chat.kind === 'person'
+                ? matches(nameOf(search.found.get(chat.userId)!.person))
+                : matches(chat.title) ||
+                  chat.memberIds.some((userId) => matches(nameOf(search.found.get(userId)!.person))),
+            )
+            .map((chat) =>
+              chat.kind === 'person'
+                ? this.personRow(friends, search.found.get(chat.userId)!, 'Direct chat')
+                : this.groupRow(friends, chat),
+            );
+    const views: { id: View; label: string }[] = [
+      { id: 'chats', label: 'Users and groups' },
+      { id: 'people', label: 'Users only' },
+    ];
     return html`${stepHeader(this.position, TITLE, DESCRIPTION)}
       <div class="flex flex-col gap-2">
         <label class="flex min-h-11 items-center gap-2 rounded-xl bg-segment px-3">
           ${icons.search()}
-          <span class="sr-only">Search chats</span>
+          <span class="sr-only">Search</span>
           <input
             type="search"
             placeholder="Search"
@@ -245,13 +316,27 @@ export class FriendsStep extends LightElement {
             @input=${(event: Event) => (this.search = (event.target as HTMLInputElement).value)}
           />
         </label>
-        <div class="flex items-center justify-between gap-3">
-          <span class="text-sm text-muted">${everyone.length} of ${people(search.looked)} are on Signal</span>
+        <div class="flex flex-wrap items-center justify-between gap-2">
+          <div role="group" aria-label="What the list shows" class="inline-flex gap-1 rounded-[10px] bg-segment p-1">
+            ${views.map(
+              (view) =>
+                html`<button
+                  type="button"
+                  aria-pressed=${view.id === this.view}
+                  class="min-h-9 cursor-pointer rounded-lg px-3 text-[13px] font-medium ${
+                    view.id === this.view ? 'bg-white text-ink shadow-[0_1px_2px_rgba(20,20,30,0.12)]' : 'text-muted'
+                  }"
+                  @click=${() => (this.view = view.id)}
+                >
+                  ${view.label}
+                </button>`,
+            )}
+          </div>
           ${
             addable.length > 0
               ? html`<button
                   type="button"
-                  class="min-h-11 cursor-pointer rounded-[10px] px-3 text-sm font-semibold text-accent hover:bg-accent-soft"
+                  class="min-h-9 cursor-pointer rounded-[10px] px-3 text-sm font-semibold text-accent hover:bg-accent-soft"
                   @click=${() => this.tick(addable, !all)}
                 >
                   ${all ? 'Select none' : 'Select all'}
@@ -259,16 +344,15 @@ export class FriendsStep extends LightElement {
               : nothing
           }
         </div>
+        <span class="text-sm text-muted">${everyone.length} of ${people(search.looked)} are on Signal</span>
         ${
           rows.length === 0
-            ? html`<p class="text-sm text-muted">No chats match.</p>`
+            ? html`<p class="text-sm text-muted">Nothing matches.</p>`
             : html`<ul
-                aria-label="Chats"
+                aria-label=${this.view === 'people' ? 'People' : 'Chats'}
                 class="flex shrink-0 flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset"
               >
-                ${rows.map((chat) =>
-                  chat.kind === 'person' ? this.personRow(search.found.get(chat.userId)!) : this.groupRow(chat, search),
-                )}
+                ${rows}
               </ul>`
         }
       </div>

@@ -33,6 +33,7 @@ const AIKO = person(6, 'Aiko', '+447700900106');
 
 const telegram = (chats: ChatEntry[], people: Person[]): PeopleSource => ({
   readPeople: () => Promise.resolve({ chats, people: new Map(people.map((one) => [one.userId, one])) }),
+  readPhoto: () => Promise.reject(new Error('no pictures here')),
 });
 
 /** A source that finds exactly `accounts`, by Telegram user ID. */
@@ -129,6 +130,7 @@ describe('the friend search', () => {
     const world = new World();
     const account = new User(world).linkDevice();
     const reading: PeopleSource = {
+      readPhoto: () => Promise.reject(new Error('no pictures here')),
       readPeople(onProgress) {
         onProgress(1, 2, null);
         onProgress(2, 2, 40);

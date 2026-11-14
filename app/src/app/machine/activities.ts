@@ -221,6 +221,26 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         emit({ type: 'friends/failed', error: message(error) });
       }
       return;
+    case 'load-friend-photos': {
+      const source = sessionOf(resources, work.instance).people;
+      const wanted: [string, number | undefined][] = [
+        ...work.search.chats.flatMap((chat): [string, number | undefined][] =>
+          chat.kind === 'group' ? [[`chat:${chat.chatId}`, chat.photoFileId]] : [],
+        ),
+        ...[...work.search.found.values()].map((friend): [string, number | undefined] => [
+          `user:${friend.person.userId}`,
+          friend.person.photoFileId,
+        ]),
+      ];
+      for (const [of, fileId] of wanted) {
+        if (cancel.aborted) return;
+        if (fileId === undefined) continue;
+        // A picture that cannot be read is left out; the row shows initials in its place.
+        const data = await source.readPhoto(fileId).catch(() => null);
+        if (data) emit({ type: 'friends/photo', of, data });
+      }
+      return;
+    }
     case 'add-friends':
       try {
         await addContacts(deviceOf(context, work.device), work.contacts);

@@ -18,11 +18,20 @@ export type FriendsState =
       attempt: number;
       progress: SearchProgress | null;
     }
-  | { kind: 'found'; instance: string; deviceId: number; attempt: number; search: FriendSearch }
+  /** `photos`: the Telegram pictures read so far, under "user:" and a user ID or "chat:" and a chat ID. */
+  | {
+      kind: 'found';
+      instance: string;
+      deviceId: number;
+      attempt: number;
+      search: FriendSearch;
+      photos: ReadonlyMap<string, Uint8Array>;
+    }
   | { kind: 'failed'; instance: string; deviceId: number; attempt: number; error: string };
 
 export type FriendsEvent =
   | { type: 'friends/progress'; progress: SearchProgress }
   | { type: 'friends/found'; search: FriendSearch }
   | { type: 'friends/failed'; error: string }
+  | { type: 'friends/photo'; of: string; data: Uint8Array }
   | { type: 'friends/try-again' };

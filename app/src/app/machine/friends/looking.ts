@@ -11,6 +11,7 @@ export const looking: VariantHandlers<FriendsState, 'looking', FriendsEvent, Con
     deviceId: state.deviceId,
     attempt: state.attempt,
     search: event.search,
+    photos: new Map(),
   }),
   'friends/failed': (state, event) => ({
     kind: 'failed',

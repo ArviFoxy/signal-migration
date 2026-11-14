@@ -97,7 +97,8 @@ function account(
         throw new Error(`unexpected request ${query._}`);
     }
   }) as unknown as Td.Invoke;
-  return { source: peopleOf({ invoke }, options.report, options.now), requests };
+  const readFile = (fileId: number) => Promise.resolve(Uint8Array.of(fileId));
+  return { source: peopleOf({ invoke, readFile }, options.report, options.now), requests };
 }
 
 const USERS: Record<number, FakeUser> = {
