@@ -205,11 +205,7 @@ export class FriendsStep extends LightElement {
       )}
       ${this.footer(next)}`;
     }
-    return html`${stepHeader(
-        this.position,
-        TITLE,
-        'Tick who to add to your Signal contacts. A group ticks everyone in it who is on Signal.',
-      )}
+    return html`${stepHeader(this.position, TITLE, 'Select who to add to your Signal contacts.')}
       <div class="flex flex-col gap-2">
         <label class="flex min-h-11 items-center gap-2 rounded-xl bg-segment px-3">
           ${icons.search()}
