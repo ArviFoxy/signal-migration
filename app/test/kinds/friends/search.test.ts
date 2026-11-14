@@ -8,6 +8,10 @@ import {
   addContacts,
   contactsToAdd,
   findFriends,
+  type FriendRow,
+  friendRows,
+  type FriendSearch,
+  friendsIn,
   type FriendSource,
   phoneNumberSource,
   type SignalIdentifiers,
@@ -189,6 +193,53 @@ describe('the friend search', () => {
     expect(search.chats).toEqual([{ kind: 'person', userId: 2 }]);
   });
 
+  describe('the rows of the list', () => {
+    const dana = person(8, 'Dana', '+12025550108');
+    const friend = (one: Person, inSignal = false) => ({
+      person: one,
+      signal: { accountId: null, phoneNumberIdentity: id(one.userId), phoneNumber: one.phoneNumber },
+      inSignal,
+    });
+    const flat = { kind: 'group' as const, chatId: 100, title: 'Flat 12', memberIds: [2, 6], memberCount: 3 };
+    /** Mara and Aiko share a group, Mara has a chat of her own; Dana is in no chat and on the contact list with Mara. */
+    const results: FriendSearch = {
+      chats: [flat, { kind: 'person', userId: 2 }],
+      found: new Map([MARA, AIKO, dana].map((one) => [one.userId, friend(one)])),
+      contacts: [8, 2],
+      looked: 3,
+    };
+    const idsIn = (rows: FriendRow[]) => friendsIn(rows, results).map((one) => one.person.userId);
+
+    it('shows the chats with their groups, the people of the chats alone, or the contact list', () => {
+      const chats = friendRows(results, { list: 'chats', groups: true, text: '' });
+      expect(chats).toEqual([
+        { kind: 'group', chat: flat },
+        { kind: 'person', friend: friend(MARA) },
+      ]);
+      const people = friendRows(results, { list: 'chats', groups: false, text: '' });
+      expect(idsIn(people)).toEqual([2, 6]);
+      expect(idsIn(friendRows(results, { list: 'contacts', groups: true, text: '' }))).toEqual([8, 2]);
+    });
+
+    it('narrows every list to the text in the search box, and shows a group for one of its members', () => {
+      expect(friendRows(results, { list: 'chats', groups: true, text: ' aiko ' })).toEqual([
+        { kind: 'group', chat: flat },
+      ]);
+      expect(idsIn(friendRows(results, { list: 'chats', groups: false, text: 'AIKO' }))).toEqual([6]);
+      expect(idsIn(friendRows(results, { list: 'contacts', groups: true, text: 'dan' }))).toEqual([8]);
+      expect(friendRows(results, { list: 'contacts', groups: true, text: 'nobody' })).toEqual([]);
+    });
+
+    // Detects: "Select all" on one list ticking people the list does not show, who would then be added to Signal
+    // without the user having seen them.
+    it('counts as shown only the people of the rows, a group with its found members', () => {
+      expect(idsIn(friendRows(results, { list: 'chats', groups: true, text: '' }))).toEqual([2, 6]);
+      expect(idsIn(friendRows(results, { list: 'chats', groups: true, text: 'flat' }))).toEqual([2, 6]);
+      expect(idsIn(friendRows(results, { list: 'contacts', groups: true, text: '' }))).not.toContain(6);
+      expect(idsIn(friendRows(results, { list: 'chats', groups: true, text: '' }))).not.toContain(8);
+    });
+  });
+
   it('puts together what two sources found about one person', async () => {
     const world = new World();
     const account = new User(world).linkDevice();
@@ -243,7 +294,8 @@ describe('adding the chosen friends to Signal', () => {
     expect(world.signal.toldToFetchStorage.get(user.aci)).toBe(1);
   });
 
-  it('does not add a person a second time, and then tells the other devices nothing', async () => {
+  // An attempt can write the contacts and stop before the other devices are told; the next attempt tells them.
+  it('does not add a person a second time, and tells the other devices again', async () => {
     const world = new World();
     const user = new User(world);
     const account = user.linkDevice();
@@ -252,7 +304,7 @@ describe('adding the chosen friends to Signal', () => {
     expect(await addContacts(account, contacts)).toBe(0);
 
     expect((await (await user.phone.storage()).readContacts()).contacts).toHaveLength(2);
-    expect(world.signal.toldToFetchStorage.get(user.aci)).toBe(1);
+    expect(world.signal.toldToFetchStorage.get(user.aci)).toBe(2);
   });
 
   it('writes again when another device changed the storage in between, without the person that device added', async () => {

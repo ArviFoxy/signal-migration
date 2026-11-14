@@ -1,5 +1,5 @@
-// The people of a Telegram account, as its chat list shows them: everyone the user has a one-to-one chat with, and
-// the members of the user's groups. Telegram has no list of friends, so these are the people a user can mean.
+// The people of a Telegram account: everyone the user has a one-to-one chat with, the members of the user's groups,
+// and the user's contact list. Telegram has no list of friends, so these are the people a user can mean.
 
 import type * as Td from 'tdlib-types';
 import { type TelegramClient, TelegramError, untilNotRestarted } from '../../telegram/client';
@@ -92,10 +92,10 @@ const GROUPS_BEFORE_ESTIMATE = 5;
 const SECONDS_BEFORE_ESTIMATE = 5;
 
 /**
- * Sends a request, and again after the wait Telegram names when it says the requests come too fast; `onWait` hears
- * of each wait.
+ * Sends a request, and again after the wait Telegram names when it says the requests come too fast. TDLib itself
+ * waits and asks again for up to a minute for one request, without a word; its answer 429 arrives only beyond that.
  */
-async function patiently<T>(request: () => Promise<T>, onWait: () => void): Promise<T> {
+async function patiently<T>(request: () => Promise<T>): Promise<T> {
   for (let waits = 0; ; waits++) {
     try {
       return await request();
@@ -104,7 +104,6 @@ async function patiently<T>(request: () => Promise<T>, onWait: () => void): Prom
         error instanceof TelegramError && error.code === TOO_FAST ? /retry after (\d+)/.exec(error.message) : null;
       const seconds = named ? Number(named[1]) : null;
       if (seconds === null || seconds > LONGEST_WAIT_S || waits >= WAITS_PER_REQUEST) throw error;
-      onWait();
       await new Promise((resolve) => setTimeout(resolve, seconds * 1000 + 250));
     }
   }
@@ -113,28 +112,15 @@ async function patiently<T>(request: () => Promise<T>, onWait: () => void): Prom
 const MAIN_LIST = { _: 'chatListMain' } as const;
 
 /**
- * The people of the account behind `client`. `report` gets one line when the reading is done, saying how long each
- * kind of request took in all; `now` is the clock, in milliseconds.
+ * The people of the account behind `client`. `now` is the clock, in milliseconds, by which the time left is
+ * estimated.
  */
 export function peopleOf(
   client: Pick<TelegramClient, 'invoke' | 'readFile'>,
-  report: (line: string) => void = () => undefined,
   now: () => number = () => performance.now(),
 ): PeopleSource {
-  const spent = new Map<string, { count: number; ms: number }>();
-  let waits = 0;
-  const invoke = (async (query: { _: string }) => {
-    const started = now();
-    try {
-      return await patiently(
-        () => untilNotRestarted(() => client.invoke(query as never)),
-        () => waits++,
-      );
-    } finally {
-      const kind = spent.get(query._) ?? { count: 0, ms: 0 };
-      spent.set(query._, { count: kind.count + 1, ms: kind.ms + now() - started });
-    }
-  }) as Td.Invoke;
+  const invoke = ((query: { _: string }) =>
+    patiently(() => untilNotRestarted(() => client.invoke(query as never)))) as Td.Invoke;
 
   /** The IDs of all chats in the main list, in its order. */
   async function chatIds(): Promise<number[]> {
@@ -190,7 +176,6 @@ export function peopleOf(
   return {
     readPhoto: (fileId) => client.readFile(fileId),
     async readPeople(onProgress) {
-      const started = now();
       const self = (await invoke({ _: 'getMe' })).id;
       const people = new Map<number, Person>();
       /** Notes the person behind `userId` and says whether it is one: not the user, a bot or a deleted account. */
@@ -301,14 +286,6 @@ export function peopleOf(
         }),
       );
 
-      const requests = [...spent]
-        .map(([kind, { count, ms }]) => `${kind} ${count} times in ${(ms / 1000).toFixed(1)} s`)
-        .join(', ');
-      report(
-        `Reading the people from Telegram took ${((now() - started) / 1000).toFixed(1)} s for ${ids.length} chats, ` +
-          `${groups.length} of them groups. Requests: ${requests}. ` +
-          `Waited ${waits} times because Telegram said the requests came too fast.`,
-      );
       return { chats: entries.filter((entry) => entry !== null), people, contactIds };
     },
   };

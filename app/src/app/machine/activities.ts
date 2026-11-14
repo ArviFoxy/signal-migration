@@ -225,8 +225,9 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       return;
     case 'load-friend-photos': {
       const source = sessionOf(resources, work.instance).people;
-      const { chats, found } = work.search;
-      // In the order of the rows: each chat's own picture, and after a group's picture those of its members.
+      const { chats, contacts, found } = work.search;
+      // In the order of the rows: each chat's own picture, and after a group's picture those of its members. Then
+      // the contacts who are in no chat.
       const wanted = new Map<string, number>();
       const want = (of: string, fileId: number | undefined) => {
         if (fileId !== undefined && !wanted.has(of)) wanted.set(of, fileId);
@@ -239,6 +240,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           for (const userId of chat.memberIds) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
         }
       }
+      for (const userId of contacts) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
       const waiting = [...wanted];
       await Promise.all(
         Array.from({ length: PHOTOS_AT_ONCE }, async () => {

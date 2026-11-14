@@ -29,7 +29,7 @@ const SELF = 1;
 function account(
   users: Record<number, FakeUser>,
   chats: FakeChat[],
-  options: { tooFastOnce?: boolean; now?: () => number; report?: (line: string) => void; contacts?: number[] } = {},
+  options: { tooFastOnce?: boolean; now?: () => number; contacts?: number[] } = {},
 ) {
   const requests: string[] = [];
   let loaded = 0;
@@ -107,7 +107,7 @@ function account(
     }
   }) as unknown as Td.Invoke;
   const readFile = (fileId: number) => Promise.resolve(Uint8Array.of(fileId));
-  return { source: peopleOf({ invoke, readFile }, options.report, options.now), requests };
+  return { source: peopleOf({ invoke, readFile }, options.now), requests };
 }
 
 const USERS: Record<number, FakeUser> = {
@@ -244,18 +244,6 @@ describe('the people of a Telegram account', () => {
     expect(reported.slice(0, 5).map((progress) => progress.secondsLeft)).toEqual([null, null, null, null, null]);
     for (const progress of reported.slice(5)) expect(progress.secondsLeft).toBeGreaterThanOrEqual(0);
     expect(reported.at(-1)!.secondsLeft).toBe(0);
-  });
-
-  it('reports how long the requests took, without naming a chat or a person', async () => {
-    const lines: string[] = [];
-    const { source } = account(USERS, [{ supergroup: 'Hiking crew', members: [2, 6] }, { private: 3 }], {
-      report: (line) => lines.push(line),
-    });
-    await source.readPeople(() => undefined);
-    expect(lines).toHaveLength(1);
-    expect(lines[0]).toMatch(/for 2 chats, 1 of them groups/);
-    expect(lines[0]).toMatch(/getSupergroupMembers 1 times/);
-    for (const name of ['Hiking crew', 'Mara', 'Aiko', '12025550102']) expect(lines[0]).not.toContain(name);
   });
 
   it('reads the members of a large group in several requests', async () => {

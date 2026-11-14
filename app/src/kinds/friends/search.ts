@@ -118,6 +118,48 @@ export async function findFriends(
   return { chats, found, contacts, looked: everyone.length };
 }
 
+type Group = Extract<ChatEntry, { kind: 'group' }>;
+
+/**
+ * What the list of found friends shows: the chats or the Telegram contact list, the chats with their groups or as
+ * people alone, and the text in the search box.
+ */
+export type FriendListView = { list: 'chats' | 'contacts'; groups: boolean; text: string };
+
+/** One row of that list: a found person, or a group with its found members. */
+export type FriendRow = { kind: 'person'; friend: FoundFriend } | { kind: 'group'; chat: Group };
+
+/**
+ * The rows of a search for `view`. A person is shown when the name contains the text; a group when its title or
+ * the name of one of its found members does.
+ */
+export function friendRows(search: FriendSearch, view: FriendListView): FriendRow[] {
+  const friendOf = (userId: number) => search.found.get(userId)!;
+  const text = view.text.trim().toLowerCase();
+  const matches = (name: string) => name.toLowerCase().includes(text);
+  const named = (friend: FoundFriend) => matches(nameOf(friend.person));
+  const person = (friend: FoundFriend): FriendRow => ({ kind: 'person', friend });
+  if (view.list === 'contacts') return search.contacts.map(friendOf).filter(named).map(person);
+  if (!view.groups) {
+    // Each person once, in the order in which the chat list first shows them.
+    const order = new Set(search.chats.flatMap((chat) => (chat.kind === 'person' ? [chat.userId] : chat.memberIds)));
+    return [...order].map(friendOf).filter(named).map(person);
+  }
+  return search.chats.flatMap((chat): FriendRow[] => {
+    if (chat.kind === 'person') return named(friendOf(chat.userId)) ? [person(friendOf(chat.userId))] : [];
+    const shown = matches(chat.title) || chat.memberIds.some((userId) => named(friendOf(userId)));
+    return shown ? [{ kind: 'group', chat }] : [];
+  });
+}
+
+/** The people in `rows`, each once; a group counts with its found members. Ticking all that is shown ticks these. */
+export function friendsIn(rows: FriendRow[], search: FriendSearch): FoundFriend[] {
+  const userIds = new Set(
+    rows.flatMap((row) => (row.kind === 'person' ? [row.friend.person.userId] : row.chat.memberIds)),
+  );
+  return [...userIds].map((userId) => search.found.get(userId)!);
+}
+
 /** The contacts to add: everyone found who is not in Signal yet and whom the user ticked. */
 export function contactsToAdd(search: FriendSearch, ticked: readonly number[]): NewContact[] {
   return [...search.found.values()]
@@ -133,15 +175,16 @@ const WRITE_ATTEMPTS = 5;
 
 /**
  * Adds `contacts` to the account's Signal contacts and tells its other devices. A person who has become a contact
- * in the meantime is left as they are. Returns how many were added.
+ * in the meantime is left as they are. The other devices are told also when every person is a contact already: an
+ * earlier attempt can have written them and stopped before telling. Returns how many were added.
  */
 export async function addContacts(account: SignalAccount, contacts: NewContact[]): Promise<number> {
+  if (contacts.length === 0) return 0;
   const storage = await account.storage();
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     const snapshot = await storage.readContacts();
     const fresh = contacts.filter((contact) => !snapshot.contacts.some((stored) => sameAccount(stored, contact)));
-    if (fresh.length === 0) return 0;
-    if (await storage.addContacts(snapshot, fresh)) {
+    if (fresh.length === 0 || (await storage.addContacts(snapshot, fresh))) {
       await account.announceStorageChange();
       return fresh.length;
     }

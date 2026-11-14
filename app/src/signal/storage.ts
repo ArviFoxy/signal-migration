@@ -242,8 +242,9 @@ export class StorageClient {
    * the snapshot (HTTP 409); read again and decide again in that case. The caller leaves out people who are among
    * the snapshot's contacts: a second record for a person would overwrite what the user set for them.
    *
-   * A record carries the identifiers, the nickname and the mark of an accepted conversation, without which Signal's
-   * apps do not list the contact. It sets nothing else: no blocking, no keys.
+   * A record carries the identifiers, the nickname and `whitelisted`. That field says the user accepted the
+   * conversation with the person: Signal for Android lists only such a contact, and a message from the person
+   * arrives without the step of accepting a request. A record sets nothing else: no blocking, no keys.
    */
   async addContacts(snapshot: ContactSnapshot, contacts: NewContact[]): Promise<boolean> {
     return this.#write(

@@ -32,7 +32,7 @@ export interface TelegramSession {
   readonly instance: string;
   invoke: Td.Invoke;
   readonly source: TelegramSource;
-  /** The people of the account: its one-to-one chats and the members of its groups. */
+  /** The people of the account: its one-to-one chats, the members of its groups and its contact list. */
   readonly people: PeopleSource;
   /** Saves the login in this browser now. */
   checkpoint(): Promise<void>;
@@ -137,7 +137,7 @@ export const realServices: AppServices = {
         instance,
         invoke: client.invoke,
         source: telegramSource(client),
-        people: peopleOf(client, (line) => console.info(line)),
+        people: peopleOf(client),
         checkpoint: () => client.checkpoint(),
         logOut: () => client.logOut(),
         terminate: () => client.terminate(),

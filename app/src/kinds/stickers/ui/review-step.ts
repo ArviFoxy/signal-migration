@@ -23,16 +23,15 @@ export class StickerReviewStep extends MigrationView {
     if (this.stickers && !this.migration) return stepHeader(this.position, 'Review', 'Reading your packs…');
     const selected = this.migration?.selected ?? [];
     const friends = this.friends;
-    const alreadyThere = selected.filter((entry) => entry.state === 'in-signal').length;
+    const inSignal = selected.filter((entry) => entry.state === 'in-signal').length;
     const summary = [
       ...(this.stickers
         ? [
-            `${selected.length} sticker pack${selected.length === 1 ? '' : 's'} selected${alreadyThere > 0 ? `, ${alreadyThere} already in your Signal` : ''}`,
+            `${selected.length} sticker pack${selected.length === 1 ? '' : 's'} selected${inSignal > 0 ? `, ${inSignal} already in your Signal` : ''}`,
           ]
         : []),
       ...(friends === null ? [] : [`${friends} friend${friends === 1 ? '' : 's'} to add to your Signal contacts`]),
     ];
-    const inSignal = selected.filter((entry) => entry.state === 'in-signal').length;
     const install = selected.filter((entry) => entry.state === 'available').length;
     const toUpload = selected.filter((entry) => entry.state !== 'in-signal' && entry.state !== 'available');
     const wait = estimatedUploadWaitMs(toUpload.length);

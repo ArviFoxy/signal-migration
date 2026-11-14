@@ -20,21 +20,30 @@ const MARA: Person = {
   phoneNumber: '+12025550102',
   photoFileId: 12,
 };
-const AIKO: Person = { userId: 6, givenName: 'Aiko', familyName: 'Tanaka', phoneNumber: '+447700900106' };
+const AIKO: Person = {
+  userId: 6,
+  givenName: 'Aiko',
+  familyName: 'Tanaka',
+  phoneNumber: '+447700900106',
+  photoFileId: 16,
+};
 const JONAS: Person = { userId: 3, givenName: 'Jonas', familyName: '', phoneNumber: null };
 
-/** Mara and Jonas in one-to-one chats, and a group with all three. Mara and the group have a picture. */
+/**
+ * Mara and Jonas in one-to-one chats, and a group with Mara and Jonas. Aiko is in no chat and on the contact list.
+ * Mara, Aiko and the group have a picture.
+ */
 const people: PeopleSource = {
   readPhoto: (fileId) => Promise.resolve(Uint8Array.of(fileId)),
   readPeople: () =>
     Promise.resolve({
       chats: [
         { kind: 'person', userId: 2 },
-        { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [2, 3, 6], memberCount: 3, photoFileId: 31 },
+        { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [2, 3], memberCount: 2, photoFileId: 31 },
         { kind: 'person', userId: 3 },
       ],
       people: new Map([MARA, AIKO, JONAS].map((person) => [person.userId, person])),
-      contactIds: [],
+      contactIds: [AIKO.userId],
     }),
 };
 
@@ -116,7 +125,8 @@ describe('finding friends', () => {
     expect(page.workflow.friendsAdded).toBe(1);
   });
 
-  // Detects: rows without the Telegram pictures by which a user recognises people and groups.
+  // Detects: rows without the Telegram pictures by which a user recognises people and groups, in the chats or on
+  // the contact list.
   it('reads the Telegram pictures of the people and groups it shows', async () => {
     const world = new StickerWorld();
     const page = await openPage(world.user([]), new Browser(), source().friendSource);
@@ -126,9 +136,10 @@ describe('finding friends', () => {
       const friends = page.workflow.friends;
       return friends.kind === 'found' ? friends.photos : new Map<string, Uint8Array>();
     };
-    await until(() => pictures().size === 2, 'the pictures');
+    await until(() => pictures().size === 3, 'the pictures');
     expect(pictures().get('user:2')).toEqual(Uint8Array.of(12));
     expect(pictures().get('chat:100')).toEqual(Uint8Array.of(31));
+    expect(pictures().get('user:6')).toEqual(Uint8Array.of(16));
   });
 
   // Detects: one kind keeping the other from finishing, or the migration ending before both are done.

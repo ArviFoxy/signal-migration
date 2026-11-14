@@ -18,7 +18,7 @@ import {
   type StepPosition,
   stickyFooter,
 } from '../../../ui/layout';
-import type { FoundFriend, FriendSearch } from '../search';
+import { type FoundFriend, friendRows, type FriendSearch, friendsIn } from '../search';
 import { type ChatEntry, nameOf } from '../telegram-people';
 
 // One screen in every state: the same title and description, with the progress of the search where the list will be.
@@ -280,16 +280,6 @@ export class FriendsStep extends LightElement {
     );
   }
 
-  /** The found people, each once, in the order in which the chat list first shows them. */
-  private peopleInOrder(search: FriendSearch): FoundFriend[] {
-    const order = new Set<number>();
-    for (const chat of search.chats) {
-      if (chat.kind === 'person') order.add(chat.userId);
-      else for (const userId of chat.memberIds) order.add(userId);
-    }
-    return [...order].map((userId) => search.found.get(userId)!);
-  }
-
   render() {
     const friends = this.friends;
     if (friends.kind === 'none' || friends.kind === 'looking') return this.looking(friends);
@@ -302,11 +292,7 @@ export class FriendsStep extends LightElement {
 
     const search = friends.search;
     const everyone = [...search.found.values()];
-    const addable = everyone.filter((friend) => !friend.inSignal).map((friend) => friend.person.userId);
-    const toAdd = addable.filter((userId) => this.ticked.includes(userId)).length;
-    const all = addable.length > 0 && toAdd === addable.length;
-    const query = this.search.trim().toLowerCase();
-    const matches = (name: string) => name.toLowerCase().includes(query);
+    const toAdd = everyone.filter((friend) => !friend.inSignal && this.ticked.includes(friend.person.userId)).length;
     const next = html`<span class="flex items-center gap-4">
       <span class="text-sm text-muted">${toAdd === 0 ? 'Nobody to add' : `${people(toAdd)} to add`}</span>
       <button type="button" class=${primaryButton} @click=${() => this.emit('next')}>Continue</button>
@@ -320,29 +306,30 @@ export class FriendsStep extends LightElement {
         ${this.footer(next)}`;
     }
 
+    const shown = friendRows(search, { list: this.list, groups: this.view === 'chats', text: this.search });
+    // "Select all" is about the rows shown, not about everyone found.
+    const addable = friendsIn(shown, search)
+      .filter((friend) => !friend.inSignal)
+      .map((friend) => friend.person.userId);
+    const all = addable.length > 0 && addable.every((userId) => this.ticked.includes(userId));
     const origins = this.origins(search);
-    const rows =
+    const note = (userId: number) =>
       this.list === 'contacts'
-        ? search.contacts
-            .map((userId) => search.found.get(userId)!)
-            .filter((friend) => matches(nameOf(friend.person)))
-            .map((friend) => this.personRow(friends, friend, origins.get(friend.person.userId) || 'Telegram contact'))
+        ? origins.get(userId) || 'Telegram contact'
         : this.view === 'people'
-          ? this.peopleInOrder(search)
-              .filter((friend) => matches(nameOf(friend.person)))
-              .map((friend) => this.personRow(friends, friend, origins.get(friend.person.userId) ?? ''))
-          : search.chats
-              .filter((chat) =>
-                chat.kind === 'person'
-                  ? matches(nameOf(search.found.get(chat.userId)!.person))
-                  : matches(chat.title) ||
-                    chat.memberIds.some((userId) => matches(nameOf(search.found.get(userId)!.person))),
-              )
-              .map((chat) =>
-                chat.kind === 'person'
-                  ? this.personRow(friends, search.found.get(chat.userId)!, 'Direct chat')
-                  : this.groupRow(friends, chat),
-              );
+          ? (origins.get(userId) ?? '')
+          : 'Direct chat';
+    const rows = shown.map((row) =>
+      row.kind === 'person'
+        ? this.personRow(friends, row.friend, note(row.friend.person.userId))
+        : this.groupRow(friends, row.chat),
+    );
+    const nothingShown =
+      this.search.trim() !== ''
+        ? 'Nothing matches.'
+        : this.list === 'contacts'
+          ? 'None of your Telegram contacts was found on Signal.'
+          : 'None of the people in your Telegram chats was found on Signal.';
     const views: { id: View; label: string }[] = [
       { id: 'chats', label: 'Users and groups' },
       { id: 'people', label: 'Users only' },
@@ -388,9 +375,7 @@ export class FriendsStep extends LightElement {
         </div>
         ${
           rows.length === 0
-            ? html`<p class="text-sm text-muted">
-                ${query === '' ? 'None of your Telegram contacts was found on Signal.' : 'Nothing matches.'}
-              </p>`
+            ? html`<p class="text-sm text-muted">${nothingShown}</p>`
             : html`<ul
                 aria-label=${this.list === 'contacts' ? 'Contacts' : this.view === 'people' ? 'People' : 'Chats'}
                 class="flex shrink-0 flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset"
