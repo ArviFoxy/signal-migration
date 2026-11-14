@@ -267,6 +267,7 @@ export function appServices(
       withChat: (action) => account.withChat(action),
       storage: () => account.storage(),
       announceStickerPacks: (packs) => account.announceStickerPacks(packs),
+      announceStorageChange: () => account.announceStorageChange(),
       async unlink() {
         if (options.unlinkNever) await new Promise(() => undefined);
         if (world.signal.failUnlinks > 0) {
