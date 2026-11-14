@@ -1,4 +1,4 @@
-# Once a week, compares the versions pinned in scripts/build-webm-decoder.sh with the newest releases
+# Once a week, compares the versions pinned in the build scripts with the newest releases
 # (scripts/check-pinned-versions.sh). When one is behind, it opens an issue, or updates the one already open.
 name: Pinned versions
 
@@ -30,7 +30,7 @@ jobs:
         run: |
           title='Newer versions for the WebM decoder build'
           {
-            echo 'scripts/build-webm-decoder.sh pins older versions than the newest releases:'
+            echo 'The build scripts pin older versions than the newest releases:'
             echo
             sed 's/^/- /' behind.txt
           } > body.md

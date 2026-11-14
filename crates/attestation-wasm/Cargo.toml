@@ -1,0 +1,27 @@
+[package]
+name = "attestation-wasm"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-only"
+publish = false
+description = "libsignal's check of an enclave's attestation, built for the browser page together with BoringSSL."
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+attest = { path = "../../third_party/libsignal/rust/attest" }
+wasm-bindgen = "0.2"
+# getrandom has no default randomness source on wasm32-unknown-unknown; "wasm_js" uses the browser's crypto.getRandomValues.
+getrandom = { version = "0.3", features = ["wasm_js"] }
+# libsignal's dependencies also use getrandom 0.4, which needs the same feature.
+getrandom-04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
+
+# The `libc` crate defines no C types for wasm32-unknown-unknown, and the `boring` crate needs them. This copy defines
+# them. scripts/build-boringssl-wasm.sh makes it from the published crate and libc-wasm32-unknown.patch.
+[patch.crates-io]
+libc = { path = "../../build/boringssl-wasm/libc" }
+
+[profile.release]
+opt-level = 3
+lto = true

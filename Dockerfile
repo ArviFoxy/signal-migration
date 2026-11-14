@@ -5,9 +5,9 @@
 #
 #   docker build --output type=local,dest=out .
 #
-# writes out/signal-migration-server and out/dist/. The stages `tdweb` and `webm-decoder` hold only their output
-# files, so either can be built alone (`--target tdweb --output ...`) and handed back to a later build in its place
-# (`--build-context tdweb=<folder>`).
+# writes out/signal-migration-server and out/dist/. The stages `tdweb`, `webm-decoder` and `boringssl-wasm` hold only
+# their output files, so each can be built alone (`--target tdweb --output ...`) and handed back to a later build in
+# its place (`--build-context tdweb=<folder>`).
 
 FROM debian:trixie AS base
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -48,7 +48,8 @@ COPY --from=webm-decoder-build /src/build/webm-decoder/webm-decoder.js /src/buil
 # command-line tool at the version of the wasm-bindgen crate in Cargo.lock, which it must match.
 FROM base AS rust
 # protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds. clang and llvm: the ring crate
-# compiles C for WebAssembly with clang and archives it with llvm-ar.
+# compiles C for WebAssembly with clang and archives it with llvm-ar, and the boring crate generates its bindings to
+# BoringSSL with clang's library.
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler clang llvm \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.cargo/bin:$PATH
@@ -58,11 +59,27 @@ RUN toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /tmp/rust-toolchain.toml) 
     && rustup toolchain install "$toolchain" --profile minimal --target wasm32-unknown-unknown \
     && cargo +"$toolchain" install wasm-bindgen-cli --version "$wasm_bindgen" --locked
 
-# The web app, with the two above, and the server.
+# BoringSSL for WebAssembly, which the attestation module links. The script reads two files of libsignal: one names
+# the tag of the boring crate, the other the version of the libc crate. These stages stand below the Rust stage so
+# that the lines above it, which CI's cache keys for `tdweb` and `webm-decoder` cover, stay as they are.
+FROM base AS boringssl-wasm-build
+COPY scripts/build-boringssl-wasm.sh scripts/
+COPY crates/attestation-wasm/libc-wasm32-unknown.patch crates/attestation-wasm/
+COPY third_party/libsignal/Cargo.toml third_party/libsignal/Cargo.lock third_party/libsignal/
+RUN scripts/build-boringssl-wasm.sh
+
+FROM scratch AS boringssl-wasm
+COPY --from=boringssl-wasm-build /src/build/boringssl-wasm/lib /lib
+COPY --from=boringssl-wasm-build /src/build/boringssl-wasm/include /include
+COPY --from=boringssl-wasm-build /src/build/boringssl-wasm/sysroot /sysroot
+COPY --from=boringssl-wasm-build /src/build/boringssl-wasm/libc /libc
+
+# The web app, with the three above, and the server.
 FROM rust AS build
 COPY . .
 COPY --from=tdweb / build/tdweb/dist/
 COPY --from=webm-decoder / build/webm-decoder/
+COPY --from=boringssl-wasm / build/boringssl-wasm/
 RUN --mount=type=cache,target=/root/.npm \
     --mount=type=cache,target=/root/.cargo/registry \
     cd app && npm ci && npm run build

@@ -1,0 +1,6 @@
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+# Selects getrandom's browser backend (crypto.getRandomValues).
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']

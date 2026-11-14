@@ -1,7 +1,8 @@
 # Formatting, the tests, the full build, and on pull requests the screen fixtures' screenshots.
 #
-# TDLib's web client and the video sticker decoder take long to build. The job `wasm-builds` builds each from the
-# Dockerfile only when no cached copy exists for its exact inputs, and hands both to the jobs that need them.
+# TDLib's web client and the video sticker decoder take long to build, and BoringSSL for WebAssembly needs a
+# toolchain of its own. The job `wasm-builds` builds each from the Dockerfile only when no cached copy exists for its
+# exact inputs, and hands all three to the jobs that need them.
 name: CI
 
 on:
@@ -31,6 +32,9 @@ jobs:
           stages=$(sed '/^FROM base AS rust$/,$d' Dockerfile | sha256sum | cut -c1-16)
           echo "tdweb=tdweb-$(git rev-parse HEAD:third_party/td)-$stages-${{ hashFiles('.dockerignore', 'scripts/build-tdweb.sh', 'scripts/build-tdweb-js.sh', 'scripts/tdweb/**') }}" >> "$GITHUB_OUTPUT"
           echo "webm=webm-decoder-$stages-${{ hashFiles('.dockerignore', 'scripts/build-webm-decoder.sh', 'app/src/kinds/stickers/webm-decoder.c') }}" >> "$GITHUB_OUTPUT"
+          # BoringSSL builds in minutes, so its key covers the whole Dockerfile. The commit of libsignal fixes the
+          # BoringSSL source and the version of the libc crate.
+          echo "boringssl=boringssl-wasm-$(git rev-parse HEAD:third_party/libsignal)-${{ hashFiles('Dockerfile', '.dockerignore', 'scripts/build-boringssl-wasm.sh', 'crates/attestation-wasm/libc-wasm32-unknown.patch') }}" >> "$GITHUB_OUTPUT"
       - id: tdweb
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -41,7 +45,12 @@ jobs:
         with:
           path: ${{ runner.temp }}/wasm-builds/webm-decoder
           key: ${{ steps.keys.outputs.webm }}
-      - if: steps.tdweb.outputs.cache-hit != 'true' || steps.webm.outputs.cache-hit != 'true'
+      - id: boringssl
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm-builds/boringssl-wasm
+          key: ${{ steps.keys.outputs.boringssl }}
+      - if: steps.tdweb.outputs.cache-hit != 'true' || steps.webm.outputs.cache-hit != 'true' || steps.boringssl.outputs.cache-hit != 'true'
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Build TDLib's web client
         if: steps.tdweb.outputs.cache-hit != 'true'
@@ -61,6 +70,16 @@ jobs:
         with:
           path: ${{ runner.temp }}/wasm-builds/webm-decoder
           key: ${{ steps.keys.outputs.webm }}
+      - name: Build BoringSSL for WebAssembly
+        if: steps.boringssl.outputs.cache-hit != 'true'
+        run: |
+          git submodule update --init --depth 1 third_party/libsignal
+          docker buildx build --target boringssl-wasm --output "type=local,dest=${{ runner.temp }}/wasm-builds/boringssl-wasm" .
+      - if: steps.boringssl.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/wasm-builds/boringssl-wasm
+          key: ${{ steps.keys.outputs.boringssl }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: wasm-builds
@@ -117,6 +136,7 @@ jobs:
           mkdir -p build/tdweb
           mv "${{ runner.temp }}/wasm-builds/tdweb" build/tdweb/dist
           mv "${{ runner.temp }}/wasm-builds/webm-decoder" build/webm-decoder
+          mv "${{ runner.temp }}/wasm-builds/boringssl-wasm" build/boringssl-wasm
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 26
@@ -124,9 +144,12 @@ jobs:
           cache-dependency-path: app/package-lock.json
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
-          workspaces: crates/signal-wasm
-      # protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds.
-      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler
+          workspaces: |
+            crates/signal-wasm
+            crates/attestation-wasm
+      # protoc: libsignal's spqr crate compiles protocol buffer definitions when it builds. libclang: the boring crate
+      # generates its bindings to BoringSSL with it.
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
       # The command-line tool must be the version of the wasm-bindgen crate the lock file holds.
       - name: wasm-bindgen version
         id: wasm-bindgen
@@ -167,11 +190,12 @@ jobs:
           name: wasm-builds
           path: ${{ runner.temp }}/wasm-builds
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-      # The two cached builds take the place of their stages.
+      # The three cached builds take the place of their stages.
       - run: >-
           docker buildx build
           --build-context "tdweb=${{ runner.temp }}/wasm-builds/tdweb"
           --build-context "webm-decoder=${{ runner.temp }}/wasm-builds/webm-decoder"
+          --build-context "boringssl-wasm=${{ runner.temp }}/wasm-builds/boringssl-wasm"
           --output "type=local,dest=${{ runner.temp }}/release" .
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
