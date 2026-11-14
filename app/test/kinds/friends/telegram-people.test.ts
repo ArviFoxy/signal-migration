@@ -7,7 +7,7 @@ import { GROUP_SIZE_LIMIT, peopleOf } from '../../../src/kinds/friends/telegram-
 import { TelegramError } from '../../../src/telegram/client';
 
 type UserKind = 'userTypeRegular' | 'userTypeBot' | 'userTypeDeleted';
-type FakeUser = { name: [string, string]; phone?: string; kind?: UserKind };
+type FakeUser = { name: [string, string]; phone?: string; kind?: UserKind; photo?: number };
 type FakeChat =
   | { private: number }
   | { basicGroup: string; members: number[] }
@@ -69,6 +69,9 @@ function account(
           last_name: user.name[1],
           phone_number: user.phone ?? '',
           type: { _: user.kind ?? 'userTypeRegular' },
+          ...(user.photo
+            ? { profile_photo: { small: { id: user.photo }, minithumbnail: { data: 'cHJldmlldw==' } } }
+            : {}),
         };
       }
       case 'getBasicGroupFullInfo': {
@@ -137,6 +140,17 @@ describe('the people of a Telegram account', () => {
       phoneNumber: '+12025550102',
     });
     expect(people.get(3)).toEqual({ userId: 3, givenName: 'Jonas', familyName: '', phoneNumber: null });
+  });
+
+  it("carries a person's picture: its file number and Telegram's small copy of it", async () => {
+    const { source } = account({ ...USERS, 7: { name: ['Ines', 'Duarte'], photo: 55 } }, [
+      { private: 7 },
+      { private: 3 },
+    ]);
+    const { people } = await source.readPeople(() => undefined);
+    expect(people.get(7)).toMatchObject({ photoFileId: 55, photoPreview: 'cHJldmlldw==' });
+    expect(people.get(3)).not.toHaveProperty('photoFileId');
+    expect(await source.readPhoto(55)).toEqual(Uint8Array.of(55));
   });
 
   it('leaves out the user, bots and deleted accounts, as chats and as members', async () => {

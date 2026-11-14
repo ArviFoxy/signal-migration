@@ -80,11 +80,15 @@ export class FriendsStep extends LightElement {
     );
   }
 
-  /** The Telegram picture of a person or a group, or the initials of the name where there is none (yet). */
-  private avatar(name: string, picture: Uint8Array | undefined, small = false) {
+  /**
+   * The Telegram picture of a person or a group. Until it is read, Telegram's small blurred copy of it stands in; the
+   * initials of the name where there is no picture at all.
+   */
+  private avatar(name: string, picture: Uint8Array | undefined, preview: string | undefined, small = false) {
     const size = small ? 'size-7 text-[11px]' : 'size-10 text-sm';
-    if (picture) {
-      return html`<img src=${pictureUrl(picture)} alt="" class="${size} flex-none rounded-full object-cover" />`;
+    const address = picture ? pictureUrl(picture) : preview ? `data:image/jpeg;base64,${preview}` : null;
+    if (address) {
+      return html`<img src=${address} alt="" class="${size} flex-none rounded-full object-cover" />`;
     }
     return html`<span
       aria-hidden="true"
@@ -118,7 +122,7 @@ export class FriendsStep extends LightElement {
   private personRow(found: Found, friend: FoundFriend, note: string) {
     const name = nameOf(friend.person);
     return html`<li class="flex min-h-16 items-center gap-3 border-b border-line px-4 last:border-b-0">
-      ${this.avatar(name, found.photos.get(`user:${friend.person.userId}`))}
+      ${this.avatar(name, found.photos.get(`user:${friend.person.userId}`), friend.person.photoPreview)}
       <span class="flex min-w-0 flex-1 flex-col">
         <span class="truncate text-[15px] font-semibold">${name}</span>
         <span class="truncate text-[13px] text-muted">${friend.inSignal ? 'In your Signal' : note}</span>
@@ -136,7 +140,7 @@ export class FriendsStep extends LightElement {
     const expanded = this.open === chat.chatId;
     return html`<li class="border-b border-line last:border-b-0">
       <div class="flex min-h-16 items-center gap-3 px-4">
-        ${this.avatar(chat.title, found.photos.get(`chat:${chat.chatId}`))}
+        ${this.avatar(chat.title, found.photos.get(`chat:${chat.chatId}`), chat.photoPreview)}
         <span class="flex min-w-0 flex-1 flex-col">
           <span class="truncate text-[15px] font-semibold">${chat.title}</span>
           <span class="truncate text-[13px] text-muted"
@@ -172,7 +176,7 @@ export class FriendsStep extends LightElement {
               ${members.map((friend) => {
                 const name = nameOf(friend.person);
                 return html`<li class="flex min-h-11 items-center gap-2.5">
-                  ${this.avatar(name, found.photos.get(`user:${friend.person.userId}`), true)}
+                  ${this.avatar(name, found.photos.get(`user:${friend.person.userId}`), friend.person.photoPreview, true)}
                   <span class="flex min-w-0 flex-1 flex-col">
                     <span class="truncate text-sm">${name}</span>
                     ${friend.inSignal ? html`<span class="text-xs text-muted">In your Signal</span>` : nothing}

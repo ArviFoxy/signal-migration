@@ -26,6 +26,8 @@ export type WorkContext = {
   deviceName: () => string;
 };
 
+/** How many Telegram pictures are read at the same time. */
+const PHOTOS_AT_ONCE = 6;
 /** How long deleting Telegram data may take; what is left is deleted at the next visit. */
 const DELETE_TIME_LIMIT_MS = 5000;
 
@@ -223,22 +225,30 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       return;
     case 'load-friend-photos': {
       const source = sessionOf(resources, work.instance).people;
-      const wanted: [string, number | undefined][] = [
-        ...work.search.chats.flatMap((chat): [string, number | undefined][] =>
-          chat.kind === 'group' ? [[`chat:${chat.chatId}`, chat.photoFileId]] : [],
-        ),
-        ...[...work.search.found.values()].map((friend): [string, number | undefined] => [
-          `user:${friend.person.userId}`,
-          friend.person.photoFileId,
-        ]),
-      ];
-      for (const [of, fileId] of wanted) {
-        if (cancel.aborted) return;
-        if (fileId === undefined) continue;
-        // A picture that cannot be read is left out; the row shows initials in its place.
-        const data = await source.readPhoto(fileId).catch(() => null);
-        if (data) emit({ type: 'friends/photo', of, data });
+      const { chats, found } = work.search;
+      // In the order of the rows: each chat's own picture, and after a group's picture those of its members.
+      const wanted = new Map<string, number>();
+      const want = (of: string, fileId: number | undefined) => {
+        if (fileId !== undefined && !wanted.has(of)) wanted.set(of, fileId);
+      };
+      for (const chat of chats) {
+        if (chat.kind === 'person') {
+          want(`user:${chat.userId}`, found.get(chat.userId)?.person.photoFileId);
+        } else {
+          want(`chat:${chat.chatId}`, chat.photoFileId);
+          for (const userId of chat.memberIds) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
+        }
       }
+      const waiting = [...wanted];
+      await Promise.all(
+        Array.from({ length: PHOTOS_AT_ONCE }, async () => {
+          for (let next = waiting.shift(); next && !cancel.aborted; next = waiting.shift()) {
+            // A picture that cannot be read is left out; the row keeps its preview or its initials.
+            const data = await source.readPhoto(next[1]).catch(() => null);
+            if (data) emit({ type: 'friends/photo', of: next[0], data });
+          }
+        }),
+      );
       return;
     }
     case 'add-friends':

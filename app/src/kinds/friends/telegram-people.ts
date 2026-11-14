@@ -13,6 +13,8 @@ export type Person = {
   phoneNumber: string | null;
   /** The number of the small profile picture among the files of Telegram's library, when there is a picture. */
   photoFileId?: number;
+  /** A very small and blurred copy of the picture, as base64 of a JPEG file, which Telegram sends along with the person. */
+  photoPreview?: string;
 };
 
 export const nameOf = (person: Person) => [person.givenName, person.familyName].filter(Boolean).join(' ');
@@ -29,6 +31,8 @@ export type ChatEntry =
       memberCount: number;
       /** The number of the group's small picture among the files of Telegram's library, when there is one. */
       photoFileId?: number;
+      /** A very small and blurred copy of the picture, as base64 of a JPEG file. */
+      photoPreview?: string;
     };
 
 export type TelegramPeople = {
@@ -179,6 +183,7 @@ export function peopleOf(
           familyName: user.last_name,
           phoneNumber: user.phone_number ? `+${user.phone_number}` : null,
           ...(user.profile_photo ? { photoFileId: user.profile_photo.small.id } : {}),
+          ...(user.profile_photo?.minithumbnail ? { photoPreview: user.profile_photo.minithumbnail.data } : {}),
         });
         return true;
       };
@@ -192,6 +197,7 @@ export function peopleOf(
         title: string;
         type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup;
         photoFileId: number | undefined;
+        photoPreview: string | undefined;
       }[] = [];
       for (const [index, chatId] of ids.entries()) {
         const chat = await invoke({ _: 'getChat', chat_id: chatId });
@@ -199,7 +205,14 @@ export function peopleOf(
         if (type._ === 'chatTypePrivate') {
           if (await isPerson(type.user_id)) entries[index] = { kind: 'person', userId: type.user_id };
         } else if (type._ === 'chatTypeBasicGroup' || (type._ === 'chatTypeSupergroup' && !type.is_channel)) {
-          groups.push({ index, chatId, title: chat.title, type, photoFileId: chat.photo?.small.id });
+          groups.push({
+            index,
+            chatId,
+            title: chat.title,
+            type,
+            photoFileId: chat.photo?.small.id,
+            photoPreview: chat.photo?.minithumbnail?.data,
+          });
         }
       }
       onProgress(0, groups.length, null);
@@ -223,6 +236,7 @@ export function peopleOf(
             memberIds: present,
             memberCount: present.length,
             ...(group.photoFileId === undefined ? {} : { photoFileId: group.photoFileId }),
+            ...(group.photoPreview === undefined ? {} : { photoPreview: group.photoPreview }),
           };
         groupsRead++;
         const seconds = (now() - groupsStarted) / 1000;
