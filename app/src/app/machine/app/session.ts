@@ -40,7 +40,10 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
     if (telegram.kind === 'off' || telegram.kind === 'signed-in') telegram = withoutError(telegram);
     if (signal.kind === 'off' || signal.kind === 'linked') signal = withoutError(signal);
   }
-  const notice = noticeAfter(state.notice, event);
+  let notice = noticeAfter(state.notice, event);
+  // Telegram ended a login of this visit and the page has removed it: the sign-in that follows says why.
+  if (state.telegram.kind === 'deleting' && state.telegram.byTelegram && telegram.kind === 'off')
+    notice = 'Telegram ended the last login. Sign in again.';
   if (telegram === state.telegram && signal === state.signal && packs === state.packs && notice === state.notice)
     return state;
   return { ...state, telegram, signal, packs, notice };

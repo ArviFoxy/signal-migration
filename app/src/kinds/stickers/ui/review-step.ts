@@ -41,7 +41,7 @@ export class StickerReviewStep extends MigrationView {
         `${selected.length} sticker pack${selected.length === 1 ? '' : 's'} selected${inSignal > 0 ? `, ${inSignal} already in your Signal` : ''}.`,
       )}
       <ul class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3.5">
-        ${card('bg-accent-soft [&>span:first-child]:text-accent', 'Install now', String(install), 'packs already on Signal')}
+        ${card('bg-accent-soft [&>span:first-child]:text-accent', 'Verify and install', String(install), 'packs someone else uploaded')}
         ${card('bg-upload-soft [&>span:first-child]:text-upload-text', 'Upload', String(toUpload.length), 'packs new to Signal')}
         ${card(
           'bg-panel ring-1 ring-line ring-inset [&>span:first-child]:text-muted',

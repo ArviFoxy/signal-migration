@@ -4,9 +4,9 @@ import createWebmDecoder from 'webm-decoder';
 import { probeWebm, renderWebm } from './webm-decoding';
 
 /** What the page asks the worker. */
-export type WebmCall = { file: Uint8Array } & (
-  { kind: 'probe' } | { kind: 'render'; size: number; frameRate: number; count: number }
-);
+export type WebmCall =
+  | { kind: 'probe'; file: Uint8Array }
+  | { kind: 'render'; file: Uint8Array; size: number; frameRate: number; count: number };
 
 type WebmRequest = WebmCall & { id: number };
 

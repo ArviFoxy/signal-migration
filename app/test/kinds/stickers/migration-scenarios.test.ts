@@ -10,6 +10,7 @@ import { packKeyOf, StickerWorld } from '../../scenario/stickers/sticker-world';
 const HOUR = 3_600_000;
 const MINUTE = 60_000;
 const UPLOAD_INTERVAL = 72 * MINUTE;
+const hex = (bytes: Uint8Array) => Buffer.from(bytes).toString('hex');
 
 describe('a first migration', () => {
   // Detects: packs missing from Signal after a migration, or installed in another order than in Telegram.
@@ -152,8 +153,7 @@ describe('sharing uploads between users', () => {
   it('ignores an index entry whose pack does not open with the derived key', async () => {
     const world = new StickerWorld();
     const a = world.pack('A');
-    const decoy = await world.publishSignalPack('Decoy');
-    await world.index.backend.add(new Uint8Array([...(await packIdentity(a)).lookupKey, ...decoy.packId]));
+    await world.listOtherPack(a);
     const alice = world.user([a]);
     await alice.visit();
     expect(await alice.installedTitles()).toEqual(['A']);
@@ -196,6 +196,160 @@ describe('sharing uploads between users', () => {
     expect(await alice.installedTitles()).toEqual(['A']);
     expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
     expect(world.index.entries).toHaveLength(1);
+  });
+});
+
+describe('choosing among the copies that others uploaded', () => {
+  // Detects: installing a copy because the index lists it and its manifest is right, without comparing its
+  // stickers with the Telegram pack: anyone who has the pack can upload such a copy with other pictures.
+  it('does not install a copy in which a sticker differs from the Telegram pack', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    await world.listAlteredCopy(a);
+    const alice = world.user([a]);
+    await alice.visit();
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    const [installed] = await alice.installedPacks();
+    expect(world.readStickers(installed.packId, installed.packKey).map(hex)).toEqual(
+      a.stickers.map((sticker) => hex(sticker.bytes)),
+    );
+  });
+
+  // Detects: the row of a pack showing a finished download, or no progress at all, while a copy is compared, which
+  // is the longest step of installing someone else's copy.
+  it('shows the comparison of a copy as a step of its own, with its progress', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    await world.migrateElsewhere(a);
+    const alice = world.user([a]);
+    const steps: string[] = [];
+    await alice.visit({
+      onChange: (migration) => {
+        const { state, progress } = migration.entries[0];
+        const step = progress ? `${state} ${progress.done}/${progress.total}` : state;
+        if (steps.at(-1) !== step) steps.push(step);
+      },
+    });
+    const total = a.stickers.length;
+    const downloaded = steps.indexOf(`downloading ${total}/${total}`);
+    const begun = steps.indexOf(`comparing 0/${total}`);
+    const compared = steps.indexOf(`comparing ${total}/${total}`);
+    expect(downloaded).toBeGreaterThan(-1);
+    expect(begun).toBeGreaterThan(downloaded);
+    expect(compared).toBeGreaterThan(begun);
+    expect(steps.indexOf('installing')).toBeGreaterThan(compared);
+  });
+
+  // Detects: bad copies added after a good one costing anything: each user would compare them, ask Signal's CDN
+  // for them, or upload the pack again.
+  it('installs the oldest copy and reads nothing of the copies listed after it', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const good = await world.migrateElsewhere(a);
+    for (let i = 0; i < 5; i++) await world.listAlteredCopy(a);
+    const alice = world.user([a]);
+    await alice.visit();
+    expect(world.signal.packsUploaded.get(alice.aci) ?? 0).toBe(0);
+    expect((await alice.installedPacks()).map((pack) => hex(pack.packId))).toEqual([hex(good)]);
+    expect(world.stickersRead()).toEqual([hex(good)]);
+    expect(world.manifestsRead()).toEqual([hex(good)]);
+  });
+
+  // Detects: the work for one pack growing with the number of bad copies listed for it, or a copy compared again
+  // when the page looks a second time right before the upload. The three copies compared are the oldest, the newest
+  // and the second newest.
+  it('compares three copies of a pack and then uploads it', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const bad: string[] = [];
+    for (let i = 0; i < 12; i++) bad.push(hex(await world.listAlteredCopy(a)));
+    const alice = world.user([a]);
+    await alice.visit();
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(world.stickersRead()).toEqual([bad[0], bad[11], bad[10]].sort());
+    const stickerReads = [...world.signal.publicCdnReads].filter(([file]) => file.includes('/full/'));
+    expect(Math.max(...stickerReads.map(([, reads]) => reads))).toBe(1);
+  });
+
+  // Detects: every later user uploading the pack again once its oldest copies are bad: the copy that the first of
+  // them uploaded is the newest, and the newest copy is compared.
+  it('installs the newest copy when the oldest one is bad', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    for (let i = 0; i < 4; i++) await world.listAlteredCopy(a);
+    const good = await world.migrateElsewhere(a);
+    const alice = world.user([a]);
+    await alice.visit();
+    expect(world.signal.packsUploaded.get(alice.aci) ?? 0).toBe(0);
+    expect((await alice.installedPacks()).map((pack) => hex(pack.packId))).toEqual([hex(good)]);
+  });
+
+  // Detects: a listed copy that cannot be used (Signal no longer has it, or it is under another key) taking the
+  // place of one of the three comparisons, or ending the search.
+  it('passes over copies that cannot be used without counting them', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const { lookupKey } = await packIdentity(a);
+    await world.listOtherPack(a);
+    world.index.entries.push(new Uint8Array([...lookupKey, ...new Uint8Array(16).fill(7)]));
+    await world.listAlteredCopy(a);
+    const good = await world.migrateElsewhere(a);
+    await world.listAlteredCopy(a);
+    await world.listOtherPack(a);
+    const alice = world.user([a]);
+    await alice.visit();
+    expect(world.signal.packsUploaded.get(alice.aci) ?? 0).toBe(0);
+    expect((await alice.installedPacks()).map((pack) => hex(pack.packId))).toEqual([hex(good)]);
+  });
+
+  // Detects: the requests for one pack growing with the number of entries listed for it: only the ten oldest and
+  // the ten newest copies are looked at.
+  it('looks at no more than ten copies from each end of the list', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    const listed: string[] = [];
+    for (let i = 0; i < 25; i++) listed.push(hex((await world.listOtherPack(a)).packId));
+    const alice = world.user([a]);
+    await alice.visit();
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(world.manifestsRead()).toEqual([...listed.slice(0, 10), ...listed.slice(15)].sort());
+  });
+});
+
+describe('a step that fails after a copy was chosen', () => {
+  // Detects: a pack uploaded a second time because the index did not take its entry: the upload is on Signal, and
+  // only the entry is missing.
+  it('does not upload the pack again when the index did not take its entry', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const page = alice.openPage();
+    await page.readTelegram();
+    await page.linkSignal();
+    world.index.busy.adds = 10;
+    await page.run();
+    expect(page.entry('A').state).toBe('failed');
+    await page.run();
+    expect(await alice.installedTitles()).toEqual(['A']);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(world.index.entries).toHaveLength(1);
+  });
+
+  // Detects: a pack downloaded from Telegram a second time because installing the copy that was compared with it
+  // failed.
+  it('does not download the pack again when installing a compared copy failed', async () => {
+    const world = new StickerWorld();
+    const a = world.pack('A');
+    await world.migrateElsewhere(a);
+    const alice = world.user([a]);
+    const page = alice.openPage();
+    await page.readTelegram();
+    await page.linkSignal();
+    world.signal.failNext((request) => request === 'https PUT storage.signal.org /v1/storage/');
+    await page.run();
+    expect(page.entry('A').state).toBe('failed');
+    await page.run();
+    expect(await alice.installedTitles()).toEqual(['A']);
+    expect(alice.stickers.stickerReads('A')).toBe(a.stickers.length);
   });
 });
 

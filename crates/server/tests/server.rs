@@ -2,21 +2,81 @@
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::{SinkExt, StreamExt};
-use signal_migration_server::index::{AddressLimiter, ENTRY_LEN, Index, client_address};
+use signal_migration_server::index::{
+    AddressLimiter, ENTRY_LEN, Index, OnSignal, SignalPacks, client_address, signal_cdn,
+};
 use signal_migration_server::relay::RelayTargets;
 use signal_migration_server::{ClientConfig, Config, TelegramApp, demo_router, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
+/// Stands in for Signal's CDN. It has every pack unless a test says otherwise for a pack ID, counts how often it is
+/// asked, and answers only while `hold` is free.
+#[derive(Clone, Default)]
+struct FakeSignal {
+    answers: Arc<Mutex<HashMap<[u8; 16], OnSignal>>>,
+    asked: Arc<AtomicUsize>,
+    hold: Arc<tokio::sync::RwLock<()>>,
+}
+
+impl FakeSignal {
+    fn says(&self, pack_id: [u8; 16], answer: OnSignal) {
+        self.answers.lock().unwrap().insert(pack_id, answer);
+    }
+
+    fn asked(&self) -> usize {
+        self.asked.load(Ordering::SeqCst)
+    }
+
+    fn packs(&self) -> SignalPacks {
+        let signal = self.clone();
+        Arc::new(move |pack_id| {
+            let signal = signal.clone();
+            Box::pin(async move {
+                signal.asked.fetch_add(1, Ordering::SeqCst);
+                let _free = signal.hold.read().await;
+                let answers = signal.answers.lock().unwrap();
+                answers.get(&pack_id).copied().unwrap_or(OnSignal::Exists)
+            })
+        })
+    }
+}
+
 struct TestServer {
     base: String,
     index_path: std::path::PathBuf,
+    signal: FakeSignal,
     _dir: tempfile::TempDir,
+}
+
+impl TestServer {
+    /// Sends an entry to the index and gives the status of the answer.
+    async fn add(&self, entry: Vec<u8>) -> u16 {
+        reqwest::Client::new()
+            .post(format!("http://{}/v1/sticker-packs/index", self.base))
+            .body(entry)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .as_u16()
+    }
+
+    async fn index(&self) -> Vec<u8> {
+        reqwest::get(format!("http://{}/v1/sticker-packs/index", self.base))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap()
+            .to_vec()
+    }
 }
 
 async fn start(relay_targets: RelayTargets) -> TestServer {
@@ -26,9 +86,10 @@ async fn start(relay_targets: RelayTargets) -> TestServer {
 async fn start_with_client_config(relay_targets: RelayTargets, client: ClientConfig) -> TestServer {
     let dir = tempfile::tempdir().unwrap();
     let index_path = dir.path().join("index.bin");
+    let signal = FakeSignal::default();
     let config = Config {
         static_dir: dir.path().to_path_buf(),
-        index: Index::open(index_path.clone()).await.unwrap(),
+        index: Index::open(index_path.clone(), signal.packs()).await.unwrap(),
         relay_targets,
         client,
     };
@@ -45,6 +106,7 @@ async fn start_with_client_config(relay_targets: RelayTargets, client: ClientCon
     TestServer {
         base: format!("127.0.0.1:{}", address.port()),
         index_path,
+        signal,
         _dir: dir,
     }
 }
@@ -69,6 +131,11 @@ async fn echo_server() -> SocketAddr {
 
 fn entry(seed: u8) -> Vec<u8> {
     vec![seed; ENTRY_LEN]
+}
+
+/// The entry that names the Signal pack `pack` as a copy of the Telegram pack `lookup`.
+fn entry_for(lookup: u8, pack: u8) -> Vec<u8> {
+    [[lookup; 32].as_slice(), &[pack; 16]].concat()
 }
 
 /// Detects: the relay dropping, reordering or altering bytes in either direction.
@@ -129,7 +196,9 @@ async fn appended_entry_is_read_back_and_persists_across_restart() {
         .unwrap();
     assert_eq!(body.as_ref(), entry(7).as_slice());
 
-    let reopened = Index::open(server.index_path.clone()).await.unwrap();
+    let reopened = Index::open(server.index_path.clone(), server.signal.packs())
+        .await
+        .unwrap();
     let restarted = {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -346,4 +415,130 @@ async fn demo_server_serves_only_files() {
             .status();
         assert_eq!(status, 404, "{path}");
     }
+}
+
+/// Detects: entries for packs that nobody uploaded. Without this rule anyone fills the index for free, and every
+/// browser asks Signal about each made-up pack.
+#[tokio::test]
+async fn an_entry_for_a_pack_that_signal_does_not_have_is_refused() {
+    let server = start(RelayTargets::signal()).await;
+    server.signal.says([9; 16], OnSignal::Missing);
+    assert_eq!(server.add(entry_for(1, 9)).await, 422);
+    assert_eq!(server.index().await, b"");
+    server.signal.says([9; 16], OnSignal::Exists);
+    assert_eq!(server.add(entry_for(1, 9)).await, 201, "once Signal has the pack");
+}
+
+/// Detects: one upload listed under many Telegram packs, which would make an entry cost nothing again; the rule
+/// forgotten after a restart.
+#[tokio::test]
+async fn a_signal_pack_is_listed_once() {
+    let server = start(RelayTargets::signal()).await;
+    assert_eq!(server.add(entry_for(1, 9)).await, 201);
+    assert_eq!(server.add(entry_for(2, 9)).await, 409);
+    assert_eq!(
+        server.add(entry_for(1, 9)).await,
+        200,
+        "the same entry again changes nothing"
+    );
+    assert_eq!(server.index().await, entry_for(1, 9));
+
+    let reopened = Index::open(server.index_path.clone(), server.signal.packs())
+        .await
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let restarted = TestServer {
+        base: listener.local_addr().unwrap().to_string(),
+        index_path: server.index_path.clone(),
+        signal: server.signal.clone(),
+        _dir: tempfile::tempdir().unwrap(),
+    };
+    let config = Config {
+        static_dir: std::env::temp_dir(),
+        index: reopened,
+        relay_targets: RelayTargets::signal(),
+        client: ClientConfig { telegram: None },
+    };
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap()
+    });
+    assert_eq!(restarted.add(entry_for(2, 9)).await, 409);
+    assert_eq!(restarted.add(entry_for(2, 8)).await, 201);
+}
+
+/// Detects: an entry added although Signal's CDN did not say that the pack exists.
+#[tokio::test]
+async fn nothing_is_added_while_signals_cdn_gives_no_answer() {
+    let server = start(RelayTargets::signal()).await;
+    server.signal.says([9; 16], OnSignal::Unknown);
+    assert_eq!(server.add(entry_for(1, 9)).await, 503);
+    assert_eq!(server.index().await, b"");
+}
+
+/// Detects: the server asking Signal's CDN for requests that it answers by itself, which would let anyone make it
+/// send requests to Signal without limit: an entry it already has, a pack it already lists, and a client over the
+/// limit per address.
+#[tokio::test]
+async fn signals_cdn_is_asked_only_for_an_entry_that_could_be_added() {
+    let server = start(RelayTargets::signal()).await;
+    assert_eq!(server.add(entry_for(1, 9)).await, 201);
+    assert_eq!(server.signal.asked(), 1);
+    assert_eq!(server.add(entry_for(1, 9)).await, 200);
+    assert_eq!(server.add(entry_for(2, 9)).await, 409);
+    assert_eq!(server.add(vec![1; 47]).await, 400);
+    assert_eq!(server.signal.asked(), 1);
+
+    // The limit per address is 60 entries at once.
+    let mut refused = 0;
+    for pack in 100..170u8 {
+        if server.add(entry_for(pack, pack)).await == 429 {
+            refused += 1;
+        }
+    }
+    assert_eq!(refused, 11, "70 more entries after the first one");
+    assert_eq!(server.signal.asked(), 60);
+}
+
+/// Detects: two entries for one Signal pack both added when they arrive together, each having seen that the pack
+/// was not listed before Signal's CDN answered.
+#[tokio::test]
+async fn two_entries_for_one_pack_that_arrive_together_give_one_entry() {
+    let server = Arc::new(start(RelayTargets::signal()).await);
+    let held = server.signal.hold.clone().write_owned().await;
+    let first = tokio::spawn({
+        let server = server.clone();
+        async move { server.add(entry_for(1, 9)).await }
+    });
+    let second = tokio::spawn({
+        let server = server.clone();
+        async move { server.add(entry_for(2, 9)).await }
+    });
+    while server.signal.asked() < 2 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(held);
+    let mut answers = [first.await.unwrap(), second.await.unwrap()];
+    answers.sort();
+    assert_eq!(answers, [201, 409]);
+    assert_eq!(server.index().await.len(), ENTRY_LEN);
+}
+
+/// Checks the question to Signal's CDN against the real one. It needs the network, and SIGNAL_PACK_ID with the 32
+/// hexadecimal digits of a sticker pack that exists: `SIGNAL_PACK_ID=... cargo test -- --ignored`.
+#[tokio::test]
+#[ignore]
+async fn signals_cdn_says_which_packs_exist() {
+    let digits = std::env::var("SIGNAL_PACK_ID").expect("SIGNAL_PACK_ID names an existing pack");
+    let existing: [u8; 16] = std::array::from_fn(|i| u8::from_str_radix(&digits[2 * i..2 * i + 2], 16).unwrap());
+    let cdn = signal_cdn();
+    assert_eq!(cdn(existing).await, OnSignal::Exists);
+    let mut other = existing;
+    other[15] ^= 1;
+    other[0] ^= 0x55;
+    assert_eq!(cdn(other).await, OnSignal::Missing);
 }

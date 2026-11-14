@@ -57,12 +57,15 @@ export type TelegramState =
   | (Running & { kind: 'saving' })
   | (Running & { kind: 'signed-in'; error: string | null })
   | (Running & { kind: 'signing-out' })
-  /** TDLib ends the session by itself: it ended elsewhere, or a kept instance was signing out. */
-  | (Running & { kind: 'ending-by-itself' })
+  /**
+   * TDLib ends the session by itself. `byTelegram`: Telegram ended a login of this visit, which the user did not
+   * ask for; otherwise a kept instance goes on with a sign-out that an earlier visit began.
+   */
+  | (Running & { kind: 'ending-by-itself'; byTelegram: boolean })
   /** TDLib does not run on the kept instance, which may hold a login. `error`: why. */
   | (Running & { kind: 'stopped'; error: string })
-  /** The instance is being deleted from the browser; then off. */
-  | (Base & { kind: 'deleting'; instance: string; signedOut: boolean; error: string | null });
+  /** The instance is being deleted from the browser; then off. `byTelegram`: after Telegram ended its login. */
+  | (Base & { kind: 'deleting'; instance: string; signedOut: boolean; byTelegram: boolean; error: string | null });
 
 export type TelegramEvent =
   // From the parent machine.

@@ -330,7 +330,19 @@ export class FakeSignal {
     return this.#cdn.get(key) ?? null;
   }
 
-  /** The manifest of a pack, as the page reads it from Signal's public CDN to verify an index entry. */
+  /** How often a page asked the public CDN for each file, by key. */
+  readonly publicCdnReads = new Map<string, number>();
+
+  #publicCdnFile(key: string): Uint8Array | null {
+    this.publicCdnReads.set(key, (this.publicCdnReads.get(key) ?? 0) + 1);
+    return this.cdnFile(key);
+  }
+
+  /** The manifest of a pack, as the page reads it from Signal's public CDN. */
   readonly manifestSource = async (packId: Uint8Array): Promise<Uint8Array | null> =>
-    this.cdnFile(`stickers/${hex(packId)}/manifest.proto`);
+    this.#publicCdnFile(`stickers/${hex(packId)}/manifest.proto`);
+
+  /** A sticker file of a pack, as the page reads it from Signal's public CDN to compare a copy. */
+  readonly stickerSource = async (packId: Uint8Array, number: number): Promise<Uint8Array | null> =>
+    this.#publicCdnFile(`stickers/${hex(packId)}/full/${number}`);
 }

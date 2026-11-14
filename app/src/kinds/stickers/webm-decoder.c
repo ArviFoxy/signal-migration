@@ -5,8 +5,10 @@
 //
 // webm_probe reads a file's size, duration and frame rate. webm_render decodes it from the start and writes `count`
 // square frames, one per 1 / frame_rate seconds, each the video frame showing at that moment, scaled to fit the
-// square and centred on transparency. The scaling averages each output pixel's area on premultiplied colours, so
-// that the colour of transparent pixels does not darken the edges of what is visible.
+// square and centred on transparency. The scaling is a Lanczos filter followed by sharpening (resize_sharp), on
+// colours multiplied by their opacity, so that the colour of transparent pixels does not darken the edges of what
+// is visible. The comparison of a copy with its original (compare-pictures.ts) draws the original the same way, so
+// a change to the scaling makes the copies that earlier versions made fail it.
 
 #include <emscripten/emscripten.h>
 #include <libavcodec/avcodec.h>
@@ -183,8 +185,11 @@ EMSCRIPTEN_KEEPALIVE int webm_probe(const uint8_t *data, int size, double *info)
       double rate = av_q2d(stream->avg_frame_rate);
       if (!(rate > 0) && frames > 1 && last > first) rate = (frames - 1) / (last - first);
       double duration = video.format->duration > 0 ? (double)video.format->duration / AV_TIME_BASE : 0;
-      // Without a duration in the file, the last frame shows for one frame's time.
-      if (!(duration > 0)) duration = rate > 0 ? frames / rate : 0;
+      // A stated duration that ends before the last frame starts is wrong: some of Telegram's files state one
+      // frame's time for a video of several seconds. Then, and without a duration in the file, the last frame
+      // shows for as long as the frames before it did on average.
+      const double shown = frames > 1 && last > first ? last - first : 0;
+      if (!(duration > shown)) duration = shown > 0 ? shown * frames / (frames - 1) : rate > 0 ? frames / rate : 0;
       info[2] = duration;
       info[3] = rate > 0 ? rate : 0;
       code = frames;
@@ -194,42 +199,122 @@ EMSCRIPTEN_KEEPALIVE int webm_probe(const uint8_t *data, int size, double *info)
   return code;
 }
 
+/** How much of the difference between a scaled picture and its blur is added back to it. */
+#define SHARPENING 0.7
+
+static double lanczos3(double x) {
+  if (x == 0) return 1;
+  if (x <= -3 || x >= 3) return 0;
+  const double pi_x = M_PI * x;
+  return 3 * sin(pi_x) * sin(pi_x / 3) / (pi_x * pi_x);
+}
+
 /**
- * Resizes premultiplied RGBA `source` (width x height) to `target` (target_width x target_height): each target
- * pixel is the average of the source area it covers, each source pixel weighted by how much of it lies inside.
+ * One direction of a Lanczos resize from `length` samples to `target_length`: target sample t is the sum of
+ * `count` source samples from number first[t] on, each times its weight. The weights of a target sample add up to
+ * one. A sample number outside the source stands for the nearest one inside.
  */
-static void resize_area(const uint8_t *source, int width, int height, uint8_t *target, int target_width,
-                        int target_height) {
-  // First across, into rows of target_width, then down.
-  float *across = calloc((size_t)target_width * height * 4, sizeof(float));
-  const double x_scale = (double)width / target_width, y_scale = (double)height / target_height;
-  for (int x = 0; x < target_width; x++) {
-    double start = x * x_scale, end = (x + 1) * x_scale;
-    for (int sx = (int)start; sx < width && sx < end; sx++) {
-      double weight = (fmin(end, sx + 1) - fmax(start, sx)) / x_scale;
-      if (weight <= 0) continue;
-      for (int y = 0; y < height; y++)
-        for (int c = 0; c < 4; c++)
-          across[((size_t)y * target_width + x) * 4 + c] += (float)(weight * source[((size_t)y * width + sx) * 4 + c]);
+typedef struct {
+  int count;
+  int *first;
+  float *weights;
+} Taps;
+
+static void taps_free(Taps *taps) {
+  free(taps->first);
+  free(taps->weights);
+}
+
+static int taps_make(Taps *taps, int length, int target_length) {
+  const double scale = (double)length / target_length;
+  // When shrinking, the filter widens by the scale, so that every source sample counts.
+  const double width = scale > 1 ? scale : 1;
+  taps->count = (int)ceil(6 * width) + 1;
+  taps->first = malloc((size_t)target_length * sizeof(int));
+  taps->weights = malloc((size_t)target_length * taps->count * sizeof(float));
+  if (!taps->first || !taps->weights) {
+    taps_free(taps);
+    return -1;
+  }
+  for (int t = 0; t < target_length; t++) {
+    const double centre = (t + 0.5) * scale - 0.5;
+    const int first = (int)ceil(centre - 3 * width);
+    double total = 0;
+    for (int k = 0; k < taps->count; k++) total += lanczos3((first + k - centre) / width);
+    for (int k = 0; k < taps->count; k++)
+      taps->weights[(size_t)t * taps->count + k] = (float)(lanczos3((first + k - centre) / width) / total);
+    taps->first[t] = first;
+  }
+  return 0;
+}
+
+/**
+ * Resizes premultiplied RGBA `source` (width x height, in rows of `row_pixels` pixels) to `target` (target_width x
+ * target_height) with a Lanczos filter, and then sharpens it: the difference between each pixel and the average of
+ * it and its eight neighbours (weighted 1 2 1 across and down) is added back, SHARPENING times. Both keep lines
+ * and edges crisper than averaging the covered area does, at the price of a faint halo beside a hard edge. In a
+ * blind comparison on real drawn video stickers this looked best every time. Returns 0, or -1 without memory.
+ */
+static int resize_sharp(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
+                        int target_width, int target_height) {
+  Taps across = {0}, down = {0};
+  float *rows = malloc((size_t)target_width * height * 4 * sizeof(float));
+  float *fitted = malloc((size_t)target_width * target_height * 4 * sizeof(float));
+  if (!rows || !fitted || taps_make(&across, width, target_width) < 0 || taps_make(&down, height, target_height) < 0) {
+    free(rows);
+    free(fitted);
+    taps_free(&across);
+    taps_free(&down);
+    return -1;
+  }
+  for (int y = 0; y < height; y++) {
+    const uint8_t *line = source + (size_t)y * row_pixels * 4;
+    for (int t = 0; t < target_width; t++) {
+      const float *weights = across.weights + (size_t)t * across.count;
+      float sum[4] = {0, 0, 0, 0};
+      for (int k = 0; k < across.count; k++) {
+        const int s = across.first[t] + k;
+        const uint8_t *pixel = line + (size_t)(s < 0 ? 0 : s >= width ? width - 1 : s) * 4;
+        for (int c = 0; c < 4; c++) sum[c] += weights[k] * pixel[c];
+      }
+      memcpy(rows + ((size_t)y * target_width + t) * 4, sum, sizeof sum);
     }
   }
-  for (int y = 0; y < target_height; y++) {
-    double start = y * y_scale, end = (y + 1) * y_scale;
-    float sum[4];
+  for (int t = 0; t < target_height; t++) {
+    const float *weights = down.weights + (size_t)t * down.count;
     for (int x = 0; x < target_width; x++) {
-      memset(sum, 0, sizeof sum);
-      for (int sy = (int)start; sy < height && sy < end; sy++) {
-        double weight = (fmin(end, sy + 1) - fmax(start, sy)) / y_scale;
-        if (weight <= 0) continue;
-        for (int c = 0; c < 4; c++) sum[c] += (float)(weight * across[((size_t)sy * target_width + x) * 4 + c]);
+      float sum[4] = {0, 0, 0, 0};
+      for (int k = 0; k < down.count; k++) {
+        const int s = down.first[t] + k;
+        const float *pixel = rows + ((size_t)(s < 0 ? 0 : s >= height ? height - 1 : s) * target_width + x) * 4;
+        for (int c = 0; c < 4; c++) sum[c] += weights[k] * pixel[c];
       }
+      memcpy(fitted + ((size_t)t * target_width + x) * 4, sum, sizeof sum);
+    }
+  }
+  static const int blur[3] = {1, 2, 1};
+  for (int y = 0; y < target_height; y++) {
+    for (int x = 0; x < target_width; x++) {
       for (int c = 0; c < 4; c++) {
-        long value = lroundf(sum[c]);
-        target[((size_t)y * target_width + x) * 4 + c] = (uint8_t)(value < 0 ? 0 : value > 255 ? 255 : value);
+        double blurred = 0;
+        for (int dy = -1; dy <= 1; dy++) {
+          for (int dx = -1; dx <= 1; dx++) {
+            const int ny = y + dy < 0 ? 0 : y + dy >= target_height ? target_height - 1 : y + dy;
+            const int nx = x + dx < 0 ? 0 : x + dx >= target_width ? target_width - 1 : x + dx;
+            blurred += blur[dy + 1] * blur[dx + 1] * fitted[((size_t)ny * target_width + nx) * 4 + c];
+          }
+        }
+        const double value = fitted[((size_t)y * target_width + x) * 4 + c];
+        const long rounded = lround(value + SHARPENING * (value - blurred / 16));
+        target[((size_t)y * target_width + x) * 4 + c] = (uint8_t)(rounded < 0 ? 0 : rounded > 255 ? 255 : rounded);
       }
     }
   }
-  free(across);
+  free(rows);
+  free(fitted);
+  taps_free(&across);
+  taps_free(&down);
+  return 0;
 }
 
 /** swscale's colour coefficients for the frame's colour space. */
@@ -248,20 +333,25 @@ static const int *coefficients(enum AVColorSpace space) {
 /** Draws the decoded frame into `square` (size x size RGBA): scaled to fit, centred, transparent around it. */
 static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct SwsContext **converter) {
   const int width = frame->width, height = frame->height;
+  // swscale's direct conversion writes pixels two at a time and leaves the last column of an odd width unwritten.
+  // Such a frame is converted one column wider, which the rows of a decoded frame have room for, and the extra
+  // column is not used. Each row of `rgba` is `converted` pixels long.
+  const int converted = frame->linesize[0] > width ? width + (width & 1) : width;
   // At the same size, swscale converts directly, each colour sample covering its 2 x 2 pixels. Interpolating the
   // colour samples instead would blend the colour of transparent pixels into the edges of what is visible.
-  *converter = sws_getCachedContext(*converter, width, height, frame->format, width, height, AV_PIX_FMT_RGBA,
-                                    SWS_POINT, NULL, NULL, NULL);
+  *converter = sws_getCachedContext(*converter, converted, height, frame->format, converted, height,
+                                    AV_PIX_FMT_RGBA, SWS_POINT, NULL, NULL, NULL);
   if (!*converter) return fail("the video's pixel format cannot be converted", 0);
   sws_setColorspaceDetails(*converter, coefficients(frame->colorspace), frame->color_range == AVCOL_RANGE_JPEG,
                            sws_getCoefficients(SWS_CS_DEFAULT), 1, 0, 1 << 16, 1 << 16);
-  uint8_t *rgba = malloc((size_t)width * height * 4);
+  // Zeroed, so that a pixel swscale does not write is transparent and the same on every run.
+  uint8_t *rgba = calloc((size_t)converted * height, 4);
   if (!rgba) return fail("out of memory", AVERROR(ENOMEM));
   uint8_t *planes[4] = {rgba, NULL, NULL, NULL};
-  int strides[4] = {width * 4, 0, 0, 0};
+  int strides[4] = {converted * 4, 0, 0, 0};
   sws_scale(*converter, (const uint8_t *const *)frame->data, frame->linesize, 0, height, planes, strides);
   // A frame without a transparency channel converts to opaque pixels.
-  for (size_t i = 0; i < (size_t)width * height; i++) {
+  for (size_t i = 0; i < (size_t)converted * height; i++) {
     uint8_t *pixel = rgba + i * 4;
     for (int c = 0; c < 3; c++) pixel[c] = (uint8_t)((pixel[c] * pixel[3] + 127) / 255);
   }
@@ -274,7 +364,15 @@ static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct Sw
     free(rgba);
     return fail("out of memory", AVERROR(ENOMEM));
   }
-  resize_area(rgba, width, height, fitted, fit_width, fit_height);
+  if (fit_width == width && fit_height == height) {
+    // At the video's own size nothing is scaled.
+    for (int y = 0; y < height; y++)
+      memcpy(fitted + (size_t)y * width * 4, rgba + (size_t)y * converted * 4, (size_t)width * 4);
+  } else if (resize_sharp(rgba, converted, width, height, fitted, fit_width, fit_height) < 0) {
+    free(rgba);
+    free(fitted);
+    return fail("out of memory", AVERROR(ENOMEM));
+  }
   free(rgba);
   memset(square, 0, (size_t)size * size * 4);
   const int left = (size - fit_width) / 2, top = (size - fit_height) / 2;

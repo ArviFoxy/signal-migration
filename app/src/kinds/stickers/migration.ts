@@ -18,6 +18,7 @@ import type { ConvertedSticker, ConvertSticker } from './convert';
 import { DownloadStalledError } from '../../telegram/download';
 import { contentPackKey, type PackIdentity, packIdentity } from './identity';
 import { assignPositions, insertPacks } from './order';
+import type { PictureComparison } from './compare-pack';
 import { type PackIndex, toHex } from './pack-index';
 import type { TelegramPack, TelegramSource } from './telegram-packs';
 import { MAX_STICKERS, RateLimitedError, type StickerFile, uploadStickerPack } from './upload';
@@ -28,12 +29,14 @@ export type PackState =
   /** Installed in the user's Signal. */
   | 'in-signal'
   /**
-   * Someone already uploaded it; it only needs installing. Unless its key is known already (`packKey`), its
-   * stickers are downloaded first to compute the key and check the upload.
+   * The index lists a copy of it on Signal. The copy is installed only after the pack's stickers were downloaded
+   * and the copy was compared with them; when no listed copy passes, the pack is uploaded.
    */
   | 'available'
   | 'to-upload'
   | 'downloading'
+  /** Comparing a copy on Signal that someone else uploaded with the pack's stickers. */
+  | 'comparing'
   | 'converting'
   | 'uploading'
   | 'installing'
@@ -73,7 +76,13 @@ export type PackEntry = {
 export type RunPhase = 'idle' | 'running' | 'done' | 'stopped';
 
 /** The services the migration uses besides Telegram and Signal. */
-export type MigrationServices = { clock: Clock; convert: ConvertSticker; index: PackIndex };
+export type MigrationServices = {
+  clock: Clock;
+  convert: ConvertSticker;
+  index: PackIndex;
+  /** Compares a converted sticker on Signal with the Telegram file, for copies that others uploaded. */
+  pictures: PictureComparison;
+};
 
 /**
  * Signal-Server's default limit on sticker pack uploads per account (RateLimiters.java): 50 at once, then one every
@@ -177,6 +186,14 @@ export class StickerMigration extends EventTarget {
   #converted = new Map<PackEntry, StickerFile[]>();
   /** Downloaded sticker files, waiting to be converted. */
   #originals = new Map<PackEntry, Uint8Array[]>();
+  /**
+   * Packs whose copy on Signal (`packId`) was chosen in this visit: a copy that someone else uploaded and that was
+   * compared with the pack, or the copy this page uploaded. When a later step fails, the next attempt goes on from
+   * the chosen copy and uploads nothing again.
+   */
+  #copyChosen = new Set<PackEntry>();
+  /** Packs this page uploaded in this visit that the index does not list yet. */
+  #notListed = new Set<PackEntry>();
   #lookup: Promise<void> | null = null;
   #previewsStopped = false;
   /** The packs each run set out to install from the index, and to upload; for progress across runs of a visit. */
@@ -482,7 +499,6 @@ export class StickerMigration extends EventTarget {
       CONCURRENT_CONVERSIONS,
     );
     entry.conversion = summarize(converted);
-    this.#originals.delete(entry);
     this.#converted.set(
       entry,
       converted.map((sticker, i) => ({ image: sticker.image, emoji: stickers[i].emoji })),
@@ -491,29 +507,50 @@ export class StickerMigration extends EventTarget {
     this.#changed();
   }
 
-  /** Someone may have uploaded the pack since the index was last read: the pack ID of their upload, or null. */
-  async #uploadedMeanwhile(entry: PackEntry): Promise<Uint8Array | null> {
-    await this.#services.index.refresh();
-    return this.#services.index.find(entry.identity.lookupKey, entry.packKey!);
+  /**
+   * A copy of the pack that someone else uploaded and that this page compared with the downloaded stickers and
+   * found faithful: its pack ID, or null. The index is read again first, for entries added since the last read.
+   */
+  async #faithfulCopy(entry: PackEntry): Promise<Uint8Array | null> {
+    const { index, pictures } = this.#services;
+    Object.assign(entry, { state: 'checking', progress: null });
+    this.#changed();
+    await index.refresh();
+    const stickers = entry.pack.stickers;
+    const original = {
+      title: entry.pack.title,
+      stickers: this.#originals.get(entry)!.map((file, i) => ({
+        file,
+        emoji: stickers[i].emoji,
+        format: stickers[i].format,
+      })),
+    };
+    const pack = { lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original };
+    try {
+      return await index.findFaithful(pack, pictures, (done, total) => {
+        Object.assign(entry, { state: 'comparing', progress: { done, total } });
+        this.#changed();
+      });
+    } finally {
+      entry.progress = null;
+    }
   }
 
   /**
-   * Migrates one pack that is not installed. The index is asked again right before the upload, so that a pack
-   * someone uploaded meanwhile is installed instead of uploaded twice.
+   * Chooses the copy of a pack to install: a copy that someone else uploaded, after comparing it with the stickers
+   * from Telegram, or else the page's own upload. The index is asked again right before the upload, for a copy
+   * that someone uploaded meanwhile.
    */
-  async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
-    entry.state = 'checking';
-    this.#changed();
-    // The pack key comes from the stickers themselves, so they are downloaded before the index is asked.
+  async #chooseCopy(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
+    // The pack key comes from the stickers themselves, and a copy is compared with them, so they are downloaded
+    // before the index is asked.
     await this.#download(telegram, entry);
-    entry.packId = await this.#uploadedMeanwhile(entry);
+    entry.packId = await this.#faithfulCopy(entry);
     if (!entry.packId) {
       this.#plannedInstalls.delete(entry);
       this.#plannedUploads.add(entry);
       await this.#prepare(telegram, entry);
-      entry.state = 'checking';
-      this.#changed();
-      entry.packId = await this.#uploadedMeanwhile(entry);
+      entry.packId = await this.#faithfulCopy(entry);
     }
     if (!entry.packId) {
       entry.state = 'uploading';
@@ -532,13 +569,23 @@ export class StickerMigration extends EventTarget {
         ),
       );
       this.uploaded++;
-      await this.#addToIndex(entry);
+      this.#notListed.add(entry);
     } else if (this.#plannedUploads.delete(entry)) {
       // Uploaded by someone else while this page converted it: an install after all.
       this.#plannedInstalls.add(entry);
     }
+    this.#copyChosen.add(entry);
     this.#converted.delete(entry);
     this.#originals.delete(entry);
+  }
+
+  /** Migrates one pack that is not installed: chooses its copy on Signal, lists an own upload, and installs it. */
+  async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
+    if (!this.#copyChosen.has(entry)) await this.#chooseCopy(signal, telegram, entry);
+    if (this.#notListed.has(entry)) {
+      await this.#addToIndex(entry);
+      this.#notListed.delete(entry);
+    }
     entry.state = 'installing';
     this.#changed();
     await this.#install(signal, [entry]);
@@ -563,23 +610,8 @@ export class StickerMigration extends EventTarget {
       this.selected.filter((entry) => entry.state === 'in-signal'),
       false,
     );
-    // Packs already on Signal whose key is known are installed at once; the others need their stickers first.
     for (const entry of this.selected) if (entry.state === 'available') this.#plannedInstalls.add(entry);
-    const available = this.selected.filter((entry) => entry.state === 'available' && entry.packKey);
-    if (available.length > 0) {
-      for (const entry of available) entry.state = 'installing';
-      this.#changed();
-      try {
-        await this.#install(signal, available);
-        for (const entry of available) entry.state = 'in-signal';
-        await this.#announce(signal, available, true);
-      } catch (error) {
-        for (const entry of available) Object.assign(entry, { state: 'failed', error: message(error) });
-      }
-      this.#changed();
-    }
-
-    // Packs on Signal whose key needs their stickers come first: installing them never waits for the upload limit.
+    // Packs with a listed copy come first: installing them never waits for the upload limit.
     const queue = this.selected
       .filter((entry) => entry.state === 'available' || entry.state === 'to-upload' || entry.state === 'failed')
       .sort((a, b) => Number(b.state === 'available') - Number(a.state === 'available'));

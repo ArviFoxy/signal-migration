@@ -292,6 +292,13 @@ const FIXTURES: Record<string, Fixture> = {
       return state;
     },
   },
+  'migrate-comparing': {
+    async state() {
+      const { state, migration } = await migrating(40);
+      Object.assign(migration.entries[40], { state: 'comparing', progress: { done: 12, total: 30 } });
+      return state;
+    },
+  },
   'migrate-waiting': {
     async state() {
       const { state, migration } = await migrating(50);

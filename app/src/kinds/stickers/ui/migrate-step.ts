@@ -20,7 +20,7 @@ import { conversionDescription, formatDuration, MigrationView } from './view';
 
 type Filter = 'all' | 'active' | 'waiting' | 'done' | 'failed';
 
-const WORKING: PackState[] = ['checking', 'downloading', 'converting', 'uploading', 'installing'];
+const WORKING: PackState[] = ['checking', 'downloading', 'comparing', 'converting', 'uploading', 'installing'];
 
 function group(entry: PackEntry): Exclude<Filter, 'all'> {
   if (entry.state === 'in-signal') return 'done';
@@ -180,6 +180,12 @@ export class StickerMigrateStep extends MigrationView {
           detail: `Downloading from Telegram${of('stickers')}`,
           tone: 'text-upload-text',
         };
+      case 'comparing':
+        return {
+          symbol: progressRing(fraction),
+          detail: `Comparing with a copy on Signal${of('stickers')}`,
+          tone: 'text-upload-text',
+        };
       case 'converting':
         return {
           symbol: progressRing(fraction),
@@ -195,7 +201,11 @@ export class StickerMigrateStep extends MigrationView {
       case 'installing':
         return { symbol: progressRing(null), detail: 'Adding to your sticker list', tone: 'text-upload-text' };
       case 'available':
-        return { symbol: SYMBOLS.waiting, detail: 'Already on Signal · will be installed', tone: 'text-muted' };
+        return {
+          symbol: SYMBOLS.waiting,
+          detail: 'Uploaded by someone else · will be verified and installed',
+          tone: 'text-muted',
+        };
       default:
         if (isCurrent && migration.uploadAllowedAt) {
           return {

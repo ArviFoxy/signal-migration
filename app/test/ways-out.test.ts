@@ -227,6 +227,26 @@ describe('ways out', () => {
     expect(page.workflow.telegram.instance).toBe(kept);
   });
 
+  // Detects: a login that Telegram ends by itself, such as right after the password, shown as "Signing out of
+  // Telegram" under the instructions for the QR code, and followed by a new code with no word about why.
+  it('says that Telegram ended a login, and why it asks to sign in again', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const page = await openPage(alice, new Browser());
+    page.workflow.goTo('packs');
+    await until(() => page.scanTelegramCode(), 'a Telegram QR code to scan');
+    await until(() => page.workflow.telegram.state.kind === 'signed-in', 'the login');
+    const telegram = () => page.workflow.telegram.state;
+    page.started.at(-1)!.report('authorizationStateLoggingOut');
+    await until(() => telegram().kind === 'ending-by-itself', 'the login ending');
+    expect(telegram()).toMatchObject({ kind: 'ending-by-itself', byTelegram: true });
+    expect(page.workflow.notice).toBeNull();
+    // Telegram's library never reports that it closed: the page goes on after its time limit.
+    await vi.advanceTimersByTimeAsync(MINUTE);
+    await until(() => telegram().kind === 'login', 'a new sign-in');
+    expect(page.workflow.notice).toBe('Telegram ended the last login. Sign in again.');
+  });
+
   // Detects: signing out of Telegram during the migration leaving the run going, or a new login migrating its packs
   // without the user choosing them.
   it('stops the migration when the user signs out of Telegram, and goes back to the start', async () => {

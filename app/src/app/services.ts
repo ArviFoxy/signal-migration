@@ -6,6 +6,7 @@ import { createStore, del, get, set } from 'idb-keyval';
 import type * as Td from 'tdlib-types';
 import { systemClock } from '../core/clock';
 import { fetchWithTimeLimit, SERVER_TIME_LIMIT_S } from '../core/time-limit';
+import { browserPictures } from '../kinds/stickers/compare-pictures';
 import { convertSticker } from '../kinds/stickers/convert';
 import type { MigrationServices } from '../kinds/stickers/migration';
 import { PackIndex } from '../kinds/stickers/pack-index';
@@ -140,7 +141,12 @@ export const realServices: AppServices = {
     link: (showQrCode, deviceName, cancel) => SignalConnection.link(showQrCode, deviceName, cancel),
     restore: (stored) => SignalConnection.restore(stored),
   },
-  migration: () => ({ clock: systemClock, convert: convertSticker, index: new PackIndex() }),
+  migration: () => ({
+    clock: systemClock,
+    convert: convertSticker,
+    index: new PackIndex(),
+    pictures: browserPictures,
+  }),
   snapshots: indexedDbSnapshots(),
   lock: browserLock,
 };
