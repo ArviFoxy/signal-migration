@@ -46,8 +46,8 @@ export const GROUP_SIZE_LIMIT = 1000;
 /** Where the people come from: the user's account in the app, simulated data in tests. */
 export interface PeopleSource {
   /**
-   * `onProgress` gets how many of the chats are read, and how many seconds the rest should take once enough is read
-   * to estimate that.
+   * `onProgress` gets how many of the groups are read, and how many seconds the rest should take once enough is read
+   * to estimate that. Only groups are counted: one-to-one chats take no time to read.
    */
   readPeople(onProgress: (done: number, total: number, secondsLeft: number | null) => void): Promise<TelegramPeople>;
   /** The bytes of a picture, by the file number a person or a group carries. */
@@ -202,8 +202,7 @@ export function peopleOf(
           groups.push({ index, chatId, title: chat.title, type, photoFileId: chat.photo?.small.id });
         }
       }
-      let done = ids.length - groups.length;
-      onProgress(done, ids.length, null);
+      onProgress(0, groups.length, null);
 
       // Then the groups, whose members Telegram's servers are asked for: a few groups at a time.
       const groupsStarted = now();
@@ -226,11 +225,10 @@ export function peopleOf(
             ...(group.photoFileId === undefined ? {} : { photoFileId: group.photoFileId }),
           };
         groupsRead++;
-        done++;
         const seconds = (now() - groupsStarted) / 1000;
         const estimable = groupsRead >= GROUPS_BEFORE_ESTIMATE && seconds >= SECONDS_BEFORE_ESTIMATE;
         const secondsLeft = estimable ? Math.round((seconds / groupsRead) * (groups.length - groupsRead)) : null;
-        onProgress(done, ids.length, secondsLeft);
+        onProgress(groupsRead, groups.length, secondsLeft);
       };
       const waiting = [...groups];
       await Promise.all(

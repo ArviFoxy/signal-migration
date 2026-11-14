@@ -188,7 +188,7 @@ describe('the people of a Telegram account', () => {
     expect(requests).not.toContain('getSupergroupFullInfo');
   });
 
-  it('counts the one-to-one chats as read at once, and estimates the time left once several groups are read', async () => {
+  it('counts the groups it reads, and estimates the time left once several are read', async () => {
     // A clock on which every reading of the time is a second later than the last.
     let seconds = 0;
     const groups: FakeChat[] = Array.from({ length: 8 }, (_, index) => ({
@@ -198,10 +198,10 @@ describe('the people of a Telegram account', () => {
     const { source } = account(USERS, [{ private: 6 }, { private: 3 }, ...groups], { now: () => 1000 * seconds++ });
     const reported: { done: number; secondsLeft: number | null }[] = [];
     await source.readPeople((done, total, secondsLeft) => {
-      expect(total).toBe(10);
+      expect(total).toBe(8);
       reported.push({ done, secondsLeft });
     });
-    expect(reported.map((progress) => progress.done)).toEqual([2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    expect(reported.map((progress) => progress.done)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8]);
     // No estimate before five groups are read; one for every group after that, ending at nothing left.
     expect(reported.slice(0, 5).map((progress) => progress.secondsLeft)).toEqual([null, null, null, null, null]);
     for (const progress of reported.slice(5)) expect(progress.secondsLeft).toBeGreaterThanOrEqual(0);

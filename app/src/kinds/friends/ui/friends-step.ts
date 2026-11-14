@@ -201,7 +201,7 @@ export class FriendsStep extends LightElement {
             >${progress.phoneNumbers} phone number${progress.phoneNumbers === 1 ? '' : 's'}</span
           >`
         : html`<span class="flex-none whitespace-nowrap text-muted tabular-nums"
-            >${progress.done} of ${progress.total} chats</span
+            >${progress.done} of ${progress.total} groups</span
           >`;
     const bar = !progress
       ? progressBar(label, 0, 0)
