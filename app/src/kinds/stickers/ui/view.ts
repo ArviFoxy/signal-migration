@@ -3,12 +3,14 @@
 
 import { html, type PropertyValues, type TemplateResult } from 'lit';
 import { property } from 'lit/decorators.js';
-import { LightElement } from '../../../ui/layout';
+import { LightElement, type StepPosition } from '../../../ui/layout';
 import type { ConversionSummary, PackEntry, PackState, StickerMigration } from '../migration';
 
 export class MigrationView extends LightElement {
   /** Null until the packs are being read from Telegram. */
   @property({ attribute: false }) migration!: StickerMigration | null;
+  /** Where the step stands in the step list. */
+  @property({ attribute: false }) position: StepPosition | null = null;
   #onChange = () => this.requestUpdate();
 
   protected willUpdate(changed: PropertyValues<this>): void {

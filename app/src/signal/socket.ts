@@ -17,11 +17,15 @@ import { loadSignalWasm } from './wasm';
 
 export const CHAT_HOST = 'chat.signal.org';
 
-/** A binary message channel. */
+/**
+ * A binary message channel. A message or a close that arrives before its handler is set is kept and handed to the
+ * handler when it is set, so a server that speaks first is heard.
+ */
 export interface MessageChannel {
   send(bytes: Uint8Array): void;
   close(code?: number): void;
   onMessage: (bytes: Uint8Array) => void;
+  /** `reason` is the text the server sent with its close code, or says what broke the connection. */
   onClose: (code: number, reason: string) => void;
 }
 
@@ -46,6 +50,10 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
   return new Promise((resolve, reject) => {
     let opened = false;
     let closed = false;
+    let onMessage: MessageChannel['onMessage'] | null = null;
+    let onClose: MessageChannel['onClose'] | null = null;
+    const early: Uint8Array[] = [];
+    let earlyClose: [number, string] | null = null;
     const openTimer = setTimeout(() => {
       if (opened || closed) return;
       closed = true;
@@ -65,9 +73,23 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
         link.close();
         socket.free();
       },
-      onMessage: () => undefined,
-      onClose: () => undefined,
+      get onMessage() {
+        return onMessage ?? (() => undefined);
+      },
+      set onMessage(handler) {
+        onMessage = handler;
+        for (const message of early.splice(0)) handler(message);
+      },
+      get onClose() {
+        return onClose ?? (() => undefined);
+      },
+      set onClose(handler) {
+        onClose = handler;
+        if (earlyClose) handler(...earlyClose);
+        earlyClose = null;
+      },
     };
+    const deliver = (message: Uint8Array) => (onMessage ? onMessage(message) : early.push(message));
     const finish = (code: number, reason: string) => {
       if (closed) return;
       closed = true;
@@ -75,7 +97,8 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
       const refusedStatus = socket.refusedStatus;
       link.close();
       socket.free();
-      if (opened) channel.onClose(code, reason);
+      if (opened && onClose) onClose(code, reason);
+      else if (opened) earlyClose = [code, reason];
       else if (refusedStatus !== undefined) reject(new HandshakeRefusedError(host, path, refusedStatus));
       else reject(new Error(`WebSocket to ${host}${path} did not open: ${reason}`));
     };
@@ -88,9 +111,9 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
           clearTimeout(openTimer);
           resolve(channel);
         }
-        for (const message of socket.takeMessages() as Uint8Array[]) channel.onMessage(message);
+        for (const message of socket.takeMessages() as Uint8Array[]) deliver(message);
         const code = socket.closeCode;
-        if (code !== undefined) finish(code, 'closed by the server');
+        if (code !== undefined) finish(code, socket.closeReason || 'closed by the server');
       },
       (reason) => finish(1006, reason),
     );

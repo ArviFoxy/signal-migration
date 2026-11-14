@@ -3,6 +3,7 @@
 // and work that holds something (TDLib, a preview loader) lets go of it.
 
 import { withTimeLimit } from '../../core/time-limit';
+import { addContacts, findFriends } from '../../kinds/friends/search';
 import { StickerMigration } from '../../kinds/stickers/migration';
 import { LinkingCancelledError } from '../../signal/link';
 import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from '../services';
@@ -25,6 +26,8 @@ export type WorkContext = {
   deviceName: () => string;
 };
 
+/** How many Telegram pictures are read at the same time. */
+const PHOTOS_AT_ONCE = 6;
 /** How long deleting Telegram data may take; what is left is deleted at the next visit. */
 const DELETE_TIME_LIMIT_MS = 5000;
 
@@ -204,6 +207,58 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         emit({ type: 'packs/signal-read', deviceId: work.device.deviceId });
       } catch (error) {
         emit({ type: 'packs/signal-failed', error: message(error) });
+      }
+      return;
+    case 'find-friends':
+      try {
+        const device = deviceOf(context, work.device);
+        const search = await findFriends(
+          sessionOf(resources, work.instance).people,
+          device,
+          services.friends.sources(device),
+          (progress) => emit({ type: 'friends/progress', progress }),
+        );
+        emit({ type: 'friends/found', search });
+      } catch (error) {
+        emit({ type: 'friends/failed', error: message(error) });
+      }
+      return;
+    case 'load-friend-photos': {
+      const source = sessionOf(resources, work.instance).people;
+      const { chats, contacts, found } = work.search;
+      // In the order of the rows: each chat's own picture, and after a group's picture those of its members. Then
+      // the contacts who are in no chat.
+      const wanted = new Map<string, number>();
+      const want = (of: string, fileId: number | undefined) => {
+        if (fileId !== undefined && !wanted.has(of)) wanted.set(of, fileId);
+      };
+      for (const chat of chats) {
+        if (chat.kind === 'person') {
+          want(`user:${chat.userId}`, found.get(chat.userId)?.person.photoFileId);
+        } else {
+          want(`chat:${chat.chatId}`, chat.photoFileId);
+          for (const userId of chat.memberIds) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
+        }
+      }
+      for (const userId of contacts) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
+      const waiting = [...wanted];
+      await Promise.all(
+        Array.from({ length: PHOTOS_AT_ONCE }, async () => {
+          for (let next = waiting.shift(); next && !cancel.aborted; next = waiting.shift()) {
+            // A picture that cannot be read is left out; the row keeps its preview or its initials.
+            const data = await source.readPhoto(next[1]).catch(() => null);
+            if (data) emit({ type: 'friends/photo', of: next[0], data });
+          }
+        }),
+      );
+      return;
+    }
+    case 'add-friends':
+      try {
+        await addContacts(deviceOf(context, work.device), work.contacts);
+        emit({ type: 'run/friends-added', count: work.contacts.length });
+      } catch (error) {
+        if (!cancel.aborted) emit({ type: 'run/friends-failed', error: message(error) });
       }
       return;
     case 'run':

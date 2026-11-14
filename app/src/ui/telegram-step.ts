@@ -18,6 +18,7 @@ import {
   qrBox,
   secondaryButton,
   stepHeader,
+  type StepPosition,
   stickyFooter,
 } from './layout';
 import './phone-input';
@@ -26,6 +27,8 @@ import { codeExpired, signInError } from './telegram-errors';
 @customElement('telegram-step')
 export class TelegramStep extends LightElement {
   @property({ attribute: false }) login!: TelegramView;
+  /** Where the step stands in the step list. */
+  @property({ attribute: false }) position: StepPosition | null = null;
   /** The QR code image, drawn from the link it shows. */
   @state() private qrImage: { link: string; url: string } | null = null;
   @state() private showPassword = false;
@@ -287,7 +290,7 @@ export class TelegramStep extends LightElement {
         : login.method === 'qr'
           ? 'Scan the code with the Telegram app on your phone.'
           : 'Sign in with your phone number.';
-    return html`${stepHeader(2, 'Connect Telegram', description)} ${this.body()}
+    return html`${stepHeader(this.position, 'Connect Telegram', description)} ${this.body()}
     ${stickyFooter(
       html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
         <button type="button" class=${primaryButton} ?disabled=${!ready} @click=${() => this.emit('next')}>

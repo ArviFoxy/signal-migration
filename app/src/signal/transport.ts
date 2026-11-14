@@ -41,6 +41,11 @@ export interface SignalAccount {
    * storage service again. Without it, they do not show packs installed through the storage service.
    */
   announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void>;
+  /**
+   * Tells the account's other devices to read the storage service again. Without it, they show what the app wrote
+   * there, such as new contacts, only after their next start.
+   */
+  announceStorageChange(): Promise<void>;
 }
 
 /** Reads a header from chat response headers. */

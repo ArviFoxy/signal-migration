@@ -1,0 +1,23 @@
+diff -ru libc.orig/src/lib.rs libc/src/lib.rs
+--- libc.orig/src/lib.rs	2006-07-24 01:21:28.000000000 +0000
++++ libc/src/lib.rs	2026-11-14 15:21:59.336002730 +0000
+@@ -162,6 +162,19 @@
+         pub use crate::xous::*;
+ 
+         prelude!();
++    } else if #[cfg(all(target_family = "wasm", target_os = "unknown"))] {
++        // wasm32-unknown-unknown linked against a C library built for
++        // wasm32-wasip1 (wasi-libc): same C ABI and type sizes.
++        mod primitives;
++        pub use crate::primitives::*;
++
++        pub type size_t = usize;
++        pub type ssize_t = isize;
++        pub type time_t = c_longlong;
++
++        extern "C" {
++            pub fn strlen(cs: *const c_char) -> size_t;
++        }
+     } else {
+         // non-supported targets: empty...
+     }

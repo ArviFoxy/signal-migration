@@ -1,6 +1,7 @@
 // Every event of the app: the machines' own, and the top level's.
 
 import type { SetupStep } from './app/steps';
+import type { FriendsEvent } from './friends/state';
 import type { PacksEvent } from './packs/state';
 import type { Record } from './record';
 import type { SignalEvent } from './signal/state';
@@ -10,6 +11,7 @@ export type AppEvent =
   | TelegramEvent
   | SignalEvent
   | PacksEvent
+  | FriendsEvent
   // From the browser.
   | { type: 'lock/held' }
   | { type: 'lock/elsewhere' }
@@ -19,8 +21,12 @@ export type AppEvent =
   // From the migration run.
   | { type: 'run/ended' }
   | { type: 'run/failed'; error: string }
+  | { type: 'run/friends-added'; count: number }
+  | { type: 'run/friends-failed'; error: string }
   // From the user.
   | { type: 'go-to'; step: SetupStep }
+  | { type: 'choose'; what: 'stickers' | 'friends'; chosen: boolean }
+  | { type: 'tick-friends'; userIds: number[]; ticked: boolean }
   | { type: 'start-migration' }
   | { type: 'run/retry' }
   | { type: 'finish' }
