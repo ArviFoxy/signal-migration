@@ -67,6 +67,21 @@ describe("the account's contacts in the storage service", () => {
     ]);
   });
 
+  it('lists the accounts whose profile key the user holds, which contact discovery is told about', async () => {
+    const world = new World();
+    const user = new User(world);
+    const profileKey = new Uint8Array(32).fill(7);
+    const phoneStorage = await user.phone.storage();
+    await user.phone.writeRecords(
+      (await phoneStorage.readContacts()).manifest,
+      [],
+      [contact({ aci: id(1), profileKey }), contact({ aci: id(2) }), contact({ pni: id(3), e164: '+12025550103' })],
+    );
+
+    const { knownAccounts } = await (await user.linkDevice().storage()).readContacts();
+    expect(knownAccounts).toEqual([{ accountId: id(1), profileKey }]);
+  });
+
   it('adds a contact that the phone then reads', async () => {
     const world = new World();
     const user = new User(world);

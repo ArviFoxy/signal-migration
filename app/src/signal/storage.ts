@@ -62,14 +62,25 @@ export type StoredContact = {
   phoneNumber: string | null;
 };
 
+/** An account whose profile key the user's Signal holds: a person the user is in touch with on Signal. */
+export type KnownAccount = { accountId: string; profileKey: Uint8Array };
+
 /** The manifest and the contacts at one manifest version; the basis of a write. */
-export type ContactSnapshot = { version: bigint; manifest: ManifestRecord; contacts: StoredContact[] };
+export type ContactSnapshot = {
+  version: bigint;
+  manifest: ManifestRecord;
+  contacts: StoredContact[];
+  /** The contacts that have an account ID and a profile key. */
+  knownAccounts: KnownAccount[];
+};
 
 /** A contact to add. It has an account ID or a phone number identity, or both. */
 export type NewContact = StoredContact & {
   /** The name Signal's apps show for the contact, in place of the name the person chose on Signal. */
   nickname: { given: string; family: string };
 };
+
+const PROFILE_KEY_LENGTH = 32;
 
 /** How many records one read may ask for, as in Signal Desktop (ts/services/storageConstants.std.ts). */
 const MAX_READ_KEYS = 2500;
@@ -82,7 +93,7 @@ function idFromBytes(bytes: Uint8Array): string {
   );
 }
 
-function bytesOfId(id: string): Uint8Array {
+export function bytesOfId(id: string): Uint8Array {
   const digits = id.replaceAll('-', '');
   return Uint8Array.from({ length: 16 }, (_, index) => parseInt(digits.slice(2 * index, 2 * index + 2), 16));
 }
@@ -197,6 +208,7 @@ export class StorageClient {
       .filter((id) => id.type === ManifestRecord_Identifier_Type.CONTACT)
       .map((id) => id.raw);
     const contacts: StoredContact[] = [];
+    const knownAccounts: KnownAccount[] = [];
     for (let start = 0; start < ids.length; start += MAX_READ_KEYS) {
       const response = await this.#request(
         'PUT',
@@ -212,14 +224,17 @@ export class StorageClient {
         const record = fromBinary(StorageRecordSchema, decryptStorageBlob(key, item.value));
         if (record.record.case !== 'contact') continue;
         const contact = record.record.value;
+        const accountId = idOf(contact.aci, contact.aciBinary);
+        if (accountId && contact.profileKey.length === PROFILE_KEY_LENGTH)
+          knownAccounts.push({ accountId, profileKey: contact.profileKey });
         contacts.push({
-          accountId: idOf(contact.aci, contact.aciBinary),
+          accountId,
           phoneNumberIdentity: idOf(contact.pni, contact.pniBinary),
           phoneNumber: contact.e164 || null,
         });
       }
     }
-    return { version, manifest, contacts };
+    return { version, manifest, contacts, knownAccounts };
   }
 
   /**

@@ -5,22 +5,27 @@
 // Telegram shows the user. Others can follow; what the user sees does not depend on which source found a person.
 
 import type { DiscoveredAccount } from '../../signal/contact-discovery';
-import type { NewContact, StoredContact } from '../../signal/storage';
+import type { KnownAccount, NewContact, StoredContact } from '../../signal/storage';
 import type { SignalAccount } from '../../signal/transport';
 import type { ChatEntry, PeopleSource, Person } from './telegram-people';
 
 /** The identifiers of a Signal account, as far as a source learned them. */
 export type SignalIdentifiers = StoredContact;
 
-/** One way of finding the Signal accounts of people from Telegram, by their Telegram user IDs. */
+/**
+ * One way of finding the Signal accounts of people from Telegram, by their Telegram user IDs. `known` are the accounts
+ * the user is in touch with on Signal already; a source that can uses them to say when a found person is one of them.
+ */
 export interface FriendSource {
-  find(people: Person[]): Promise<Map<number, SignalIdentifiers>>;
+  find(people: Person[], known: KnownAccount[]): Promise<Map<number, SignalIdentifiers>>;
 }
 
 /** The source that asks about the phone numbers Telegram shows; `discover` is Signal's contact discovery. */
-export function phoneNumberSource(discover: (phoneNumbers: string[]) => Promise<DiscoveredAccount[]>): FriendSource {
+export function phoneNumberSource(
+  discover: (phoneNumbers: string[], known: KnownAccount[]) => Promise<DiscoveredAccount[]>,
+): FriendSource {
   return {
-    async find(people) {
+    async find(people, known) {
       const byNumber = new Map<string, number[]>();
       for (const person of people) {
         if (!person.phoneNumber) continue;
@@ -28,7 +33,7 @@ export function phoneNumberSource(discover: (phoneNumbers: string[]) => Promise<
       }
       const found = new Map<number, SignalIdentifiers>();
       if (byNumber.size === 0) return found;
-      for (const account of await discover([...byNumber.keys()])) {
+      for (const account of await discover([...byNumber.keys()], known)) {
         for (const userId of byNumber.get(account.phoneNumber) ?? []) {
           found.set(userId, {
             accountId: account.accountId,
@@ -90,13 +95,13 @@ export async function findFriends(
   );
   const everyone = [...telegram.people.values()];
   onProgress({ part: 'signal', phoneNumbers: everyone.filter((person) => person.phoneNumber !== null).length });
+  const { contacts, knownAccounts } = await (await account.storage()).readContacts();
   const identifiers = new Map<number, SignalIdentifiers>();
   for (const source of sources) {
-    for (const [userId, signal] of await source.find(everyone)) {
+    for (const [userId, signal] of await source.find(everyone, knownAccounts)) {
       identifiers.set(userId, merged(identifiers.get(userId), signal));
     }
   }
-  const { contacts } = await (await account.storage()).readContacts();
   const found = new Map<number, FoundFriend>();
   for (const [userId, signal] of identifiers) {
     const person = telegram.people.get(userId);

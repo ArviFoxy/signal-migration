@@ -152,7 +152,7 @@ export const realServices: AppServices = {
     restore: (stored) => SignalConnection.restore(stored),
   },
   friends: {
-    sources: (account) => [phoneNumberSource((phoneNumbers) => discoverAccounts(account, phoneNumbers))],
+    sources: (account) => [phoneNumberSource((phoneNumbers, known) => discoverAccounts(account, phoneNumbers, known))],
   },
   migration: () => ({
     clock: systemClock,

@@ -48,7 +48,7 @@ const finding = (accounts: Record<number, Partial<SignalIdentifiers>>): FriendSo
     ),
 });
 
-const signalContact = (fields: { pni?: string; e164?: string }) =>
+const signalContact = (fields: { pni?: string; e164?: string; aci?: string; profileKey?: Uint8Array }) =>
   storageRecord(ManifestRecord_Identifier_Type.CONTACT, {
     case: 'contact',
     value: create(ContactRecordSchema, fields),
@@ -61,7 +61,7 @@ describe('the source that asks about phone numbers', () => {
       asked.push(numbers);
       return Promise.resolve([{ phoneNumber: MARA.phoneNumber!, phoneNumberIdentity: id(2), accountId: null }]);
     });
-    const found = await source.find([MARA, JONAS, AIKO]);
+    const found = await source.find([MARA, JONAS, AIKO], []);
     expect(asked).toEqual([[MARA.phoneNumber, AIKO.phoneNumber]]);
     expect([...found]).toEqual([
       [MARA.userId, { accountId: null, phoneNumberIdentity: id(2), phoneNumber: MARA.phoneNumber }],
@@ -74,7 +74,7 @@ describe('the source that asks about phone numbers', () => {
       asked = true;
       return Promise.resolve([]);
     });
-    expect((await source.find([JONAS])).size).toBe(0);
+    expect((await source.find([JONAS], [])).size).toBe(0);
     expect(asked).toBe(false);
   });
 });
@@ -142,6 +142,37 @@ describe('the friend search', () => {
       { part: 'telegram', done: 2, total: 2, secondsLeft: 40 },
       { part: 'signal', phoneNumbers: 2 },
     ]);
+  });
+
+  // Detects: a person the user knows on Signal without their number being offered as new, and then written a
+  // second time over the contact that is there.
+  it('marks a person whom Signal holds by account ID alone, once a source learns that ID from the known accounts', async () => {
+    const world = new World();
+    const user = new User(world);
+    const phoneStorage = await user.phone.storage();
+    await user.phone.writeRecords(
+      (await phoneStorage.readContacts()).manifest,
+      [],
+      [signalContact({ aci: id(20), profileKey: new Uint8Array(32).fill(7) })],
+    );
+    // Like contact discovery: the account ID of a number comes back only for an account the asker already knows.
+    const source: FriendSource = {
+      find: (_people, known) =>
+        Promise.resolve(
+          new Map([
+            [
+              MARA.userId,
+              {
+                accountId: known.some((account) => account.accountId === id(20)) ? id(20) : null,
+                phoneNumberIdentity: id(2),
+                phoneNumber: MARA.phoneNumber,
+              },
+            ],
+          ]),
+        ),
+    };
+    const search = await findFriends(telegram(chats, [MARA]), user.linkDevice(), [source], () => undefined);
+    expect(search.found.get(MARA.userId)!.inSignal).toBe(true);
   });
 
   it('puts together what two sources found about one person', async () => {

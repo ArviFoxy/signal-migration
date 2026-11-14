@@ -23,7 +23,8 @@ use crate::{error, time_from_unix_seconds};
 /// The client's messages (`rust/net/src/proto/cds2.proto` in libsignal).
 #[derive(Clone, PartialEq, Message)]
 struct ClientRequest {
-    /// Account IDs with their access keys, for accounts the client already knows. Unused here.
+    /// Account IDs with their access keys, 32 bytes a pair, for accounts the client already knows. The enclave
+    /// gives the account ID of a number only when the account's pair is among these.
     #[prost(bytes = "vec", tag = "1")]
     aci_uak_pairs: Vec<u8>,
     /// Numbers looked up in an earlier request that `token` stands for. Unused here.
@@ -53,6 +54,8 @@ struct ClientResponse {
 const NUMBER_LENGTH: usize = 8;
 const ID_LENGTH: usize = 16;
 const ENTRY_LENGTH: usize = NUMBER_LENGTH + 2 * ID_LENGTH;
+/// An account ID and the account's access key, 16 bytes each.
+const KNOWN_ACCOUNT_LENGTH: usize = 2 * ID_LENGTH;
 
 /// A Signal account that a phone number belongs to.
 #[wasm_bindgen(getter_with_clone)]
@@ -81,6 +84,8 @@ enum Stage {
 pub struct ContactDiscovery {
     stage: Stage,
     numbers: Vec<u64>,
+    /// The known accounts: each account ID with its access key.
+    known_accounts: Vec<u8>,
     /// The enclave's messages after the acknowledgement, merged.
     answer: Option<ClientResponse>,
 }
@@ -104,7 +109,16 @@ fn id(bytes: &[u8]) -> Option<String> {
 }
 
 impl ContactDiscovery {
-    fn new(handshake: Handshake, phone_numbers: Vec<String>) -> Result<ContactDiscovery, JsError> {
+    fn new(
+        handshake: Handshake,
+        phone_numbers: Vec<String>,
+        known_accounts: Vec<u8>,
+    ) -> Result<ContactDiscovery, JsError> {
+        if known_accounts.len() % KNOWN_ACCOUNT_LENGTH != 0 {
+            return Err(error(
+                "the known accounts are no whole number of pairs of an account ID and an access key",
+            ));
+        }
         let numbers = phone_numbers
             .iter()
             .map(|number| digits(number))
@@ -112,6 +126,7 @@ impl ContactDiscovery {
         Ok(ContactDiscovery {
             stage: Stage::AwaitingHandshakeAnswer(handshake),
             numbers,
+            known_accounts,
             answer: None,
         })
     }
@@ -122,6 +137,7 @@ impl ContactDiscovery {
                 let mut connection = handshake.complete(message).map_err(error)?;
                 let request = ClientRequest {
                     new_e164s: self.numbers.iter().flat_map(|number| number.to_be_bytes()).collect(),
+                    aci_uak_pairs: std::mem::take(&mut self.known_accounts),
                     ..Default::default()
                 };
                 let encrypted = connection.send(&request.encode_to_vec()).map_err(error)?;
@@ -158,16 +174,19 @@ impl ContactDiscovery {
 #[wasm_bindgen]
 impl ContactDiscovery {
     /// Checks the attestation that the enclave sent, as of `unix_seconds`, for the enclave code `enclave_id` names,
-    /// and prepares the lookup of `phone_numbers`. Each number has a plus sign and digits.
+    /// and prepares the lookup of `phone_numbers`. Each number has a plus sign and digits. `known_accounts` holds,
+    /// for each account the user already knows, its account ID and its access key, 16 bytes each. For a number that
+    /// belongs to one of them, the enclave then answers with the account ID too.
     pub fn begin(
         enclave_id: &[u8],
         attestation: &[u8],
         unix_seconds: f64,
         phone_numbers: Vec<String>,
+        known_accounts: Vec<u8>,
     ) -> Result<ContactDiscovery, JsError> {
         let now = time_from_unix_seconds(unix_seconds)?;
         let handshake = attest::cds2::new_handshake(enclave_id, attestation, now).map_err(error)?;
-        ContactDiscovery::new(handshake, phone_numbers)
+        ContactDiscovery::new(handshake, phone_numbers, known_accounts)
     }
 
     /// The first message to send to the enclave.
@@ -313,11 +332,16 @@ mod tests {
     }
 
     fn begin(phone_numbers: &[&str]) -> ContactDiscovery {
+        begin_knowing(phone_numbers, Vec::new())
+    }
+
+    fn begin_knowing(phone_numbers: &[&str], known_accounts: Vec<u8>) -> ContactDiscovery {
         ContactDiscovery::begin(
             &test_enclave_id(),
             &test_attestation(),
             ATTESTED_AT,
             phone_numbers.iter().map(|number| number.to_string()).collect(),
+            known_accounts,
         )
         .unwrap_or_else(|_| panic!("the test enclave's attestation is accepted"))
     }
@@ -398,6 +422,27 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
+    fn a_lookup_sends_the_accounts_the_user_already_knows() {
+        // One account: its ID and its access key, 16 bytes each.
+        let known: Vec<u8> = [[0x11u8; 16], [0x22; 16]].concat();
+        let mut lookup = begin_knowing(&["+12025550100"], known.clone());
+        let (_enclave, request) = up_to_acknowledgement(&mut lookup);
+        assert_eq!(request.aci_uak_pairs, known);
+    }
+
+    #[wasm_bindgen_test]
+    fn known_accounts_that_are_no_whole_pairs_are_refused() {
+        let begun = ContactDiscovery::begin(
+            &test_enclave_id(),
+            &test_attestation(),
+            ATTESTED_AT,
+            vec!["+12025550100".into()],
+            vec![0; 33],
+        );
+        assert!(begun.is_err());
+    }
+
+    #[wasm_bindgen_test]
     fn a_connection_that_closes_before_the_accounts_gives_no_result() {
         let mut lookup = begin(&["+12025550100"]);
         up_to_acknowledgement(&mut lookup);
@@ -440,6 +485,7 @@ mod tests {
                 &test_attestation(),
                 ATTESTED_AT,
                 vec![number.into()],
+                Vec::new(),
             );
             assert!(begun.is_err(), "{number}");
         }
