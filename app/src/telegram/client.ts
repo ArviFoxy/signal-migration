@@ -20,6 +20,7 @@
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
+import { randomHex } from '../core/random';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
 import { downloadWithStallLimit } from './download';
 
@@ -27,9 +28,6 @@ const TdClient = tdweb.default;
 
 /** The Telegram app identity TDLib logs in with, served by our server from its configuration. */
 export type TelegramApp = { apiId: number; apiHash: string; testDc?: boolean };
-
-const randomHex = (byteCount: number) =>
-  Array.from(crypto.getRandomValues(new Uint8Array(byteCount)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 export const newTelegramInstance = () => `telegram-${randomHex(8)}`;
 
