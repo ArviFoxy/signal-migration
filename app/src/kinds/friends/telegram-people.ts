@@ -175,8 +175,13 @@ export function peopleOf(
       const isPerson = async (userId: number): Promise<boolean> => {
         if (userId === self) return false;
         if (people.has(userId)) return true;
-        const user = await invoke({ _: 'getUser', user_id: userId });
-        if (user.type._ !== 'userTypeRegular') return false;
+        // The library answers from the records that came with the chats and the member lists. An account it holds
+        // no record of is passed over.
+        const user = await invoke({ _: 'getUser', user_id: userId }).catch((error: unknown) => {
+          if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
+          throw error;
+        });
+        if (!user || user.type._ !== 'userTypeRegular') return false;
         people.set(userId, {
           userId,
           givenName: user.first_name,

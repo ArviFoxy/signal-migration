@@ -63,7 +63,8 @@ function account(
         };
       }
       case 'getUser': {
-        const user = users[query.user_id as number]!;
+        const user = users[query.user_id as number];
+        if (!user) throw new TelegramError(400, 'User not found');
         return {
           first_name: user.name[0],
           last_name: user.name[1],
@@ -175,6 +176,12 @@ describe('the people of a Telegram account', () => {
     const { chats } = await source.readPeople(() => undefined);
     expect(chats).toEqual([{ kind: 'person', userId: 6 }]);
     expect(requests).not.toContain('getSupergroupMembers');
+  });
+
+  it('passes over a member the library holds no record of, and keeps the others', async () => {
+    const { source } = account(USERS, [{ basicGroup: 'Flat 12', members: [2, 999, 6] }]);
+    const { chats } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([{ kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [2, 6], memberCount: 2 }]);
   });
 
   it('passes over a group whose members Telegram refuses to give, and reads the rest', async () => {
