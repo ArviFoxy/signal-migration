@@ -28,7 +28,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          title='Newer versions for the WebM decoder build'
+          title='Newer versions for the build scripts'
           {
             echo 'The build scripts pin older versions than the newest releases:'
             echo

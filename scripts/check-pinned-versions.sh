@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Compares the versions pinned in scripts/build-webm-decoder.sh (FFmpeg, libvpx, Emscripten) and in
-# scripts/build-boringssl-wasm.sh (wasi-sdk) with the newest release tags of their repositories. Prints one line for each that is behind, as "name: pinned X, newest Y", and nothing when
-# all are current. Exits 0 either way, and 1 only when a version cannot be read.
+# scripts/build-boringssl-wasm.sh (wasi-sdk) with the newest release tags of their repositories. Prints one line for
+# each that is behind, as "name: pinned X, newest Y", and nothing when all are current. Exits 0 either way, and 1
+# only when a version cannot be read.
 set -euo pipefail
 
 scripts=$(dirname "$0")
