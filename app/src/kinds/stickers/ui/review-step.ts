@@ -17,12 +17,15 @@ export class StickerReviewStep extends MigrationView {
   @property({ attribute: false }) stickers = true;
   /** How many friends will be added to the Signal contacts; null when the user did not choose friends. */
   @property({ attribute: false }) friends: number | null = null;
+  /** How many saved messages will be copied to Note to Self; null when the user did not choose them. */
+  @property({ attribute: false }) saved: number | null = null;
   @state() private showAll = false;
 
   render() {
     if (this.stickers && !this.migration) return stepHeader(this.position, 'Review', 'Reading your packs…');
     const selected = this.migration?.selected ?? [];
     const friends = this.friends;
+    const saved = this.saved;
     const inSignal = selected.filter((entry) => entry.state === 'in-signal').length;
     const summary = [
       ...(this.stickers
@@ -31,6 +34,7 @@ export class StickerReviewStep extends MigrationView {
           ]
         : []),
       ...(friends === null ? [] : [`${friends} friend${friends === 1 ? '' : 's'} to add to your Signal contacts`]),
+      ...(saved === null ? [] : [`${saved} saved message${saved === 1 ? '' : 's'} to copy to Note to Self`]),
     ];
     const install = selected.filter((entry) => entry.state === 'available').length;
     const toUpload = selected.filter((entry) => entry.state !== 'in-signal' && entry.state !== 'available');
@@ -51,6 +55,7 @@ export class StickerReviewStep extends MigrationView {
     return html`${stepHeader(this.position, 'Review', `${summary.join('. ')}.`)}
       <ul class="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3.5">
         ${friends === null ? nothing : card('bg-accent-soft [&>span:first-child]:text-accent', 'Add to your contacts', String(friends), 'friends found on Signal')}
+        ${saved === null ? nothing : card('bg-accent-soft [&>span:first-child]:text-accent', 'Copy to Note to Self', String(saved), 'saved messages')}
         ${
           !this.stickers
             ? nothing
@@ -102,7 +107,7 @@ export class StickerReviewStep extends MigrationView {
           <button
             type="button"
             class=${primaryButton}
-            ?disabled=${!this.ready || install + toUpload.length + (friends ?? 0) === 0}
+            ?disabled=${!this.ready || install + toUpload.length + (friends ?? 0) + (saved ?? 0) === 0}
             @click=${() => this.emit('start')}
           >
             Start migration

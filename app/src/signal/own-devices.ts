@@ -38,7 +38,7 @@ export function padMessageBody(body: Uint8Array): Uint8Array {
 }
 
 /** Random padding inside a sync message, as Signal's clients add, so that its size says little about its content. */
-const syncPadding = () => randomBytes(randomInt(1, 64));
+export const syncPadding = () => randomBytes(randomInt(1, 64));
 
 /** A sync message that installs sticker packs on the account's other devices. */
 export function installStickerPacksMessage(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Uint8Array {
@@ -146,8 +146,16 @@ export class OwnDevices {
     }
   }
 
-  /** Sends one message (a serialized Content) to every other device of the account. */
-  async send(chat: ChatChannel, content: Uint8Array): Promise<void> {
+  /**
+   * Sends one message (a serialized Content) to every other device of the account. `timestamp` is the message's
+   * timestamp in milliseconds; a message that carries a timestamp of its own is sent with the same one, as Signal's
+   * apps do. `urgent` asks Signal to wake a sleeping phone for the message.
+   */
+  async send(
+    chat: ChatChannel,
+    content: Uint8Array,
+    { timestamp = Date.now(), urgent = true }: { timestamp?: number; urgent?: boolean } = {},
+  ): Promise<void> {
     if (!this.#bundlesRead) {
       await this.#startSessions(chat, '*');
       this.#bundlesRead = true;
@@ -167,7 +175,7 @@ export class OwnDevices {
       });
       const response = await chat.request('PUT', `/v1/messages/${this.sender.aci}`, {
         headers: ['content-type:application/json'],
-        body: json({ messages, online: false, urgent: true, timestamp: Date.now() }),
+        body: json({ messages, online: false, urgent, timestamp }),
       });
       if (response.status === 200) return;
       if (response.status === 409) {

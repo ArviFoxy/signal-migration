@@ -3,7 +3,7 @@
 //   when it is left;
 // - setup and migrating: the packs follow the login; a device linked by an earlier version is unlinked;
 // - migrating: a lost login goes back to the setup; once every selected pack is in Signal and the other devices were
-//   told, the migration ends;
+//   told, the friends are added and the saved messages are sent, the migration ends;
 // - ending: both parts are driven to their end; then done (or the start, after a clear), or end-failed.
 // Each rule is a pure function of the state.
 
@@ -16,11 +16,17 @@ import {
   friendsFollowAccounts,
   linkedDevice,
   packsFollowLogin,
+  savedFollowLogin,
   sessionOf,
   stepOf,
   unlinkOldDevice,
 } from './session';
+import { savedLeft } from './migrating';
 import { type AppState, isSession, type Session, type SessionState } from './state';
+
+/** What follows from the accounts in the setup and during the migration. */
+const followAccounts = (session: Session, context: Context): Session =>
+  savedFollowLogin(friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(session, context))));
 
 /** `state` with `session`'s parts, or `state` itself when they are the same. */
 function withSession<S extends SessionState>(state: S, session: Session): S {
@@ -29,7 +35,7 @@ function withSession<S extends SessionState>(state: S, session: Session): S {
 }
 
 function settleSetup(state: Extract<AppState, { kind: 'setup' }>, context: Context): AppState {
-  let next = withSession(state, friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(sessionOf(state), context))));
+  let next = withSession(state, followAccounts(sessionOf(state), context));
   const step = stepOf(next);
   if (step === 'telegram' && next.telegram.kind === 'off' && !next.telegram.error)
     next = { ...next, telegram: telegramTransition(next.telegram, { type: 'telegram/start' }, context) };
@@ -41,15 +47,16 @@ function settleSetup(state: Extract<AppState, { kind: 'setup' }>, context: Conte
 }
 
 function settleMigrating(state: Extract<AppState, { kind: 'migrating' }>, context: Context): AppState {
-  const next = withSession(state, friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(sessionOf(state), context))));
+  const next = withSession(state, followAccounts(sessionOf(state), context));
   // A login lost during the migration (signed out elsewhere, unlinked from the phone): the setup shows the step to
   // log in again, and the user starts the migration again from the review. A login being restored after a reload
   // (starting, within its time limit) or saved is not lost.
   const telegramLost = !['starting', 'saving', 'signed-in'].includes(next.telegram.kind);
   if (telegramLost || next.signal.kind !== 'linked') return { ...sessionOf(next), kind: 'setup', step: 'review' };
   // Done once each chosen kind is done. Sticker packs: every pack is in Signal and the other devices were told; the
-  // phone shows nothing otherwise. Friends: the contacts are written.
+  // phone shows nothing otherwise. Friends: the contacts are written. Saved messages: they are read and all sent.
   if (next.chosen.friends && next.run.friendsAdded === null) return next;
+  if (next.chosen.saved && (next.saved.kind !== 'read' || savedLeft(next).length > 0)) return next;
   if (next.chosen.stickers) {
     const packs = next.packs;
     if (next.run.status !== 'ended' || packs.kind !== 'read') return next;

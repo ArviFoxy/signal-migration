@@ -6,6 +6,7 @@
 // key that an upload form issued, within the policy's lifetime and size limit, and stores the bytes it is given.
 // Faults (a failing request) and other devices' changes (before a storage write) can be scheduled.
 
+import type { Note } from '../../src/signal/note-to-self';
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import {
   ReadOperationSchema,
@@ -128,6 +129,29 @@ export class FakeSignal {
   failAnnouncements = 0;
   /** The next `count` attempts to unlink a device fail, as a network failure would. */
   failUnlinks = 0;
+
+  /** What each account's Note to Self shows on its other devices, in the order of arrival. */
+  readonly notesToSelf = new Map<string, Note[]>();
+  /** How many notes were sent to each account's other devices, repeated ones included. */
+  readonly notesSent = new Map<string, number>();
+  /** After this many more notes are accepted, every further one fails, as a lost connection would. */
+  failNotesAfter: number | null = null;
+
+  /**
+   * A note arrives at the account's other devices. As Signal's apps do, they keep one message per timestamp: a note
+   * with the timestamp of one they have is dropped.
+   */
+  deliverNote(aci: string, fromDevice: number, note: Note): void {
+    if (!this.isLinked(aci, fromDevice)) throw new SocketClosedError(DEVICE_REMOVED);
+    if (this.failNotesAfter !== null) {
+      if (this.failNotesAfter === 0) throw new Error('the connection to Signal closed');
+      this.failNotesAfter--;
+    }
+    this.notesSent.set(aci, (this.notesSent.get(aci) ?? 0) + 1);
+    const notes = this.notesToSelf.get(aci) ?? [];
+    if (!notes.some((known) => known.timestamp === note.timestamp)) notes.push(note);
+    this.notesToSelf.set(aci, notes);
+  }
 
   deliverToOtherDevices(aci: string, fromDevice: number, packs: { packId: Uint8Array; packKey: Uint8Array }[]): void {
     if (!this.isLinked(aci, fromDevice)) throw new SocketClosedError(DEVICE_REMOVED);

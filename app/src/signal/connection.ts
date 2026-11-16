@@ -5,6 +5,7 @@
 
 import { httpsRequest } from './http-client';
 import { type LinkEvents, linkDevice, type LinkedAccount } from './link';
+import { type Note, noteToSelfMessage } from './note-to-self';
 import { fetchLatestStorageMessage, installStickerPacksMessage, OwnDevices } from './own-devices';
 import { SignalSession } from './session';
 import { HandshakeRefusedError, SocketClosedError } from './socket';
@@ -77,17 +78,22 @@ export class SignalConnection implements SignalAccount {
 
   #ownDevices: OwnDevices | null = null;
 
-  /**
-   * Tells the account's other devices to install these packs, then to read the storage service again, which
-   * holds the packs' order. Two messages: Android acts on only one kind of request per sync message.
-   */
-  async announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void> {
+  /** What sends to the account's other devices, with the sessions it has started with them. */
+  #toOwnDevices(): OwnDevices {
     const { aci, deviceId } = this.#account.credentials;
     const { identity, registrationId } = this.#account;
     if (!identity || registrationId === undefined)
       throw new Error('this device was linked by an earlier version of the app and cannot message your phone');
     this.#ownDevices ??= new OwnDevices({ aci, deviceId, registrationId, identity });
-    const devices = this.#ownDevices;
+    return this.#ownDevices;
+  }
+
+  /**
+   * Tells the account's other devices to install these packs, then to read the storage service again, which
+   * holds the packs' order. Two messages: Android acts on only one kind of request per sync message.
+   */
+  async announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void> {
+    const devices = this.#toOwnDevices();
     await this.withChat(async (chat) => {
       if (packs.length > 0) await devices.send(chat, installStickerPacksMessage(packs));
       await devices.send(chat, fetchLatestStorageMessage());
@@ -96,6 +102,13 @@ export class SignalConnection implements SignalAccount {
 
   announceStorageChange(): Promise<void> {
     return this.announceStickerPacks([]);
+  }
+
+  async sendNoteToSelf(note: Note): Promise<void> {
+    const devices = this.#toOwnDevices();
+    const content = noteToSelfMessage(this.#account.credentials.aci, note);
+    // Not urgent, as Signal Desktop sends a transcript (sendSyncMessageOnly): the phone is not woken for each note.
+    await this.withChat((chat) => devices.send(chat, content, { timestamp: note.timestamp, urgent: false }));
   }
 
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device, or `cancel`. */

@@ -29,6 +29,9 @@ export function fromRecord(record: Record | null, context: Context): AppState {
     deselected: record?.deselected ?? [],
     friends: { kind: 'none' },
     tickedFriends: record?.tickedFriends ?? [],
+    saved: { kind: 'none' },
+    savedFrom: record?.savedFrom ?? null,
+    savedSentUpTo: record?.savedSentUpTo ?? null,
     notice: null,
   };
   if (!record) return { ...session, kind: 'setup', step: 'start' };

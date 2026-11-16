@@ -3,6 +3,7 @@
 
 import type * as Td from 'tdlib-types';
 import { type TelegramClient, TelegramError, untilNotRestarted } from '../../telegram/client';
+import { patiently, TOO_FAST } from '../../telegram/patiently';
 
 export type Person = {
   userId: number;
@@ -80,34 +81,11 @@ const ALL_LOADED = 404;
 /** More chats than an account has. TDLib takes the count as a 32-bit number, so it cannot be arbitrarily large. */
 const EVERY_CHAT = 1_000_000;
 
-/** Telegram answers 429 when requests come too fast, and names the seconds to wait before the next one. */
-const TOO_FAST = 429;
-const LONGEST_WAIT_S = 60;
-const WAITS_PER_REQUEST = 3;
-
 /** How many groups are read at the same time. */
 const GROUPS_AT_ONCE = 3;
 /** The time left is estimated once this many groups are read and this many seconds have passed. */
 const GROUPS_BEFORE_ESTIMATE = 5;
 const SECONDS_BEFORE_ESTIMATE = 5;
-
-/**
- * Sends a request, and again after the wait Telegram names when it says the requests come too fast. TDLib itself
- * waits and asks again for up to a minute for one request, without a word; its answer 429 arrives only beyond that.
- */
-async function patiently<T>(request: () => Promise<T>): Promise<T> {
-  for (let waits = 0; ; waits++) {
-    try {
-      return await request();
-    } catch (error) {
-      const named =
-        error instanceof TelegramError && error.code === TOO_FAST ? /retry after (\d+)/.exec(error.message) : null;
-      const seconds = named ? Number(named[1]) : null;
-      if (seconds === null || seconds > LONGEST_WAIT_S || waits >= WAITS_PER_REQUEST) throw error;
-      await new Promise((resolve) => setTimeout(resolve, seconds * 1000 + 250));
-    }
-  }
-}
 
 const MAIN_LIST = { _: 'chatListMain' } as const;
 

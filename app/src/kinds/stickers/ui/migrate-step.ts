@@ -84,6 +84,8 @@ export class StickerMigrateStep extends MigrationView {
   @property({ attribute: false }) stickers = true;
   /** The friends chosen to be added and how many the run has added, once it has; null when friends are not chosen. */
   @property({ attribute: false }) friends: { toAdd: number; added: number | null } | null = null;
+  /** The saved messages to copy and how many of them are in Signal; null when saved messages are not chosen. */
+  @property({ attribute: false }) saved: { toCopy: number; copied: number } | null = null;
   /** The run stopped with an error. */
   @property({ attribute: false }) failed = false;
   @state() private filter: Filter = 'all';
@@ -351,7 +353,31 @@ export class StickerMigrateStep extends MigrationView {
     </section>`;
   }
 
-  /** The migration of friends alone, when the user did not choose sticker packs. */
+  /** What happens to the saved messages: their progress, beside the packs or on its own. */
+  private savedBlock() {
+    const saved = this.saved;
+    if (!saved) return nothing;
+    const count = `${saved.toCopy.toLocaleString('en')} message${saved.toCopy === 1 ? '' : 's'}`;
+    const done = saved.copied >= saved.toCopy;
+    const text =
+      saved.toCopy === 0
+        ? 'Nothing to copy'
+        : done
+          ? `${count} copied to Note to Self`
+          : `${saved.copied.toLocaleString('en')} of ${count} copied to Note to Self`;
+    return html`<section
+      aria-label="Saved Messages"
+      class="flex flex-col gap-2 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+    >
+      <div class="flex items-center justify-between gap-3">
+        <span class="text-sm font-semibold">Saved Messages</span>
+        <span class="text-sm text-muted tabular-nums">${text}</span>
+      </div>
+      ${saved.toCopy === 0 || done ? nothing : progressBar('Saved messages copied', saved.copied, saved.toCopy)}
+    </section>`;
+  }
+
+  /** The migration without sticker packs: friends, saved messages or both. */
   private withoutPacks() {
     const title = this.finished ? 'Done and logged out' : this.ending ? 'Migration finished' : 'Migrating';
     const description = this.finished
@@ -368,7 +394,7 @@ export class StickerMigrateStep extends MigrationView {
           : html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
               Back to start
             </button>`;
-    return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()}
+    return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
     ${stickyFooter(html`<span></span>${action}`)}`;
   }
 
@@ -440,7 +466,7 @@ export class StickerMigrateStep extends MigrationView {
           </div>
         </div>`,
     )}
-    ${this.friendsBlock()}
+    ${this.friendsBlock()} ${this.savedBlock()}
     ${migration.stopReason ? html`<p class="text-danger" role="alert">${migration.stopReason}.</p>` : nothing}
     ${
       shown.length === 0

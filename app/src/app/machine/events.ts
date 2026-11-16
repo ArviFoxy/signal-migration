@@ -4,6 +4,7 @@ import type { SetupStep } from './app/steps';
 import type { FriendsEvent } from './friends/state';
 import type { PacksEvent } from './packs/state';
 import type { Record } from './record';
+import type { SavedEvent } from './saved/state';
 import type { SignalEvent } from './signal/state';
 import type { TelegramEvent } from './telegram/state';
 
@@ -12,6 +13,7 @@ export type AppEvent =
   | SignalEvent
   | PacksEvent
   | FriendsEvent
+  | SavedEvent
   // From the browser.
   | { type: 'lock/held' }
   | { type: 'lock/elsewhere' }
@@ -23,10 +25,15 @@ export type AppEvent =
   | { type: 'run/failed'; error: string }
   | { type: 'run/friends-added'; count: number }
   | { type: 'run/friends-failed'; error: string }
+  /** The saved message with this ID, and every one before it, is in Signal. */
+  | { type: 'run/saved-sent'; upTo: number }
+  | { type: 'run/saved-failed'; error: string }
   // From the user.
   | { type: 'go-to'; step: SetupStep }
-  | { type: 'choose'; what: 'stickers' | 'friends'; chosen: boolean }
+  | { type: 'choose'; what: 'stickers' | 'friends' | 'saved'; chosen: boolean }
   | { type: 'tick-friends'; userIds: number[]; ticked: boolean }
+  /** Copy the saved messages from this date on (seconds since 1970); null: none chosen. */
+  | { type: 'copy-saved-from'; from: number | null }
   | { type: 'start-migration' }
   | { type: 'run/retry' }
   | { type: 'finish' }

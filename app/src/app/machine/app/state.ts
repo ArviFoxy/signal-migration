@@ -11,6 +11,7 @@
 import type { FriendsState } from '../friends/state';
 import type { PacksState } from '../packs/state';
 import type { Record } from '../record';
+import type { SavedState } from '../saved/state';
 import type { SignalState } from '../signal/state';
 import type { TelegramState } from '../telegram/state';
 import type { Chosen, SetupStep } from './steps';
@@ -26,6 +27,14 @@ export type Session = {
   friends: FriendsState;
   /** Telegram user IDs of found friends the user ticked, kept for when the friends are looked for again. */
   tickedFriends: number[];
+  saved: SavedState;
+  /** The saved messages are copied from this date on (seconds since 1970); null while the user has chosen none. */
+  savedFrom: number | null;
+  /**
+   * Telegram's ID of the last saved message that is in Signal, so that a run continues behind it; null before the
+   * first.
+   */
+  savedSentUpTo: number | null;
   /** Something the user should know, until dismissed: TDLib was restarted, the record could not be written. */
   notice: string | null;
 };
@@ -76,5 +85,8 @@ export const sessionOf = (state: SessionState): Session => ({
   deselected: state.deselected,
   friends: state.friends,
   tickedFriends: state.tickedFriends,
+  saved: state.saved,
+  savedFrom: state.savedFrom,
+  savedSentUpTo: state.savedSentUpTo,
   notice: state.notice,
 });

@@ -1,7 +1,8 @@
 # Telegram to Signal Migration 🔒🦊
 
-A web app that moves Telegram data into a Signal account: sticker packs, and the user's Telegram friends who are on
-Signal, as Signal contacts. All the work happens in the browser. The server serves the app, passes encrypted traffic
+A web app that moves Telegram data into a Signal account: sticker packs, the user's Telegram friends who are on
+Signal, as Signal contacts, and the text messages of Telegram's Saved Messages, into Signal's Note to Self. All the
+work happens in the browser. The server serves the app, passes encrypted traffic
 on to Signal, and keeps a shared list of packs already uploaded.
 
 ## Parts
@@ -132,6 +133,27 @@ The user can choose on the start page to look for Telegram friends on Signal. No
   the field that says the user accepted the conversation, without which Signal for Android does not list the
   contact. The account's other devices are then asked to read the storage service again.
 
+## Saved Messages
+
+The user can choose on the start page to copy Saved Messages, the chat a Telegram user has with themselves, into Note
+to Self, Signal's conversation with oneself. Nothing below happens otherwise. `docs/saved_messages.md` has the
+reasons and what is not known yet.
+
+- **What is read:** every message of the chat, without files (`app/src/kinds/saved/telegram-saved.ts`).
+- **What is copied:** the text messages from a date on, which the user chooses; no date is chosen at first. The
+  styles Signal has are kept, and the address of a link behind a word is written after the word. A message with a
+  photo, a video or a file, and a text above 2048 bytes, are counted and not copied yet. Where a message was
+  forwarded from is not copied.
+- **How:** each message is sent to the account's other devices as a sent transcript, the message with which a device
+  tells the others what it sent, with the account itself as the recipient (`app/src/signal/note-to-self.ts`). It
+  carries the Telegram date, which Signal's apps show. They list a conversation in the order of arrival, so the
+  messages are sent oldest first and stand behind what Note to Self already holds.
+- **Repeating:** Signal's apps identify a message by its sender and its timestamp and drop one they already have.
+  The timestamp is computed from the Telegram message alone, so a message sent a second time, after an interruption
+  or in a later migration, appears once.
+- **A timer on Note to Self:** the messages carry no timer for disappearing messages, and a message without a timer
+  switches off the timer of the conversation it arrives in.
+
 ## What the browser stores
 
 IndexedDB stores locally, until the migration ends or the user clears it:
@@ -139,8 +161,9 @@ IndexedDB stores locally, until the migration ends or the user clears it:
 - TDLib's database with the Telegram session, saved right after sign-in, and a copy of its login file in a
   database of the app's own, which is written back each time TDLib starts; The copy of login credentials is needed because TDLib often segfaults and its database has to be reset to recover.
 - the linked device's password, storage service key, account identity key pair and registration ID;
-- what the user chose to move, the deselected packs, the Telegram user IDs of the ticked friends and the progress,
-  so that a reload continues.
+- what the user chose to move, the deselected packs, the Telegram user IDs of the ticked friends, the date from which
+  saved messages are copied, Telegram's ID of the last saved message sent, and the progress, so that a reload
+  continues.
 
 At the end, the device is unlinked, Telegram is signed out, and all of it is deleted.
 

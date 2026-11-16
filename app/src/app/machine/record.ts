@@ -6,7 +6,7 @@ import type { StoredDevice } from '../services';
 import { type Chosen, SETUP_STEPS, type SetupStep } from './app/steps';
 
 export type Record = {
-  version: 4;
+  version: 5;
   phase: 'setup' | 'migrating' | 'ending';
   /** The step asked for, in setup. */
   step: SetupStep;
@@ -21,10 +21,20 @@ export type Record = {
   deselected: string[];
   /** Telegram user IDs of found friends the user ticked. */
   tickedFriends: number[];
+  /** The saved messages are copied from this date on (seconds since 1970); null while none is chosen. */
+  savedFrom: number | null;
+  /** Telegram's ID of the last saved message that is in Signal; null before the first. */
+  savedSentUpTo: number | null;
+};
+
+/** The record before saved messages could be moved. */
+type RecordVersion4 = Omit<Record, 'version' | 'chosen' | 'savedFrom' | 'savedSentUpTo'> & {
+  version: 4;
+  chosen: { stickers: boolean; friends: boolean };
 };
 
 /** The records of earlier versions, which a reload still continues from. Sticker packs were all they moved. */
-type RecordVersion3 = Omit<Record, 'version' | 'chosen' | 'tickedFriends'> & { version: 3 };
+type RecordVersion3 = Omit<RecordVersion4, 'version' | 'chosen' | 'tickedFriends'> & { version: 3 };
 
 type RecordVersion2 = {
   version: 2;
@@ -37,17 +47,20 @@ type RecordVersion2 = {
 
 /** The record in `value` as read from the browser, or null when it is none that this version knows. */
 export function readRecord(value: unknown): Record | null {
-  const record = value as Record | RecordVersion3 | RecordVersion2 | null;
+  const record = value as Record | RecordVersion4 | RecordVersion3 | RecordVersion2 | null;
   if (!record || typeof record !== 'object' || !SETUP_STEPS.includes(record.step)) return null;
-  const stickersOnly = { chosen: { stickers: true, friends: false }, tickedFriends: [] };
-  if (record.version === 4 && ['setup', 'migrating', 'ending'].includes(record.phase)) return record;
-  if (record.version === 3 && ['setup', 'migrating', 'ending'].includes(record.phase))
-    return { ...record, version: 4, ...stickersOnly };
+  const noSaved = { savedFrom: null, savedSentUpTo: null };
+  const stickersOnly = { chosen: { stickers: true, friends: false, saved: false }, tickedFriends: [], ...noSaved };
+  const phases = ['setup', 'migrating', 'ending'];
+  if (record.version === 5 && phases.includes(record.phase)) return record;
+  if (record.version === 4 && phases.includes(record.phase))
+    return { ...record, version: 5, chosen: { ...record.chosen, saved: false }, ...noSaved };
+  if (record.version === 3 && phases.includes(record.phase)) return { ...record, version: 5, ...stickersOnly };
   if (record.version === 2 && ['setup', 'migrating', 'finishing', 'clearing'].includes(record.phase)) {
     const ending = record.phase === 'finishing' ? 'finish' : record.phase === 'clearing' ? 'clear' : null;
     return {
       ...stickersOnly,
-      version: 4,
+      version: 5,
       phase: ending ? 'ending' : (record.phase as 'setup' | 'migrating'),
       step: record.step,
       why: ending,

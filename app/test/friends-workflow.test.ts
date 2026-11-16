@@ -204,7 +204,7 @@ describe('finding friends', () => {
 
     const second = await openPage(alice, browser, source().friendSource);
     await until(() => second.workflow.friends.kind === 'found', 'the search after the reload');
-    expect(second.workflow.chosen).toEqual({ stickers: false, friends: true });
+    expect(second.workflow.chosen).toEqual({ stickers: false, friends: true, saved: false });
     expect(second.workflow.friendsToAdd).toBe(1);
   });
 });

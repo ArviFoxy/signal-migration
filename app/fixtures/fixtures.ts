@@ -11,6 +11,7 @@ import type { AppServices, StoredDevice } from '../src/app/services';
 import { Workflow } from '../src/app/workflow';
 import type { FriendSearch } from '../src/kinds/friends/search';
 import type { ChatEntry, Person } from '../src/kinds/friends/telegram-people';
+import type { SavedMessage } from '../src/kinds/saved/messages';
 import { type PackEntry, type PackState, StickerMigration } from '../src/kinds/stickers/migration';
 import type { PackIndex } from '../src/kinds/stickers/pack-index';
 import type { StickerFormat } from '../src/kinds/stickers/telegram-packs';
@@ -40,11 +41,14 @@ const notLinked: SignalState = {
 const session = (parts: Partial<Session> = {}): Session => ({
   telegram: notConnected,
   signal: notLinked,
-  chosen: { stickers: true, friends: false },
+  chosen: { stickers: true, friends: false, saved: false },
   packs: { kind: 'none' },
   deselected: [],
   friends: { kind: 'none' },
   tickedFriends: [],
+  saved: { kind: 'none' },
+  savedFrom: null,
+  savedSentUpTo: null,
   notice: null,
   ...parts,
 });
@@ -173,8 +177,22 @@ async function migrating(done: number): Promise<{ state: AppState; migration: St
   return { state, migration };
 }
 
-const BOTH = { stickers: true, friends: true };
-const FRIENDS_ONLY = { stickers: false, friends: true };
+const BOTH = { stickers: true, friends: true, saved: false };
+const FRIENDS_ONLY = { stickers: false, friends: true, saved: false };
+const SAVED_ONLY = { stickers: false, friends: false, saved: true };
+const EVERYTHING = { stickers: true, friends: true, saved: true };
+
+/** 2,600 saved messages over about five years: mostly text, some with media, a few too long for one message. */
+const SAVED_MESSAGES: SavedMessage[] = Array.from({ length: 2600 }, (_, index) => ({
+  id: (index + 1) * 2 ** 20,
+  date: Date.UTC(2021, 8, 14) / 1000 + index * 62_000,
+  kind: index % 7 === 3 ? 'photo' : index % 31 === 5 ? 'file' : index % 53 === 9 ? 'other' : 'text',
+  body: index % 211 === 17 ? 'long '.repeat(600) : `Note ${index + 1}`,
+  styles: [],
+}));
+/** Copied from the 1,500th message on. */
+const SAVED_FROM = SAVED_MESSAGES[1500].date;
+const readSaved = () => ({ kind: 'read' as const, instance: 'fixture', attempt: 1, messages: SAVED_MESSAGES });
 
 /** A finished search: seven people found in three groups and four one-to-one chats, two of them in Signal already. */
 /** The found friends the fixtures show as ticked. */
@@ -515,6 +533,95 @@ const FIXTURES: Record<string, Fixture> = {
       kind: 'migrating',
       run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
     }),
+  },
+  'start-everything': {
+    state: () => setup('start', { chosen: EVERYTHING }),
+  },
+  'saved-reading': {
+    state: () =>
+      setup('saved', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: SAVED_ONLY,
+        saved: { kind: 'reading', instance: 'fixture', attempt: 1, read: 1300 },
+      }),
+  },
+  'saved-read': {
+    state: () => setup('saved', { telegram: signedIn, signal: linked, chosen: SAVED_ONLY, saved: readSaved() }),
+  },
+  'saved-chosen': {
+    state: () =>
+      setup('saved', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: SAVED_ONLY,
+        saved: readSaved(),
+        savedFrom: SAVED_FROM,
+      }),
+  },
+  'saved-empty': {
+    state: () =>
+      setup('saved', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: SAVED_ONLY,
+        saved: { kind: 'read', instance: 'fixture', attempt: 1, messages: [] },
+      }),
+  },
+  'review-saved-only': {
+    state: () =>
+      setup('review', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: SAVED_ONLY,
+        saved: readSaved(),
+        savedFrom: SAVED_FROM,
+      }),
+  },
+  'review-everything': {
+    async state() {
+      const migration = await withPacks(40);
+      migration.entries.forEach((entry, rank) => rank % 3 === 1 && (entry.state = 'available'));
+      return setup('review', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: EVERYTHING,
+        packs: read(migration),
+        friends: foundFriends(),
+        tickedFriends: TICKED_FRIENDS,
+        saved: readSaved(),
+        savedFrom: SAVED_FROM,
+      });
+    },
+  },
+  'migrate-saved-only': {
+    state: () => ({
+      ...session({
+        telegram: signedIn,
+        signal: linked,
+        chosen: SAVED_ONLY,
+        saved: readSaved(),
+        savedFrom: SAVED_FROM,
+        savedSentUpTo: SAVED_MESSAGES[1900].id,
+      }),
+      kind: 'migrating',
+      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+    }),
+  },
+  'migrate-everything': {
+    async state() {
+      const { state } = await migrating(40);
+      return {
+        ...state,
+        chosen: EVERYTHING,
+        friends: foundFriends(),
+        tickedFriends: TICKED_FRIENDS,
+        saved: readSaved(),
+        savedFrom: SAVED_FROM,
+        savedSentUpTo: SAVED_MESSAGES[1900].id,
+        run: { attempt: 1, status: 'running', friendsAdded: 5, error: null },
+      };
+    },
   },
   'end-failed': {
     async state() {
