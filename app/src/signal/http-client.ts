@@ -33,9 +33,14 @@ export async function httpsRequest(
       if (settled || !request.isComplete) return false;
       settled = true;
       clearTimeout(timer);
+      const headerMap = new Map<string, string>();
+      for (const line of request.rawHeaders()) {
+        const colon = line.indexOf(':');
+        if (colon > 0) headerMap.set(line.slice(0, colon).trim().toLowerCase(), line.slice(colon + 1).trim());
+      }
       const response: HttpResponse = {
         status: request.status,
-        header: (name) => request.header(name),
+        header: (name) => headerMap.get(name.toLowerCase()),
         body: request.body(),
       };
       request.free();

@@ -76,6 +76,13 @@ export class FakeSignal {
   #random = seededBytes(7);
   #policies = new Map<string, { expires: number; maxBytes: number; account: string }>();
   #cdn = new Map<string, Uint8Array>();
+  /** In-progress and finished message attachment uploads (CDN 3 TUS or CDN 2 GCS), keyed by cdnKey. */
+  #attachmentForms = new Map<string, { cdn: number; expectedLength: number; token: string; resumeId: string }>();
+  #attachmentUploads = new Map<string, { expectedLength: number; chunks: Uint8Array[]; received: number }>();
+  /** Which attachment CDN `/v4/attachments/form/upload` assigns (3 for TUS, 2 for GCS). */
+  attachmentCdn: 2 | 3 = 3;
+  /** Maximum encrypted upload length accepted by `/v4/attachments/form/upload`. */
+  maxAttachmentBytes = 100 * 1024 * 1024;
   #faults: Fault[] = [];
   #beforeStorageWrite: (() => Promise<void>)[] = [];
   /** Sticker pack upload forms issued, and manifests stored, per account. */
@@ -210,6 +217,8 @@ export class FakeSignal {
         if (verb === 'GET' && path === '/v1/storage/auth') return chatJson(200, account.storageLogin);
         const form = /^\/v1\/sticker\/pack\/form\/(\d+)$/.exec(path);
         if (verb === 'GET' && form) return this.#uploadForm(aci, account, Number(form[1]));
+        const attachForm = /^\/v4\/attachments\/form\/upload\?uploadLength=(\d+)$/.exec(path);
+        if (verb === 'GET' && attachForm) return this.#attachmentUploadForm(Number(attachForm[1]));
         return chatJson(404, {});
       },
     };
@@ -254,11 +263,43 @@ export class FakeSignal {
     });
   }
 
+  #attachmentUploadForm(uploadLength: number): ChatResponse {
+    if (!Number.isInteger(uploadLength) || uploadLength <= 0) return chatJson(400, {});
+    if (uploadLength > this.maxAttachmentBytes) return chatJson(413, {});
+    const key = hex(this.#random(12));
+    const token = hex(this.#random(12));
+    const resumeId = hex(this.#random(8));
+    const cdn = this.attachmentCdn;
+    this.#attachmentForms.set(key, { cdn, expectedLength: uploadLength, token, resumeId });
+    if (cdn === 3) {
+      return chatJson(200, {
+        cdn: 3,
+        key,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Upload-Metadata': `filename ${btoa(key)}`,
+        },
+        signedUploadLocation: 'https://cdn3.signal.org/attachments',
+      });
+    }
+    return chatJson(200, {
+      cdn: 2,
+      key,
+      headers: {
+        host: 'cdn2.signal.org',
+        'x-goog-resumable': 'start',
+      },
+      signedUploadLocation: `https://cdn2.signal.org/attachments/${key}?sig=${token}`,
+    });
+  }
+
   /** HTTPS to the storage service and the CDN. */
   readonly https: HttpsRequest = async (host, method, path, headers = [], body = new Uint8Array(0)) => {
     this.#checkFaults(`https ${method} ${host} ${path}`);
     if (host === 'storage.signal.org') return this.#storage(method, path, headers, body);
     if (host === 'cdn.signal.org' && method === 'POST' && path === '/') return this.#cdnUpload(headers, body);
+    if (host === 'cdn3.signal.org') return this.#cdn3Upload(method, path, headers, body);
+    if (host === 'cdn2.signal.org') return this.#cdn2Upload(method, path, headers, body);
     return httpResponse(404);
   };
 
@@ -352,6 +393,92 @@ export class FakeSignal {
   /** A file on the CDN, by key (stickers/<pack ID>/manifest.proto or stickers/<pack ID>/full/<n>). */
   cdnFile(key: string): Uint8Array | null {
     return this.#cdn.get(key) ?? null;
+  }
+
+  /** An uploaded message attachment on CDN 2 or CDN 3, by its `cdnKey`. */
+  attachmentFile(cdnKey: string): Uint8Array | null {
+    const upload = this.#attachmentUploads.get(cdnKey);
+    if (!upload || upload.received !== upload.expectedLength) return null;
+    const joined = new Uint8Array(upload.received);
+    let offset = 0;
+    for (const chunk of upload.chunks) {
+      joined.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return joined;
+  }
+
+  #header(headers: string[], name: string): string | undefined {
+    const prefix = `${name.toLowerCase()}:`;
+    return headers
+      .find((line) => line.toLowerCase().startsWith(prefix))
+      ?.slice(prefix.length)
+      .trim();
+  }
+
+  #cdn3Upload(method: string, path: string, headers: string[], body: Uint8Array): HttpResponse {
+    if (this.#header(headers, 'Tus-Resumable') !== '1.0.0') return httpResponse(412);
+    const auth = this.#header(headers, 'Authorization');
+    if (method === 'POST' && path === '/attachments') {
+      const metadata = this.#header(headers, 'Upload-Metadata') ?? '';
+      const match = /filename\s+([A-Za-z0-9+/=]+)/.exec(metadata);
+      const key = match ? atob(match[1]) : '';
+      const form = this.#attachmentForms.get(key);
+      if (!form || form.cdn !== 3 || auth !== `Bearer ${form.token}`) return httpResponse(401);
+      const length = Number(this.#header(headers, 'Upload-Length'));
+      if (length !== form.expectedLength || body.length > length) return httpResponse(400);
+      this.#attachmentUploads.set(key, { expectedLength: length, chunks: [body.slice()], received: body.length });
+      return httpResponse(201, new Uint8Array(0), {
+        location: `https://cdn3.signal.org/attachments/${key}`,
+        'upload-offset': String(body.length),
+      });
+    }
+    const patch = /^\/attachments\/([^/?]+)$/.exec(path);
+    if (method === 'PATCH' && patch) {
+      const key = decodeURIComponent(patch[1]);
+      const form = this.#attachmentForms.get(key);
+      const upload = this.#attachmentUploads.get(key);
+      if (!form || !upload || form.cdn !== 3 || auth !== `Bearer ${form.token}`) return httpResponse(401);
+      const offset = Number(this.#header(headers, 'Upload-Offset'));
+      if (offset !== upload.received || upload.received + body.length > upload.expectedLength) return httpResponse(409);
+      upload.chunks.push(body.slice());
+      upload.received += body.length;
+      return httpResponse(204, new Uint8Array(0), { 'upload-offset': String(upload.received) });
+    }
+    return httpResponse(404);
+  }
+
+  #cdn2Upload(method: string, path: string, headers: string[], body: Uint8Array): HttpResponse {
+    const start = /^\/attachments\/([^/?]+)\?sig=([^&]+)$/.exec(path);
+    if (method === 'POST' && start) {
+      const [, key, token] = start;
+      const form = this.#attachmentForms.get(key);
+      if (!form || form.cdn !== 2 || form.token !== token) return httpResponse(401);
+      this.#attachmentUploads.set(key, { expectedLength: form.expectedLength, chunks: [], received: 0 });
+      return httpResponse(200, new Uint8Array(0), {
+        location: `https://cdn2.signal.org/upload/${key}/${form.resumeId}`,
+      });
+    }
+    const put = /^\/upload\/([^/]+)\/([^/?]+)$/.exec(path);
+    if (method === 'PUT' && put) {
+      const [, key, resumeId] = put;
+      const form = this.#attachmentForms.get(key);
+      const upload = this.#attachmentUploads.get(key);
+      if (!form || !upload || form.cdn !== 2 || form.resumeId !== resumeId) return httpResponse(404);
+      const range = this.#header(headers, 'Content-Range') ?? '';
+      const match = /^bytes (\d+)-(\d+)\/(\d+)$/.exec(range);
+      if (!match) return httpResponse(400);
+      const [, startByte, endByte, total] = match.map(Number);
+      if (startByte !== upload.received || endByte !== startByte + body.length - 1 || total !== upload.expectedLength) {
+        return httpResponse(400);
+      }
+      upload.chunks.push(body.slice());
+      upload.received += body.length;
+      return upload.received === upload.expectedLength
+        ? httpResponse(200)
+        : httpResponse(308, new Uint8Array(0), { range: `bytes=0-${upload.received - 1}` });
+    }
+    return httpResponse(404);
   }
 
   /** How often a page asked the public CDN for each file, by key. */

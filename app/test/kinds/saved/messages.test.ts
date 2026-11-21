@@ -101,24 +101,99 @@ describe('Telegram’s formatted text as a Signal body', () => {
   });
 });
 
+const tdFile = (id: number, size: number, remoteId = `remote-${id}`) => ({
+  _: 'file',
+  id,
+  size,
+  expected_size: size,
+  local: { path: '', downloaded_size: 0, is_downloading_completed: false },
+  remote: { id: remoteId, unique_id: `u-${id}` },
+});
+
 describe('a saved message', () => {
-  // Detects: the caption of a photo being taken for a text message and copied without its photo.
-  it('is a text message only when Telegram says so; media keeps its caption and its kind', () => {
+  // Detects: photos, videos, documents, voice notes, GIFs, or stickers failing to extract their media file info, or
+  // choosing a thumbnail instead of the largest photo size.
+  it('extracts media metadata for photos, videos, GIFs, voice notes, documents, and stickers', () => {
     const note = savedMessageOf(telegramMessage(7, 1_600_000_000, { _: 'messageText', text: formatted('hello') }));
     expect(note).toMatchObject({ id: 7 * 2 ** 20, date: 1_600_000_000, kind: 'text', body: 'hello' });
-    const photo = savedMessageOf(
-      telegramMessage(8, 1_600_000_001, { _: 'messagePhoto', caption: formatted('at the lake') }),
-    );
-    expect(photo).toMatchObject({ kind: 'photo', body: 'at the lake' });
     expect(reasonLeftOut(note)).toBeNull();
-    expect(reasonLeftOut(photo)).toBe('media');
+
+    const photo = savedMessageOf(
+      telegramMessage(8, 1_600_000_001, {
+        _: 'messagePhoto',
+        photo: {
+          sizes: [
+            { type: 's', width: 320, height: 240, photo: tdFile(10, 8_000) },
+            { type: 'y', width: 1280, height: 960, photo: tdFile(11, 180_000) },
+          ],
+        },
+        caption: formatted('at the lake'),
+      }),
+    );
+    expect(photo).toMatchObject({
+      kind: 'photo',
+      body: 'at the lake',
+      media: { fileId: 11, remoteId: 'remote-11', size: 180_000, contentType: 'image/jpeg', width: 1280, height: 960 },
+    });
+    expect(reasonLeftOut(photo)).toBeNull();
+
+    const doc = savedMessageOf(
+      telegramMessage(9, 1_600_000_002, {
+        _: 'messageDocument',
+        document: { file_name: 'notes.pdf', mime_type: 'application/pdf', document: tdFile(12, 42_000) },
+        caption: formatted(''),
+      }),
+    );
+    expect(doc.media).toMatchObject({
+      fileId: 12,
+      contentType: 'application/pdf',
+      fileName: 'notes.pdf',
+      size: 42_000,
+    });
+    expect(reasonLeftOut(doc)).toBeNull();
+
+    const voice = savedMessageOf(
+      telegramMessage(10, 1_600_000_003, {
+        _: 'messageVoiceNote',
+        voice_note: { duration: 14, mime_type: 'audio/ogg', voice: tdFile(13, 19_000) },
+        caption: formatted(''),
+      }),
+    );
+    expect(voice.media).toMatchObject({ fileId: 13, contentType: 'audio/ogg', duration: 14, voiceNote: true });
+    expect(reasonLeftOut(voice)).toBeNull();
+
+    const gif = savedMessageOf(
+      telegramMessage(11, 1_600_000_004, {
+        _: 'messageAnimation',
+        animation: { width: 480, height: 270, duration: 3, mime_type: 'video/mp4', animation: tdFile(14, 90_000) },
+        caption: formatted(''),
+      }),
+    );
+    expect(gif.media).toMatchObject({ fileId: 14, contentType: 'video/mp4', gif: true, width: 480, height: 270 });
+    expect(reasonLeftOut(gif)).toBeNull();
   });
 
-  // Detects: a message that cannot be one Signal message being sent anyway (Signal's apps drop a body above 2048
-  // bytes), and kinds without text being sent as empty messages.
-  it('is left out when it is too long, or of a kind that has no text', () => {
-    expect(reasonLeftOut(text(1, 1, 'a'.repeat(2049)))).toBe('too-long');
-    expect(reasonLeftOut(text(1, 1, 'a'.repeat(2048)))).toBeNull();
+  // Detects: long text messages up to 64 KiB being wrongly dropped, oversized files > Signal's limit not being left
+  // out, protected/self-destructing messages being copied, or unsupported kinds being sent as empty messages.
+  it('copies long text up to 64 KiB, and leaves out oversized files, protected messages, and unsupported kinds', () => {
+    expect(reasonLeftOut(text(1, 1, 'a'.repeat(3000)))).toBeNull();
+    expect(reasonLeftOut(text(1, 1, 'a'.repeat(65_537)))).toBe('too-large');
+
+    const hugeFile = savedMessageOf(
+      telegramMessage(8, 1, {
+        _: 'messageDocument',
+        document: { file_name: 'huge.zip', mime_type: 'application/zip', document: tdFile(20, 105 * 1024 * 1024) },
+        caption: formatted(''),
+      }),
+    );
+    expect(reasonLeftOut(hugeFile)).toBe('too-large');
+
+    const restricted = savedMessageOf({
+      ...telegramMessage(8, 1, { _: 'messageText', text: formatted('secret') }),
+      can_be_saved: false,
+    } as unknown as Td.message);
+    expect(reasonLeftOut(restricted)).toBe('other');
+
     expect(reasonLeftOut(savedMessageOf(telegramMessage(9, 1, { _: 'messageLocation' })))).toBe('other');
     expect(reasonLeftOut(savedMessageOf(telegramMessage(9, 1, { _: 'messageUnsupported' })))).toBe('other');
   });

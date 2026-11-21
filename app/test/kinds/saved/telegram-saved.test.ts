@@ -58,17 +58,38 @@ function telegram(
         for (let number = before - 1; number >= 1 && numbers.length < limit; number--) numbers.push(number);
         return { _: 'messages', total_count: count, messages: numbers.map(message) };
       }
+      case 'getRemoteFile':
+        return { _: 'file', id: Number(String(query.remote_file_id).replace('remote-', '')) + run * 1000 };
       default:
         throw new Error(`not simulated: ${query._}`);
     }
   };
+  const downloadedIds: number[] = [];
   const client = {
     invoke,
     get run() {
       return run;
     },
-  } as unknown as Pick<TelegramClient, 'invoke' | 'run'>;
-  return { client, requests };
+    async withDownloadedFile<T>(
+      fileId: number,
+      use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
+    ): Promise<T> {
+      downloadedIds.push(fileId);
+      const data = new TextEncoder().encode(`file-${fileId}`);
+      return use(data.length, async (onChunk) => {
+        await onChunk(data);
+      });
+    },
+  } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withDownloadedFile'>;
+  return {
+    client,
+    requests,
+    downloadedIds,
+    bumpRun: () => {
+      run++;
+      knownInRun = new Set();
+    },
+  };
 }
 
 describe('reading Saved Messages', () => {
@@ -106,5 +127,23 @@ describe('reading Saved Messages', () => {
     const messages = await savedMessagesOf(client).readMessages(() => undefined);
     expect(messages).toHaveLength(250);
     expect(requests.filter((r) => r._ === 'createPrivateChat')).toHaveLength(2);
+  });
+
+  // Detects: reading media failing after TDLib restarts between reading the message list and downloading a file,
+  // because TDLib assigns fresh file IDs on each run.
+  it('resolves media file IDs via getRemoteFile when TDLib restarted after readMessages', async () => {
+    const { client, requests, downloadedIds, bumpRun } = telegram(2);
+    const source = savedMessagesOf(client);
+    await source.readMessages(() => undefined);
+    bumpRun();
+    const received: Uint8Array[] = [];
+    await source.withMedia!({ fileId: 7, remoteId: 'remote-7', size: 10 }, async (_size, readChunks) => {
+      await readChunks(async (chunk) => {
+        received.push(chunk);
+      });
+    });
+    expect(requests.some((r) => r._ === 'getRemoteFile' && r.remote_file_id === 'remote-7')).toBe(true);
+    expect(downloadedIds).toEqual([2007]);
+    expect(new TextDecoder().decode(received[0])).toBe('file-2007');
   });
 });

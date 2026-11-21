@@ -182,7 +182,7 @@ const FRIENDS_ONLY = { stickers: false, friends: true, saved: false };
 const SAVED_ONLY = { stickers: false, friends: false, saved: true };
 const EVERYTHING = { stickers: true, friends: true, saved: true };
 
-/** 2,600 saved messages over about five years with varied density: mostly text, some with media, a few too long. */
+/** 2,600 saved messages over about five years with varied density: text, photos, files, a few oversized or unsupported. */
 const SAVED_MESSAGES: SavedMessage[] = (() => {
   const list: SavedMessage[] = [];
   let date = Date.UTC(2021, 8, 14) / 1000;
@@ -190,12 +190,34 @@ const SAVED_MESSAGES: SavedMessage[] = (() => {
     // Deterministic bursty spacing so the timeline histogram has realistic peaks and quiet stretches.
     const wave = 1 + 0.7 * Math.sin(index / 65) + 0.45 * Math.cos(index / 19);
     date += Math.round(58_000 * Math.max(0.25, wave));
+    const kind = index % 7 === 3 ? 'photo' : index % 31 === 5 ? 'file' : index % 53 === 9 ? 'other' : ('text' as const);
+    const oversized = kind === 'file' && index % 620 === 5;
+    const media =
+      kind === 'photo'
+        ? {
+            fileId: index + 1,
+            remoteId: `photo-${index + 1}`,
+            size: 180_000 + (index % 5) * 45_000,
+            contentType: 'image/jpeg',
+            width: 1280,
+            height: 960,
+          }
+        : kind === 'file'
+          ? {
+              fileId: index + 1,
+              remoteId: `file-${index + 1}`,
+              size: oversized ? 110 * 1024 * 1024 : 420_000,
+              contentType: 'application/pdf',
+              fileName: oversized ? `archive-${index + 1}.zip` : `doc-${index + 1}.pdf`,
+            }
+          : undefined;
     list.push({
       id: (index + 1) * 2 ** 20,
       date,
-      kind: index % 7 === 3 ? 'photo' : index % 31 === 5 ? 'file' : index % 53 === 9 ? 'other' : 'text',
-      body: index % 211 === 17 ? 'long '.repeat(600) : `Note ${index + 1}`,
+      kind,
+      body: kind === 'text' && index % 211 === 17 ? 'long '.repeat(600) : `Note ${index + 1}`,
       styles: [],
+      ...(media ? { media } : {}),
     });
   }
   return list;

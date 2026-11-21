@@ -399,15 +399,49 @@ export class TelegramClient {
    */
   async readFile(fileId: number): Promise<Uint8Array> {
     await downloadWithStallLimit(this.invoke, fileId);
-    const part = (await this.#send({ '@type': 'readFile', file_id: fileId })) as TdObject & {
-      data?: Blob;
-      message?: unknown;
-    };
-    if (part['@type'] !== 'filePart' || !(part.data instanceof Blob))
-      throw new Error(`reading a downloaded Telegram file failed: ${String(part.message)}`);
-    const bytes = new Uint8Array(await part.data.arrayBuffer());
-    await this.#send({ '@type': 'deleteFile', file_id: fileId });
-    return bytes;
+    try {
+      const part = (await this.#send({ '@type': 'readFile', file_id: fileId })) as TdObject & {
+        data?: Blob;
+        message?: unknown;
+      };
+      if (part['@type'] !== 'filePart' || !(part.data instanceof Blob))
+        throw new Error(`reading a downloaded Telegram file failed: ${String(part.message)}`);
+      return new Uint8Array(await part.data.arrayBuffer());
+    } finally {
+      await this.#send({ '@type': 'deleteFile', file_id: fileId }).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Downloads a file, passes its exact byte length and a chunked reader (via `readFilePart`) to `use`, and deletes
+   * the local copy when `use` finishes or throws. Avoids holding a large video or document in JS memory at once.
+   */
+  async withDownloadedFile<T>(
+    fileId: number,
+    use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
+    chunkBytes = 2 * 1024 * 1024,
+  ): Promise<T> {
+    await downloadWithStallLimit(this.invoke, fileId);
+    try {
+      const file = await this.invoke({ _: 'getFile', file_id: fileId });
+      const size = file.local.downloaded_size || file.size;
+      return await use(size, async (onChunk) => {
+        for (let offset = 0; offset < size; offset += chunkBytes) {
+          const count = Math.min(chunkBytes, size - offset);
+          const part = (await this.#send({
+            '@type': 'readFilePart',
+            file_id: fileId,
+            offset,
+            count,
+          })) as TdObject & { data?: Blob; message?: unknown };
+          if (part['@type'] !== 'filePart' || !(part.data instanceof Blob))
+            throw new Error(`reading a downloaded Telegram file failed: ${String(part.message)}`);
+          await onChunk(new Uint8Array(await part.data.arrayBuffer()));
+        }
+      });
+    } finally {
+      await this.#send({ '@type': 'deleteFile', file_id: fileId }).catch(() => undefined);
+    }
   }
 
   /**

@@ -2,7 +2,7 @@
 // state, and the user's actions as events. Nothing here holds state of its own.
 
 import { contactsToAdd } from '../kinds/friends/search';
-import { type LeftOut, leftOutFrom, messagesToCopy, notYetSent } from '../kinds/saved/copy';
+import { type LeftOut, leftOutFrom, mediaSummaryFrom, messagesToCopy, notYetSent } from '../kinds/saved/copy';
 import type { PackEntry, StickerMigration } from '../kinds/stickers/migration';
 import { DEFAULT_DEVICE_NAME } from '../signal/device-name';
 import {
@@ -190,16 +190,23 @@ export class Workflow extends Runtime {
   }
 
   /**
-   * The saved messages of the chosen dates: how many are copied, how many of them are in Signal, and how many are
-   * left out, by the reason. Null until the messages are read.
+   * The saved messages of the chosen dates: how many are copied, how many of them are in Signal, how many carry
+   * media (and their known byte size), and how many are left out, by the reason. Null until the messages are read.
    */
-  get savedCopy(): { toCopy: number; copied: number; leftOut: LeftOut } | null {
+  get savedCopy(): {
+    toCopy: number;
+    copied: number;
+    withMedia: number;
+    mediaBytes: number;
+    leftOut: LeftOut;
+  } | null {
     const state = this.state;
     if (!isSession(state) || state.saved.kind !== 'read') return null;
     const toCopy = messagesToCopy(state.saved.messages, state.savedFrom);
     return {
       toCopy: toCopy.length,
       copied: toCopy.length - notYetSent(toCopy, state.savedSentUpTo).length,
+      ...mediaSummaryFrom(state.saved.messages, state.savedFrom),
       leftOut: leftOutFrom(state.saved.messages, state.savedFrom),
     };
   }

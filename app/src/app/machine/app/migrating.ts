@@ -63,7 +63,8 @@ export function migratingWork(state: Migrating): Work[] {
       device,
     });
   const messages = savedLeft(state);
-  if (messages.length > 0) work.push({ kind: 'copy-saved', key: `copy-saved:${run.attempt}`, messages, device });
+  if (messages.length > 0)
+    work.push({ kind: 'copy-saved', key: `copy-saved:${run.attempt}`, instance, messages, device });
   if (chosen.stickers && run.status === 'running' && packs.kind === 'read' && packs.signalRead === device.deviceId)
     work.push({ kind: 'run', key: `run:${run.attempt}`, instance, migration: packs.migration, device });
   return work;

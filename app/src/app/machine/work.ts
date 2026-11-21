@@ -43,7 +43,7 @@ export type Work =
   | { kind: 'add-friends'; key: string; contacts: NewContact[]; device: StoredDevice }
   /** Reads the messages of Telegram's Saved Messages. */
   | { kind: 'read-saved'; key: string; instance: string }
-  /** Sends these saved messages to Signal's Note to Self, in their order. */
-  | { kind: 'copy-saved'; key: string; messages: SavedMessage[]; device: StoredDevice }
+  /** Sends these saved messages (and any media they carry) to Signal's Note to Self, in their order. */
+  | { kind: 'copy-saved'; key: string; instance: string; messages: SavedMessage[]; device: StoredDevice }
   /** Migrates the selected packs. */
   | { kind: 'run'; key: string; instance: string; migration: StickerMigration; device: StoredDevice };

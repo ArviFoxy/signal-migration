@@ -139,15 +139,21 @@ The user can choose on the start page to copy Saved Messages, the chat a Telegra
 to Self, Signal's conversation with oneself. Nothing below happens otherwise. `docs/saved_messages.md` has the
 reasons and what is not known yet.
 
-- **What is read:** every message of the chat, without files (`app/src/kinds/saved/telegram-saved.ts`).
-- **What is copied:** the text messages from a date on, chosen on a timeline of the chat (all messages by default). The
-  styles Signal has are kept, and the address of a link behind a word is written after the word. A message with a
-  photo, a video or a file, and a text above 2048 bytes, are counted and not copied yet. Where a message was
-  forwarded from is not copied.
-- **How:** each message is sent to the account's other devices as a sent transcript, the message with which a device
-  tells the others what it sent, with the account itself as the recipient (`app/src/signal/note-to-self.ts`). It
-  carries the Telegram date, which Signal's apps show. They list a conversation in the order of arrival, so the
-  messages are sent oldest first and stand behind what Note to Self already holds.
+- **What is read:** the message list of the chat first (`app/src/kinds/saved/telegram-saved.ts`), without downloading
+  files until the migration runs. During the migration, each media file is downloaded from Telegram, streamed in parts
+  through WebAssembly encryption (`crates/signal-wasm/src/crypto.rs`), and deleted locally as soon as it is uploaded.
+- **What is copied:** every supported message from a date on, chosen on a timeline of the chat (all messages by
+  default): text (including long messages above 2048 bytes, uploaded as `text/x-signal-plain`), photos, videos, GIFs,
+  voice notes, audio files, round video messages, stickers (animated stickers converted to APNG), arbitrary files, and
+  grouped albums. The styles Signal has are kept, and the address of a link behind a word is written after the word.
+  Files above Signal's 100 MiB encrypted upload limit, protected/self-destructing messages, and unsupported kinds (such
+  as locations or polls) are counted and not copied. Where a message was forwarded from is not copied.
+- **How:** each attachment is encrypted in Signal's attachment format (logarithmic zero padding, AES-256-CBC,
+  HMAC-SHA256, and SHA-256 digest) and uploaded in chunks to Signal's CDN (`app/src/signal/attachment.ts`). Each
+  message is then sent to the account's other devices as a sent transcript, the message with which a device tells the
+  others what it sent, with the account itself as the recipient (`app/src/signal/note-to-self.ts`). It carries the
+  Telegram date, which Signal's apps show. They list a conversation in the order of arrival, so the messages are sent
+  oldest first and stand behind what Note to Self already holds.
 - **Repeating:** Signal's apps identify a message by its sender and its timestamp and drop one they already have.
   The timestamp is computed from the Telegram message alone, so a message sent a second time, after an interruption
   or in a later migration, appears once.

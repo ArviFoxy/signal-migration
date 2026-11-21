@@ -5,8 +5,8 @@
 
 import { fromBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
-import { BodyRange_Style, ContentSchema } from '../src/gen/SignalService_pb';
-import { bodyFits, MAX_BODY_BYTES, type Note, noteToSelfMessage } from '../src/signal/note-to-self';
+import { AttachmentPointer_Flags, BodyRange_Style, ContentSchema } from '../src/gen/SignalService_pb';
+import { bodyFits, MAX_BODY_BYTES, type Note, noteToSelfMessage, trimBody } from '../src/signal/note-to-self';
 import './wasm';
 
 /** An account ID in the form with hyphens; the repository holds none written out. */
@@ -66,5 +66,53 @@ describe('a note to self', () => {
     // "é" is two bytes in UTF-8: 1025 of them are 2050 bytes.
     expect(bodyFits('é'.repeat(1025))).toBe(false);
     expect(() => noteToSelfMessage(ACI, { timestamp: OLD, body: 'é'.repeat(1025), styles: [] })).toThrow(/2048/);
+  });
+
+  // Detects: attachment pointers missing required fields (cdnKey, cdnNumber, key, digest, size, contentType,
+  // clientUuid, uploadTimestamp, flags) or an attachment-only note carrying an empty body string.
+  it('encodes AttachmentPointers with flags and metadata, and omits an empty body', () => {
+    const key = new Uint8Array(64).fill(3);
+    const digest = new Uint8Array(32).fill(9);
+    const { sent } = sentOf({
+      timestamp: OLD,
+      body: '',
+      styles: [],
+      attachments: [
+        {
+          cdnNumber: 3,
+          cdnKey: 'abc123',
+          key,
+          digest,
+          size: 12_345,
+          uploadTimestamp: 1_700_000_000_000,
+          contentType: 'image/jpeg',
+          width: 1280,
+          height: 960,
+          flags: AttachmentPointer_Flags.BORDERLESS,
+        },
+      ],
+    });
+    expect(sent.message?.body).toBe('');
+    expect(sent.message?.attachments).toHaveLength(1);
+    const pointer = sent.message!.attachments[0];
+    expect(pointer.attachmentIdentifier).toEqual({ case: 'cdnKey', value: 'abc123' });
+    expect(pointer.cdnNumber).toBe(3);
+    expect(pointer.contentType).toBe('image/jpeg');
+    expect(pointer.size).toBe(12_345);
+    expect(pointer.width).toBe(1280);
+    expect(pointer.height).toBe(960);
+    expect(pointer.flags).toBe(AttachmentPointer_Flags.BORDERLESS);
+    expect(pointer.clientUuid).toHaveLength(16);
+    expect(pointer.key).toEqual(key);
+    expect(pointer.digest).toEqual(digest);
+    expect(pointer.uploadTimestamp).toBe(1_700_000_000_000n);
+  });
+
+  // Detects: trimBody splitting a multi-byte character or emoji surrogate pair when truncating a long message.
+  it('trims long bodies to <= 2048 UTF-8 bytes without splitting emojis or surrogate pairs', () => {
+    const emojis = '🦊'.repeat(600); // 4 UTF-8 bytes each -> 2400 bytes -> max 512 emojis = 2048 bytes
+    const trimmed = trimBody(emojis);
+    expect(bodyFits(trimmed)).toBe(true);
+    expect(trimmed).toBe('🦊'.repeat(512));
   });
 });

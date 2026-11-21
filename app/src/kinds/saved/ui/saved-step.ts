@@ -16,7 +16,7 @@ import {
   type StepPosition,
   stickyFooter,
 } from '../../../ui/layout';
-import { type LeftOut, leftOutFrom, messagesToCopy } from '../copy';
+import { type LeftOut, leftOutFrom, mediaSummaryFrom, messagesToCopy } from '../copy';
 import type { SavedMessage } from '../messages';
 import {
   axisTicks,
@@ -35,6 +35,13 @@ const TITLE = 'Saved Messages';
 const DESCRIPTION = 'Select which messages to copy to Note to Self in Signal.';
 const messages = (count: number) => `${count.toLocaleString('en')} message${count === 1 ? '' : 's'}`;
 
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(bytes >= 10 * 1024 * 1024 ? 0 : 1)} MB`;
+  if (bytes >= 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${bytes} B`;
+}
+
 const CHART_HEIGHT = 136;
 const PAD_X = 8;
 const TOP_Y = 28;
@@ -48,8 +55,13 @@ export class SavedStep extends LightElement {
   @property({ attribute: false }) saved: SavedState = { kind: 'none' };
   /** The cutoff timestamp (seconds since 1970); null copies all messages. */
   @property({ attribute: false }) from: number | null = null;
-  /** For the committed cutoff: how many messages are copied and how many are left out. */
-  @property({ attribute: false }) copy: { toCopy: number; leftOut: LeftOut } | null = null;
+  /** For the committed cutoff: how many messages are copied, how many carry media, and how many are left out. */
+  @property({ attribute: false }) copy: {
+    toCopy: number;
+    withMedia: number;
+    mediaBytes: number;
+    leftOut: LeftOut;
+  } | null = null;
   @property({ attribute: false }) position: StepPosition | null = null;
 
   /** Uncommitted day offset while the user is dragging the handle, so dragging does not spam storage writes. */
@@ -151,9 +163,9 @@ export class SavedStep extends LightElement {
         const barW = Math.max(2, spanW - gap);
         const barX = Math.min(PAD_X + plotW - barW, Math.max(PAD_X, rawX + (spanW - barW) / 2));
         const totalH = Math.max(2, (bucket.total / timeline.maxBucket) * BAR_AREA);
-        const textH = (bucket.text / bucket.total) * totalH;
-        const leftOutH = totalH - textH;
-        return { x: barX, w: barW, totalH, textH, leftOutH };
+        const copyableH = (bucket.copyable / bucket.total) * totalH;
+        const leftOutH = totalH - copyableH;
+        return { x: barX, w: barW, totalH, copyableH, leftOutH };
       });
 
     // Clamp the floating date pill so it stays inside the chart width at both edges.
@@ -317,12 +329,12 @@ export class SavedStep extends LightElement {
                       ></rect>`
                       : nothing
                   }${
-                    bar.textH > 0.5
+                    bar.copyableH > 0.5
                       ? svg`<rect
                         x=${bar.x.toFixed(1)}
-                        y=${(BASE_Y - bar.textH).toFixed(1)}
+                        y=${(BASE_Y - bar.copyableH).toFixed(1)}
                         width=${bar.w.toFixed(1)}
-                        height=${bar.textH.toFixed(1)}
+                        height=${bar.copyableH.toFixed(1)}
                         fill="var(--color-accent)"
                         rx="1"
                       ></rect>`
@@ -440,13 +452,16 @@ export class SavedStep extends LightElement {
     const timeline = this.timelineOf(all);
     const dayOffset = this.draftDay ?? dayOffsetForFrom(timeline, this.from);
     const effectiveFrom = this.draftDay === null ? this.from : fromForDayOffset(timeline, this.draftDay);
-    const toCopy = this.draftDay === null && this.copy ? this.copy.toCopy : messagesToCopy(all, effectiveFrom).length;
-    const leftOut = this.draftDay === null && this.copy ? this.copy.leftOut : leftOutFrom(all, effectiveFrom);
-    const selectedTotal = toCopy + leftOut.media + leftOut.tooLong + leftOut.other;
+    const useCommitted = this.draftDay === null && this.copy !== null;
+    const toCopy = useCommitted ? this.copy!.toCopy : messagesToCopy(all, effectiveFrom).length;
+    const leftOut = useCommitted ? this.copy!.leftOut : leftOutFrom(all, effectiveFrom);
+    const media = useCommitted
+      ? { withMedia: this.copy!.withMedia, mediaBytes: this.copy!.mediaBytes }
+      : mediaSummaryFrom(all, effectiveFrom);
+    const selectedTotal = toCopy + leftOut.tooLarge + leftOut.other;
 
     const leftOutRows: [number, string][] = [
-      [leftOut.media, 'with a photo, a video or a file: not copied yet'],
-      [leftOut.tooLong, 'too long for one Signal message: not copied yet'],
+      [leftOut.tooLarge, 'with a file too large for Signal: not copied'],
       [leftOut.other, 'of other kinds: not copied'],
     ];
 
@@ -457,9 +472,20 @@ export class SavedStep extends LightElement {
         class="flex shrink-0 flex-col overflow-hidden rounded-xl ring-1 ring-card-line ring-inset"
       >
         <li class="flex items-center justify-between gap-3 border-b border-[#F0F0EC] px-4 py-2.5 last:border-b-0">
-          <span class="flex items-center gap-2 text-sm font-medium">
+          <span class="flex items-center gap-2 text-sm">
             <span aria-hidden="true" class="size-2 flex-none rounded-[2px] bg-accent"></span>
-            Text messages to copy
+            <span class="flex flex-col sm:flex-row sm:flex-wrap sm:items-baseline sm:gap-x-1.5">
+              <span class="font-medium">Messages to copy</span>
+              ${
+                media.withMedia > 0
+                  ? html`<span aria-hidden="true" class="hidden text-muted sm:inline">·</span
+                      ><span class="text-xs text-muted tabular-nums sm:text-sm"
+                        >${media.withMedia.toLocaleString('en')} with
+                        media${media.mediaBytes > 0 ? ` (${formatBytes(media.mediaBytes)})` : ''}</span
+                      >`
+                  : nothing
+              }
+            </span>
           </span>
           <span class="flex-none text-sm font-medium tabular-nums">${toCopy.toLocaleString('en')}</span>
         </li>

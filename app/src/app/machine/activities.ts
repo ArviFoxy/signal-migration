@@ -295,6 +295,10 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
             if (Date.now() - reportedAt >= SAVED_PROGRESS_EVERY_MS) report();
           },
           cancel,
+          {
+            source: sessionOf(resources, work.instance).saved,
+            convert: context.services.migration().convert,
+          },
         );
         report();
       } catch (error) {

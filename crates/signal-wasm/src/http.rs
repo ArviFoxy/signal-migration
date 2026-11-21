@@ -17,8 +17,9 @@ pub struct ParsedResponse {
 }
 
 /// Parses an HTTP/1.1 response from `buffer`. Returns `Ok(None)` while more bytes are needed. With `ended`, a body
-/// with neither Content-Length nor chunked encoding runs to the end of the stream.
-pub fn parse_response(buffer: &[u8], ended: bool) -> Result<Option<ParsedResponse>, String> {
+/// with neither Content-Length nor chunked encoding runs to the end of the stream. With `no_body` (e.g. a HEAD
+/// request), or for statuses that never carry a body (1xx, 204, 304), completes as soon as the headers end.
+pub fn parse_response(buffer: &[u8], ended: bool, no_body: bool) -> Result<Option<ParsedResponse>, String> {
     let mut header_storage = [httparse::EMPTY_HEADER; 64];
     let mut response = httparse::Response::new(&mut header_storage);
     let head_len = match response.parse(buffer).map_err(|e| e.to_string())? {
@@ -36,6 +37,13 @@ pub fn parse_response(buffer: &[u8], ended: bool) -> Result<Option<ParsedRespons
             )
         })
         .collect();
+    if no_body || status == 204 || status == 304 || (100..200).contains(&status) {
+        return Ok(Some(ParsedResponse {
+            status,
+            headers,
+            body: Vec::new(),
+        }));
+    }
     let header = |name: &str| headers.iter().find(|(n, _)| n == name).map(|(_, v)| v.as_str());
     let rest = &buffer[head_len..];
 
@@ -78,6 +86,7 @@ pub struct TlsHttpRequest {
     connection: ClientConnection,
     transport: Transport,
     received: Vec<u8>,
+    no_body: bool,
     response: Option<ParsedResponse>,
 }
 
@@ -93,10 +102,15 @@ impl TlsHttpRequest {
         body: &[u8],
     ) -> Result<TlsHttpRequest, JsError> {
         let mut connection = connect(host).map_err(js_error)?;
-        let mut head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\nContent-Length: {}\r\n",
-            body.len()
-        );
+        let no_body = method.eq_ignore_ascii_case("HEAD");
+        let send_content_length = !body.is_empty()
+            || method.eq_ignore_ascii_case("POST")
+            || method.eq_ignore_ascii_case("PUT")
+            || method.eq_ignore_ascii_case("PATCH");
+        let mut head = format!("{method} {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n");
+        if send_content_length {
+            head.push_str(&format!("Content-Length: {}\r\n", body.len()));
+        }
         for header in headers {
             head.push_str(&header);
             head.push_str("\r\n");
@@ -108,6 +122,7 @@ impl TlsHttpRequest {
             connection,
             transport: Transport::default(),
             received: Vec::new(),
+            no_body,
             response: None,
         };
         request.pump()?;
@@ -152,6 +167,15 @@ impl TlsHttpRequest {
             .map(|(_, v)| v.clone())
     }
 
+    /// All response headers as `"lowercase-name: value"`, so JavaScript can copy them before freeing the request.
+    #[wasm_bindgen(js_name = rawHeaders)]
+    pub fn raw_headers(&self) -> Vec<String> {
+        self.response
+            .as_ref()
+            .map(|r| r.headers.iter().map(|(n, v)| format!("{n}: {v}")).collect())
+            .unwrap_or_default()
+    }
+
     pub fn body(&self) -> Vec<u8> {
         self.response.as_ref().map(|r| r.body.clone()).unwrap_or_default()
     }
@@ -171,7 +195,7 @@ impl TlsHttpRequest {
         }
         let end = read_available(&mut self.connection.reader(), &mut self.received).map_err(js_error)?;
         if self.response.is_none() {
-            self.response = parse_response(&self.received, end == ReadEnd::Clean).map_err(js_error)?;
+            self.response = parse_response(&self.received, end == ReadEnd::Clean, self.no_body).map_err(js_error)?;
         }
         Ok(())
     }
@@ -213,6 +237,7 @@ mod tests {
         let response = parse_response(
             b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n5\r\npedia\r\n0\r\n\r\n",
             false,
+            false,
         )
         .unwrap()
         .unwrap();
@@ -226,12 +251,16 @@ mod tests {
     #[test]
     fn waits_for_the_rest_of_a_content_length_body() {
         assert_eq!(
-            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello", false).unwrap(),
+            parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhello", false, false).unwrap(),
             None
         );
-        let response = parse_response(b"HTTP/1.1 409 Conflict\r\nContent-Length: 10\r\n\r\nhelloworld", false)
-            .unwrap()
-            .unwrap();
+        let response = parse_response(
+            b"HTTP/1.1 409 Conflict\r\nContent-Length: 10\r\n\r\nhelloworld",
+            false,
+            false,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(
             (response.status, response.body.as_slice()),
             (409, b"helloworld".as_slice())
@@ -241,14 +270,37 @@ mod tests {
     // Detects: hanging forever on a body delimited only by the end of the connection.
     #[test]
     fn ends_an_undelimited_body_at_the_end_of_the_stream() {
-        assert_eq!(parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", false).unwrap(), None);
         assert_eq!(
-            parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", true)
+            parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", false, false).unwrap(),
+            None
+        );
+        assert_eq!(
+            parse_response(b"HTTP/1.1 200 OK\r\n\r\npartial", true, false)
                 .unwrap()
                 .unwrap()
                 .body,
             b"partial"
         );
+    }
+
+    // Detects: stalling on 204 No Content (TUS PATCH) or HEAD responses that carry no body bytes.
+    #[test]
+    fn completes_204_and_head_without_waiting_for_a_body() {
+        let patch = parse_response(b"HTTP/1.1 204 No Content\r\nUpload-Offset: 512\r\n\r\n", false, false)
+            .unwrap()
+            .unwrap();
+        assert_eq!(patch.status, 204);
+        assert!(patch.body.is_empty());
+
+        let head = parse_response(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1024\r\nUpload-Offset: 512\r\n\r\n",
+            false,
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(head.status, 200);
+        assert!(head.body.is_empty());
     }
 
     /// A reader that returns `data`, then ends as `end` does.
@@ -281,7 +333,7 @@ mod tests {
         let mut received = Vec::new();
         let end = read_available(&mut dropped, &mut received).unwrap();
         assert_eq!(end, ReadEnd::Dropped);
-        assert_eq!(parse_response(&received, end == ReadEnd::Clean).unwrap(), None);
+        assert_eq!(parse_response(&received, end == ReadEnd::Clean, false).unwrap(), None);
 
         let mut closed = Ending {
             data: Some(head),
@@ -291,7 +343,10 @@ mod tests {
         let end = read_available(&mut closed, &mut received).unwrap();
         assert_eq!(end, ReadEnd::Clean);
         assert_eq!(
-            parse_response(&received, end == ReadEnd::Clean).unwrap().unwrap().body,
+            parse_response(&received, end == ReadEnd::Clean, false)
+                .unwrap()
+                .unwrap()
+                .body,
             b"partial"
         );
     }
@@ -302,7 +357,8 @@ mod tests {
         assert_eq!(
             parse_response(
                 b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\nWiki\r\n",
-                false
+                false,
+                false,
             )
             .unwrap(),
             None

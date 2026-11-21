@@ -13,9 +13,9 @@ export type BucketUnit = 'day' | 'week' | 'month' | 'quarter';
 export type TimelineBucket = {
   startDay: number;
   endDay: number;
-  /** Copyable text messages in this bucket. */
-  text: number;
-  /** Messages in this bucket not copied by this version (media, too long, other). */
+  /** Copyable messages (text, media, files) in this bucket. */
+  copyable: number;
+  /** Messages in this bucket that cannot be copied (too large for Signal, protected, other). */
   leftOut: number;
   total: number;
 };
@@ -100,7 +100,7 @@ function makeBuckets(firstDay: LocalDay, firstDayNumber: number, spanDays: numbe
   if (unit === 'day' || unit === 'week') {
     const step = unit === 'day' ? 1 : 7;
     for (let start = 0; start < spanDays; start += step) {
-      buckets.push({ startDay: start, endDay: Math.min(spanDays, start + step), text: 0, leftOut: 0, total: 0 });
+      buckets.push({ startDay: start, endDay: Math.min(spanDays, start + step), copyable: 0, leftOut: 0, total: 0 });
     }
     return buckets;
   }
@@ -116,7 +116,7 @@ function makeBuckets(firstDay: LocalDay, firstDayNumber: number, spanDays: numbe
     const startDay = Math.max(0, startNumber - firstDayNumber);
     const endDay = Math.min(spanDays, endNumber - firstDayNumber);
     if (startDay >= spanDays) break;
-    if (endDay > startDay) buckets.push({ startDay, endDay, text: 0, leftOut: 0, total: 0 });
+    if (endDay > startDay) buckets.push({ startDay, endDay, copyable: 0, leftOut: 0, total: 0 });
     year = nextYear;
     month = wrappedMonth;
   }
@@ -152,7 +152,7 @@ export function buildTimeline(messages: readonly SavedMessage[]): Timeline {
       else low = mid + 1;
     }
     const bucket = buckets[low];
-    if (reasonLeftOut(message) === null) bucket.text++;
+    if (reasonLeftOut(message) === null) bucket.copyable++;
     else bucket.leftOut++;
     bucket.total++;
   }

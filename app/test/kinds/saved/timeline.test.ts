@@ -27,25 +27,31 @@ const msg = (number: number, date: number, parts: Partial<SavedMessage> = {}): S
 describe('Saved Messages timeline', () => {
   // Detects: messages being dropped or double-counted across buckets, or copyable vs left-out splits disagreeing with
   // the total.
-  it('assigns every message to one bucket and separates copyable text from left-out kinds', () => {
+  it('assigns every message to one bucket and separates copyable messages from left-out kinds', () => {
     const messages = [
       msg(1, localSec(2020, 1, 5)),
-      msg(2, localSec(2020, 1, 20), { kind: 'photo' }),
-      msg(3, localSec(2023, 6, 15)),
-      msg(4, localSec(2026, 9, 12), { body: 'x'.repeat(2500) }),
+      msg(2, localSec(2020, 1, 20), {
+        kind: 'photo',
+        media: { fileId: 1, remoteId: 'r1', size: 120_000, contentType: 'image/jpeg' },
+      }),
+      msg(3, localSec(2023, 6, 15), {
+        kind: 'file',
+        media: { fileId: 2, remoteId: 'r2', size: 110 * 1024 * 1024, contentType: 'application/zip' },
+      }),
+      msg(4, localSec(2026, 9, 12), { kind: 'other', body: '' }),
     ];
     const timeline = buildTimeline(messages);
     expect(timeline.unit).toBe('month');
     const totals = timeline.buckets.reduce(
       (sum, bucket) => ({
-        text: sum.text + bucket.text,
+        copyable: sum.copyable + bucket.copyable,
         leftOut: sum.leftOut + bucket.leftOut,
         total: sum.total + bucket.total,
       }),
-      { text: 0, leftOut: 0, total: 0 },
+      { copyable: 0, leftOut: 0, total: 0 },
     );
-    expect(totals).toEqual({ text: 2, leftOut: 2, total: 4 });
-    expect(timeline.buckets.every((bucket) => bucket.total === bucket.text + bucket.leftOut)).toBe(true);
+    expect(totals).toEqual({ copyable: 2, leftOut: 2, total: 4 });
+    expect(timeline.buckets.every((bucket) => bucket.total === bucket.copyable + bucket.leftOut)).toBe(true);
   });
 
   // Detects: a cutoff day offset failing to round-trip through savedFrom, or day 0 / spanDays failing to select all /

@@ -30,7 +30,10 @@ js-sys = "0.3"
 # Runs libsignal's async session functions over its in-memory store, which completes without waiting.
 futures-util = "0.3"
 # The versions libsignal's workspace uses.
+aes = "0.9"
+cbc = "0.2"
 hkdf = "0.13.0"
+hmac = "0.13"
 sha2 = "0.11"
 base64 = "0.22.1"
 subtle = "2.6"
