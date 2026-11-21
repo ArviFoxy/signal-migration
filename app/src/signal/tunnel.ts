@@ -3,6 +3,8 @@
 // TLS to the Signal host runs in this page (rustls in WebAssembly) and trusts only Signal's root certificates, so
 // the relay forwards ciphertext it cannot read or alter.
 
+import { errorMessage } from '../core/errors';
+
 /** The ciphertext side of a TLS connection object from the WebAssembly module. */
 export interface EncryptedEndpoint {
   receiveEncrypted(data: Uint8Array): void;
@@ -36,10 +38,7 @@ export class RelayLink {
         this.flush();
         onReceive();
       } catch (error) {
-        this.#shutdown(
-          `connection to ${host} failed: ${error instanceof Error ? error.message : String(error)}`,
-          onClose,
-        );
+        this.#shutdown(`connection to ${host} failed: ${errorMessage(error)}`, onClose);
       }
     };
     this.#socket.onclose = () => this.#shutdown(`relay to ${host} closed`, onClose);

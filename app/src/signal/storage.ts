@@ -28,6 +28,7 @@ import {
   storageManifestKey,
   storageRecordKey,
 } from '../wasm/signal_migration_wasm';
+import { fromHex, toBase64, toHex } from '../core/bytes';
 import { httpsRequest } from './http-client';
 import { randomBytes } from '../core/random';
 import { basicAuthorization } from './session';
@@ -35,7 +36,6 @@ import type { ChatChannel, HttpsRequest } from './transport';
 import { loadSignalWasm } from './wasm';
 
 const STORAGE_HOST = 'storage.signal.org';
-const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 
 /** An installed sticker pack as recorded in the storage service. */
 export type StoredStickerPack = { recordId: Uint8Array; packId: Uint8Array; packKey: Uint8Array; position: number };
@@ -87,15 +87,14 @@ const MAX_READ_KEYS = 2500;
 
 /** An ID in the form with hyphens, from its 16 bytes. */
 function idFromBytes(bytes: Uint8Array): string {
-  const digits = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  const digits = toHex(bytes);
   return [digits.slice(0, 8), digits.slice(8, 12), digits.slice(12, 16), digits.slice(16, 20), digits.slice(20)].join(
     '-',
   );
 }
 
 export function bytesOfId(id: string): Uint8Array {
-  const digits = id.replaceAll('-', '');
-  return Uint8Array.from({ length: 16 }, (_, index) => parseInt(digits.slice(2 * index, 2 * index + 2), 16));
+  return fromHex(id.replaceAll('-', ''));
 }
 
 /** The ID a record holds, which newer clients store as bytes and older ones as text. */
@@ -275,8 +274,8 @@ export class StorageClient {
     removed: Uint8Array[],
   ): Promise<boolean> {
     const newVersion = snapshot.version + 1n;
-    const removedIds = new Set(removed.map(base64));
-    const identifiers = snapshot.manifest.identifiers.filter((id) => !removedIds.has(base64(id.raw)));
+    const removedIds = new Set(removed.map(toBase64));
+    const identifiers = snapshot.manifest.identifiers.filter((id) => !removedIds.has(toBase64(id.raw)));
     const insertItem = [];
     for (const { type, record } of records) {
       const recordId = randomBytes(16);

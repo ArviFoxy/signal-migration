@@ -8,6 +8,7 @@
 // The server rate-limits forms per account (Signal-Server's StickerController uses the sticker pack limiter).
 
 import { create, toBinary } from '@bufbuild/protobuf';
+import { fromHex } from '../../core/bytes';
 import { StickerPackSchema, StickerPack_StickerSchema } from '../../gen/Stickers_pb';
 import { httpsRequest } from '../../signal/http-client';
 import { randomHex } from '../../core/random';
@@ -106,8 +107,6 @@ export type StickerFile = { image: Uint8Array; emoji: string };
  */
 export type PackContent = { title: string; stickers: StickerFile[] };
 
-const hexToBytes = (hex: string) => new Uint8Array(hex.match(/../g)!.map((pair) => parseInt(pair, 16)));
-
 /** The plaintext manifest. The first sticker is the cover. */
 export function manifestFor(content: PackContent): Uint8Array {
   const stickers = content.stickers.map((sticker, id) =>
@@ -144,5 +143,5 @@ export async function uploadStickerPack(
     }
   };
   await Promise.all(Array.from({ length: CONCURRENT_UPLOADS }, uploadNext));
-  return hexToBytes(form.packId);
+  return fromHex(form.packId);
 }

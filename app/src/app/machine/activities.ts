@@ -2,6 +2,7 @@
 // effects. Work reports back only through `emit`; once `cancel` fires, what it still emits is dropped (runtime.ts),
 // and work that holds something (TDLib, a preview loader) lets go of it.
 
+import { errorMessage } from '../../core/errors';
 import { withTimeLimit } from '../../core/time-limit';
 import { addContacts, findFriends } from '../../kinds/friends/search';
 import { copyToNoteToSelf } from '../../kinds/saved/copy';
@@ -34,8 +35,6 @@ const PHOTOS_AT_ONCE = 6;
 const SAVED_PROGRESS_EVERY_MS = 500;
 /** How long deleting Telegram data may take; what is left is deleted at the next visit. */
 const DELETE_TIME_LIMIT_MS = 5000;
-
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** Resolves when `cancel` fires. */
 const cancelled = (cancel: AbortSignal) =>
@@ -75,7 +74,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       try {
         emit({ type: 'record/loaded', record: readRecord(await services.snapshots.load()) });
       } catch (error) {
-        emit({ type: 'record/load-failed', error: message(error) });
+        emit({ type: 'record/load-failed', error: errorMessage(error) });
       }
       return;
     case 'delete-leftovers': {
@@ -94,7 +93,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       try {
         app = await services.telegram.app();
       } catch (error) {
-        emit({ type: 'telegram/start-failed', error: message(error) });
+        emit({ type: 'telegram/start-failed', error: errorMessage(error) });
         return;
       }
       if (!app) {
@@ -123,7 +122,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await sessionOf(resources, work.instance).invoke(work.query);
         emit({ type: 'telegram/request-done' });
       } catch (error) {
-        emit({ type: 'telegram/request-failed', error: message(error) });
+        emit({ type: 'telegram/request-failed', error: errorMessage(error) });
       }
       return;
     case 'tdlib-checkpoint':
@@ -131,7 +130,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await sessionOf(resources, work.instance).checkpoint();
         emit({ type: 'telegram/saved' });
       } catch (error) {
-        emit({ type: 'telegram/save-failed', error: message(error) });
+        emit({ type: 'telegram/save-failed', error: errorMessage(error) });
       }
       return;
     case 'tdlib-logout':
@@ -139,7 +138,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await sessionOf(resources, work.instance).logOut();
         emit({ type: 'telegram/logged-out' });
       } catch (error) {
-        emit({ type: 'telegram/logout-failed', error: message(error) });
+        emit({ type: 'telegram/logout-failed', error: errorMessage(error) });
       }
       return;
     case 'tdlib-delete':
@@ -159,7 +158,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           linking.signal,
         );
       } catch (error) {
-        if (!(error instanceof LinkingCancelledError)) emit({ type: 'signal/link-failed', error: message(error) });
+        if (!(error instanceof LinkingCancelledError)) emit({ type: 'signal/link-failed', error: errorMessage(error) });
         return;
       }
       // Linked after the Signal step was left: the device is not wanted.
@@ -184,7 +183,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         resources.devices.delete(work.device.deviceId);
         emit({ type: 'signal/unlinked' });
       } catch (error) {
-        emit({ type: 'signal/unlink-failed', error: message(error) });
+        emit({ type: 'signal/unlink-failed', error: errorMessage(error) });
       }
       return;
     case 'read-packs': {
@@ -196,7 +195,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await migration.lookUpInIndex();
         emit({ type: 'packs/read', migration });
       } catch (error) {
-        emit({ type: 'packs/read-failed', error: message(error) });
+        emit({ type: 'packs/read-failed', error: errorMessage(error) });
       }
       return;
     }
@@ -210,7 +209,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await work.migration.readSignal(deviceOf(context, work.device));
         emit({ type: 'packs/signal-read', deviceId: work.device.deviceId });
       } catch (error) {
-        emit({ type: 'packs/signal-failed', error: message(error) });
+        emit({ type: 'packs/signal-failed', error: errorMessage(error) });
       }
       return;
     case 'find-friends':
@@ -224,7 +223,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         );
         emit({ type: 'friends/found', search });
       } catch (error) {
-        emit({ type: 'friends/failed', error: message(error) });
+        emit({ type: 'friends/failed', error: errorMessage(error) });
       }
       return;
     case 'load-friend-photos': {
@@ -262,7 +261,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await addContacts(deviceOf(context, work.device), work.contacts);
         emit({ type: 'run/friends-added', count: work.contacts.length });
       } catch (error) {
-        if (!cancel.aborted) emit({ type: 'run/friends-failed', error: message(error) });
+        if (!cancel.aborted) emit({ type: 'run/friends-failed', error: errorMessage(error) });
       }
       return;
     case 'read-saved':
@@ -272,7 +271,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         );
         emit({ type: 'saved/read', messages });
       } catch (error) {
-        emit({ type: 'saved/failed', error: message(error) });
+        emit({ type: 'saved/failed', error: errorMessage(error) });
       }
       return;
     case 'copy-saved': {
@@ -304,7 +303,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         report();
       } catch (error) {
         report();
-        if (!cancel.aborted) emit({ type: 'run/saved-failed', error: message(error) });
+        if (!cancel.aborted) emit({ type: 'run/saved-failed', error: errorMessage(error) });
       }
       return;
     }
@@ -313,7 +312,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await work.migration.run(deviceOf(context, work.device), sessionOf(resources, work.instance).source, cancel);
         emit({ type: 'run/ended' });
       } catch (error) {
-        if (!cancel.aborted) emit({ type: 'run/failed', error: message(error) });
+        if (!cancel.aborted) emit({ type: 'run/failed', error: errorMessage(error) });
       }
       return;
   }

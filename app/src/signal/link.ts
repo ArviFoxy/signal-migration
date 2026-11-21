@@ -16,6 +16,7 @@ import {
   storageServiceKeyFromAccountEntropyPool,
   storageServiceKeyFromMasterKey,
 } from '../wasm/signal_migration_wasm';
+import { toBase64 } from '../core/bytes';
 import { randomHex } from '../core/random';
 import { basicAuthorization, type DeviceCredentials } from './session';
 import { connectChat } from './socket';
@@ -52,8 +53,6 @@ export function storageServiceKeyOf(provision: Pick<ProvisionMessage, 'accountEn
   if (provision.masterKey.length > 0) return storageServiceKeyFromMasterKey(provision.masterKey);
   throw new Error('the phone sent no account key, so the sticker packs in your Signal account cannot be read');
 }
-
-const base64 = (bytes: Uint8Array) => btoa(String.fromCharCode(...bytes));
 
 /** Reports progress events that contain no secrets (request paths, close codes). */
 export type LinkEvents = (event: string) => void;
@@ -105,7 +104,7 @@ async function receiveProvisionMessage(
             const url = new URL('sgnl://linkdevice');
             url.search = new URLSearchParams({
               uuid: address,
-              pub_key: base64(receiver.publicKey()),
+              pub_key: toBase64(receiver.publicKey()),
               capabilities: 'nopni,nopni2',
             }).toString();
             showQrCode(url.toString());
@@ -128,7 +127,7 @@ async function receiveProvisionMessage(
 
 function signedKey(generate: typeof generateSignedPreKey, identityPrivate: Uint8Array) {
   const key = generate(identityPrivate, randomInt(1, 0xffffff));
-  const serialized = { keyId: key.keyId, publicKey: base64(key.publicKey), signature: base64(key.signature) };
+  const serialized = { keyId: key.keyId, publicKey: toBase64(key.publicKey), signature: toBase64(key.signature) };
   key.free();
   return serialized;
 }
@@ -166,7 +165,7 @@ export async function linkDevice(
       verificationCode: provision.provisioningCode,
       accountAttributes: {
         fetchesMessages: true,
-        name: base64(encryptedName),
+        name: toBase64(encryptedName),
         registrationId,
         pniRegistrationId: hasPni ? randomInt(1, 16380) : undefined,
         capabilities: {

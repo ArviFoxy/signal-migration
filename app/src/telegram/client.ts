@@ -20,6 +20,7 @@
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
+import { errorMessage } from '../core/errors';
 import { randomHex } from '../core/random';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
 import { downloadWithStallLimit } from './download';
@@ -309,7 +310,7 @@ export class TelegramClient {
     if (run !== this.#run || this.#isStopped) return;
     if (update._ === 'updateFatalError') {
       const error = (update as { error?: unknown }).error;
-      this.#onFatal(error instanceof Error ? error.message : String(error));
+      this.#onFatal(errorMessage(error));
       return;
     }
     if (update._ !== 'updateAuthorizationState') return;

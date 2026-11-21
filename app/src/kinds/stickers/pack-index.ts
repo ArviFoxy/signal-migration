@@ -12,12 +12,15 @@
 // files (Signal's upload forms are valid that long), also after a page compared them, and Signal's CDN can go on
 // handing out a version it read earlier. That risk is accepted: no copy is made to wait.
 
+import { toHex } from '../../core/bytes';
 import { fetchWithTimeLimit, REQUEST_TIME_LIMIT_S, SERVER_TIME_LIMIT_S } from '../../core/time-limit';
 import { fromBinary } from '@bufbuild/protobuf';
 import { type StickerPack, StickerPackSchema } from '../../gen/Stickers_pb';
 import { loadSignalWasm } from '../../signal/wasm';
 import { decryptStickerFile } from '../../wasm/signal_migration_wasm';
 import { type OriginalPack, type PictureComparison, isFaithfulCopy } from './compare-pack';
+
+export { toHex };
 
 const LOOKUP_KEY_LENGTH = 32;
 const PACK_ID_LENGTH = 16;
@@ -31,8 +34,6 @@ const PUBLIC_CDN = 'https://cdn-ca.signal.org';
 export const MAX_COMPARISONS = 3;
 /** How many listed copies are looked at from each end of the list while looking for usable ones. */
 const MAX_LOOKS_PER_END = 10;
-
-export const toHex = (bytes: Uint8Array) => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
 
 /**
  * The server's answers, as in crates/server/src/index.rs. "busy": its limit per address, or Signal's CDN did not
@@ -137,7 +138,12 @@ export class PackIndex {
       for (let i = 0; i < count; i++) {
         const entry = body.subarray(i * ENTRY_LENGTH, (i + 1) * ENTRY_LENGTH);
         const key = toHex(entry.subarray(0, LOOKUP_KEY_LENGTH));
-        this.#packIds.set(key, [...(this.#packIds.get(key) ?? []), entry.slice(LOOKUP_KEY_LENGTH)]);
+        let ids = this.#packIds.get(key);
+        if (!ids) {
+          ids = [];
+          this.#packIds.set(key, ids);
+        }
+        ids.push(entry.slice(LOOKUP_KEY_LENGTH));
       }
       this.#entryCount += count;
       if (count < this.#pageSize) return;

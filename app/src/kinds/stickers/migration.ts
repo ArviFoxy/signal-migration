@@ -11,7 +11,9 @@
 // and the Signal account, so a migration that stopped (closed page, rate limit) continues where it was.
 // The services it uses (clock, conversion, index) are passed in, so that tests can run it against simulations.
 
+import { sameBytes, toHex } from '../../core/bytes';
 import type { Clock } from '../../core/clock';
+import { errorMessage } from '../../core/errors';
 import type { StoredStickerPack } from '../../signal/storage';
 import type { SignalAccount } from '../../signal/transport';
 import type { ConvertedSticker, ConvertSticker } from './convert';
@@ -19,7 +21,7 @@ import { DownloadStalledError } from '../../telegram/download';
 import { contentPackKey, type PackIdentity, packIdentity } from './identity';
 import { assignPositions, insertPacks } from './order';
 import type { PictureComparison } from './compare-pack';
-import { type PackIndex, toHex } from './pack-index';
+import type { PackIndex } from './pack-index';
 import type { TelegramPack, TelegramSource } from './telegram-packs';
 import { MAX_STICKERS, RateLimitedError, type StickerFile, uploadStickerPack } from './upload';
 
@@ -101,9 +103,6 @@ const CONCURRENT_CONVERSIONS = 2;
 const INDEX_BUSY_WAIT_MS = 60_000;
 const INDEX_ATTEMPTS = 10;
 const STORAGE_WRITE_ATTEMPTS = 5;
-
-const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((byte, i) => byte === b[i]);
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 /** Signal's display order: by position, then by pack ID as a hex string. */
 function signalOrder(a: StoredStickerPack, b: StoredStickerPack): number {
@@ -219,7 +218,6 @@ export class StickerMigration extends EventTarget {
     return { done: planned.filter((entry) => entry.state === 'in-signal').length, total: planned.length };
   }
 
-  /** Packs to upload, in the order they are uploaded. */
   /** Whether the pack was on Signal already when the migration started (installed, not uploaded). */
   wasOnSignal(entry: PackEntry): boolean {
     return this.#plannedInstalls.has(entry);
@@ -230,6 +228,7 @@ export class StickerMigration extends EventTarget {
     return this.selected.find((entry) => entry.state !== 'in-signal' && entry.state !== 'failed') ?? null;
   }
 
+  /** Packs to upload, in the order they are uploaded. */
   get uploadQueue(): PackEntry[] {
     return [...this.#plannedUploads];
   }
@@ -271,10 +270,9 @@ export class StickerMigration extends EventTarget {
   lookUpInIndex(): Promise<void> {
     this.#lookup ??= (async () => {
       await this.#services.index.refresh();
-      await forEachConcurrently(this.entries, CONCURRENT_VERIFICATIONS, async (entry) => {
+      for (const entry of this.entries) {
         entry.state = this.#services.index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
-        this.#changed();
-      });
+      }
       this.lookedUp = true;
       this.#changed();
     })();
@@ -362,7 +360,7 @@ export class StickerMigration extends EventTarget {
       for (const entry of batch) this.#unannounced.delete(entry);
       this.announceError = null;
     } catch (error) {
-      this.announceError = message(error);
+      this.announceError = errorMessage(error);
     }
     this.#changed();
   }
@@ -455,7 +453,7 @@ export class StickerMigration extends EventTarget {
       );
     } catch (error) {
       if ((error as Error).cause instanceof DownloadStalledError) throw error;
-      throw new Error(`downloading from Telegram failed: ${message(error)}`);
+      throw new Error(`downloading from Telegram failed: ${errorMessage(error)}`);
     }
     entry.packKey = await contentPackKey({
       title: entry.pack.title,
@@ -494,7 +492,7 @@ export class StickerMigration extends EventTarget {
       'converting',
       (i) =>
         this.#services.convert(files[i], stickers[i].format).catch((error: unknown) => {
-          throw new Error(`sticker ${i + 1} (${stickers[i].format}): ${message(error)}`);
+          throw new Error(`sticker ${i + 1} (${stickers[i].format}): ${errorMessage(error)}`);
         }),
       CONCURRENT_CONVERSIONS,
     );
@@ -659,7 +657,7 @@ export class StickerMigration extends EventTarget {
           );
           this.uploadAllowedAt = null;
         } else {
-          Object.assign(entry, { state: 'failed', error: message(error), progress: null });
+          Object.assign(entry, { state: 'failed', error: errorMessage(error), progress: null });
         }
       }
       this.#changed();

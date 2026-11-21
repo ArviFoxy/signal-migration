@@ -6,6 +6,7 @@
 // module's messages over a WebSocket through the relay. Neither the migration server nor Signal's servers outside
 // the enclave see a phone number.
 
+import { toHex } from '../core/bytes';
 import { retryableOnce } from '../core/lazy';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
 import init, { ContactDiscovery, contactDiscoveryEnclaveId } from '../wasm/attestation_wasm';
@@ -41,8 +42,6 @@ const NORMAL_CLOSE = 1000;
 export const loadAttestationWasm: () => Promise<void> = retryableOnce(() =>
   init({ module_or_path: '/attestation_wasm_bg.wasm' }).then(() => undefined),
 );
-
-const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
 /** The wait that Signal names in the text of its refusal, `{"retry_after": seconds}`. */
 function waitNamedIn(reason: string): number {
@@ -104,7 +103,7 @@ export async function discoverAccounts(
   await loadAttestationWasm();
   const enclaveId = contactDiscoveryEnclaveId();
   const keys = await accountKeys(known);
-  const channel = await open(CONTACT_DISCOVERY_HOST, `/v1/${hex(enclaveId)}/discovery`, [
+  const channel = await open(CONTACT_DISCOVERY_HOST, `/v1/${toHex(enclaveId)}/discovery`, [
     basicAuthorization(username, password),
   ]);
 

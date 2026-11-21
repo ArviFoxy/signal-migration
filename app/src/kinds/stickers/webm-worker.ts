@@ -1,6 +1,7 @@
 // Decodes video stickers (WebM) off the page's main thread, with the WebM decoder (webm-decoder.c, webm-decoding.ts).
 
 import createWebmDecoder from 'webm-decoder';
+import { errorMessage } from '../../core/errors';
 import { retryableOnce } from '../../core/lazy';
 import { probeWebm, renderWebm } from './webm-decoding';
 
@@ -26,6 +27,6 @@ self.onmessage = async (event: MessageEvent<WebmRequest>) => {
       reply({ result: frames }, frames);
     }
   } catch (error) {
-    reply({ error: error instanceof Error ? error.message : String(error) });
+    reply({ error: errorMessage(error) });
   }
 };

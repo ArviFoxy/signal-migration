@@ -12,12 +12,11 @@ import type { AppServices } from '../services';
 import { runWork, type Resources } from './activities';
 import { type AppState, appTransition, appWork, recordOf } from './app';
 import type { Context } from './core';
+import { errorMessage } from '../../core/errors';
 import { randomHex } from '../../core/random';
 import type { AppEvent } from './events';
 import { recordText } from './record';
 import type { Work } from './work';
-
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export class Runtime extends EventTarget {
   state: AppState = { kind: 'locking' };
@@ -107,7 +106,7 @@ export class Runtime extends EventTarget {
       } catch (error) {
         // Written again with the next change.
         if (this.#recordText === text) this.#recordText = '';
-        this.dispatch({ type: 'record/failed', error: message(error) });
+        this.dispatch({ type: 'record/failed', error: errorMessage(error) });
       }
     });
   }

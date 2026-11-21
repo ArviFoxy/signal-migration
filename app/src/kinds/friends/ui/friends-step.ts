@@ -274,15 +274,28 @@ export class FriendsStep extends LightElement {
       ${this.footer(html`<button type="button" class=${primaryButton} disabled>Continue</button>`)}`;
   }
 
+  #originsCache: { search: FriendSearch; map: Map<number, string> } | null = null;
+
   /** Where the user knows each found person from: a one-to-one chat, or the groups they share. */
   private origins(search: FriendSearch): Map<number, string> {
+    if (this.#originsCache?.search === search) return this.#originsCache.map;
     const direct = new Set<number>();
     const groups = new Map<number, string[]>();
     for (const chat of search.chats) {
-      if (chat.kind === 'person') direct.add(chat.userId);
-      else for (const userId of chat.memberIds) groups.set(userId, [...(groups.get(userId) ?? []), chat.title]);
+      if (chat.kind === 'person') {
+        direct.add(chat.userId);
+      } else {
+        for (const userId of chat.memberIds) {
+          let titles = groups.get(userId);
+          if (!titles) {
+            titles = [];
+            groups.set(userId, titles);
+          }
+          titles.push(chat.title);
+        }
+      }
     }
-    return new Map(
+    const map = new Map(
       [...search.found.keys()].map((userId) => {
         const titles = groups.get(userId) ?? [];
         const others = titles.length - 1;
@@ -290,6 +303,8 @@ export class FriendsStep extends LightElement {
         return [userId, direct.has(userId) ? 'Direct chat' : fromGroups];
       }),
     );
+    this.#originsCache = { search, map };
+    return map;
   }
 
   render() {

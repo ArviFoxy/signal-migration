@@ -61,7 +61,7 @@ const INFO: Record<
       encryption: 'End-to-end encrypted with TLS',
     },
     plain:
-      'Your browser talks to Signal through a tunnel on our server. The connection is end-to-end encrypted between your browser and Signal, so our server cannot read it.',
+      'Your browser talks to Signal through a tunnel on the migration server. The connection is end-to-end encrypted between your browser and Signal, so the migration server cannot read it.',
     technical: html`Signal uses their own certificate authority which is not trusted by the browser. To work around this
     the browser opens a WebSocket to the migration server, and runs its own TLS connection to ${code('*.signal.org')}
     inside it, checked against Signal's root certificate.`,

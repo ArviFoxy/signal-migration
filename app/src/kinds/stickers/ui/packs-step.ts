@@ -1,6 +1,6 @@
-// Step 3: the user's Telegram sticker packs, laid out for 100+ packs. The list shows as soon as it is read; previews
-// fill in and each pack is looked up in the sticker pack index while the user chooses. The filters stay at the top
-// of the window and the actions at the bottom while the grid scrolls.
+// The sticker packs step: the user's Telegram sticker packs, laid out for 100+ packs. The list shows as soon as it is
+// read; previews fill in and each pack is looked up in the sticker pack index while the user chooses. The filters stay
+// at the top of the window and the actions at the bottom while the grid scrolls.
 
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';

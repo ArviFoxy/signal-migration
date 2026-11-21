@@ -3,6 +3,7 @@
 // the frames to it.
 
 import UPNG from 'upng-js';
+import { errorMessage } from '../../core/errors';
 import { largestDifference } from './frame-difference';
 
 type EncodeRequest = {
@@ -58,6 +59,6 @@ self.onmessage = (event: MessageEvent<EncodeRequest | OpenRequest | CompareReque
       reply({ result: png }, [png]);
     }
   } catch (error) {
-    reply({ error: error instanceof Error ? error.message : String(error) });
+    reply({ error: errorMessage(error) });
   }
 };
