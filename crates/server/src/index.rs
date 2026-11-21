@@ -67,24 +67,55 @@ pub fn signal_cdn() -> SignalPacks {
 /// At most this many entries per read; a client reads again from where the last read ended.
 pub const MAX_ENTRIES_PER_READ: usize = 100_000;
 
-/// A token bucket per client address, kept in memory only.
+/// Upper bound on distinct client addresses tracked by [`AddressLimiter`] in memory.
+const MAX_TRACKED_ADDRESSES: usize = 10_000;
+
+/// A token bucket per client address, kept in memory only and bounded in size.
 pub struct AddressLimiter {
     capacity: f64,
     refill_per_second: f64,
+    max_addresses: usize,
     buckets: HashMap<IpAddr, (f64, Instant)>,
 }
 
 impl AddressLimiter {
     pub fn new(capacity: u32, refill_every: Duration) -> Self {
+        Self::with_max_addresses(capacity, refill_every, MAX_TRACKED_ADDRESSES)
+    }
+
+    pub fn with_max_addresses(capacity: u32, refill_every: Duration, max_addresses: usize) -> Self {
         Self {
             capacity: capacity.into(),
             refill_per_second: 1.0 / refill_every.as_secs_f64(),
+            max_addresses: max_addresses.max(1),
             buckets: HashMap::new(),
+        }
+    }
+
+    /// Number of addresses currently tracked in memory.
+    pub fn tracked_addresses(&self) -> usize {
+        self.buckets.len()
+    }
+
+    /// Drops buckets that have refilled to full capacity, and if still at the cap drops the least-recently-used entry.
+    fn prune(&mut self, now: Instant) {
+        self.buckets.retain(|_, (tokens, last)| {
+            let refilled = *tokens + now.duration_since(*last).as_secs_f64() * self.refill_per_second;
+            refilled < self.capacity
+        });
+        while self.buckets.len() >= self.max_addresses {
+            let Some(&oldest) = self.buckets.iter().min_by_key(|(_, (_, last))| *last).map(|(ip, _)| ip) else {
+                break;
+            };
+            self.buckets.remove(&oldest);
         }
     }
 
     /// Takes one token for `address`; false when its bucket is empty.
     pub fn allow(&mut self, address: IpAddr, now: Instant) -> bool {
+        if !self.buckets.contains_key(&address) && self.buckets.len() >= self.max_addresses {
+            self.prune(now);
+        }
         let (tokens, last) = self.buckets.entry(address).or_insert((self.capacity, now));
         *tokens = (*tokens + now.duration_since(*last).as_secs_f64() * self.refill_per_second).min(self.capacity);
         *last = now;
@@ -115,7 +146,8 @@ fn pack_id_of(entry: &[u8; ENTRY_LEN]) -> [u8; PACK_ID_LEN] {
 pub struct Index(pub Arc<Mutex<IndexState>>);
 
 impl Index {
-    /// Opens the index file, creating it if missing. A trailing partial entry (from an interrupted write) is ignored.
+    /// Opens the index file, creating it if missing. Any trailing partial entry (from an interrupted write) is
+    /// truncated back to an `ENTRY_LEN` boundary so subsequent appends stay aligned.
     /// `signal_packs` says whether Signal has a pack; [`signal_cdn`] asks Signal's CDN.
     pub async fn open(path: PathBuf, signal_packs: SignalPacks) -> std::io::Result<Self> {
         let bytes = match tokio::fs::read(&path).await {
@@ -127,6 +159,12 @@ impl Index {
             .chunks_exact(ENTRY_LEN)
             .map(|c| c.try_into().expect("exact chunk"))
             .collect();
+        let aligned_len = (entries.len() * ENTRY_LEN) as u64;
+        if bytes.len() as u64 != aligned_len {
+            let file = tokio::fs::OpenOptions::new().write(true).open(&path).await?;
+            file.set_len(aligned_len).await?;
+            file.sync_data().await?;
+        }
         let known = entries.iter().copied().collect();
         let listed = entries.iter().map(pack_id_of).collect();
         Ok(Self(Arc::new(Mutex::new(IndexState {
@@ -221,6 +259,7 @@ pub async fn append(
     if state.listed.contains(&pack_id) {
         return StatusCode::CONFLICT.into_response();
     }
+    let aligned_len = (state.entries.len() * ENTRY_LEN) as u64;
     let mut file = match tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -231,6 +270,8 @@ pub async fn append(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     if file.write_all(&entry).await.is_err() || file.sync_data().await.is_err() {
+        // Roll back any partial write so the file remains aligned to ENTRY_LEN.
+        let _ = file.set_len(aligned_len).await;
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
     state.entries.push(entry);
