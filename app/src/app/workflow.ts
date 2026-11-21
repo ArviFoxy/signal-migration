@@ -19,6 +19,7 @@ import {
 } from './machine/app';
 import type { Context } from './machine/core';
 import type { FriendsState } from './machine/friends';
+import type { PacksState } from './machine/packs';
 import type { SavedState } from './machine/saved';
 import { Runtime } from './machine/runtime';
 import { initialSignal, type SignalState } from './machine/signal';
@@ -26,8 +27,24 @@ import { initialTelegram, type LoginMethod, type LoginQuery, type TelegramState 
 import type { AppServices, StoredDevice } from './services';
 
 export { type Chosen, STEPS, type SetupStep, type Step, stepIncluded } from './machine/app';
-export type { FriendsState, SavedState };
+export type { FriendsState, PacksState, SavedState };
 export type { AppState };
+
+/** Cross-kind migration progress and actions, derived once in the workflow rather than recomputed in views. */
+export type MigrationRunStatus = {
+  /** Every chosen kind has stopped working (completed, finished with pack failures, or hit a run error). */
+  ended: boolean;
+  /** Every chosen kind finished with no run-level error. */
+  completed: boolean;
+  /** Either a run-level error occurred or at least one pack failed / was not announced yet. */
+  canRetry: boolean;
+  /** The run stopped with a run-level error. */
+  failed: boolean;
+  /** Unlinking Signal and signing out of Telegram. */
+  ending: boolean;
+  /** Logged out of Telegram and Signal; nothing kept in the browser. */
+  finished: boolean;
+};
 
 /** The Telegram login as the Telegram step shows it. */
 export class TelegramView extends EventTarget {
@@ -211,6 +228,11 @@ export class Workflow extends Runtime {
     };
   }
 
+  /** The reading of sticker packs: none while stickers are not chosen or Telegram is not signed in. */
+  get packs(): PacksState {
+    return isSession(this.state) ? this.state.packs : { kind: 'none' };
+  }
+
   /** The pack list, once read. */
   get stickers(): StickerMigration | null {
     const state = this.state;
@@ -238,6 +260,33 @@ export class Workflow extends Runtime {
   /** The run stopped with an error. */
   get runFailed(): boolean {
     return this.state.kind === 'migrating' && this.state.run.status === 'failed';
+  }
+
+  /** Cross-kind migration completion and retry status for the migrate screen. */
+  get migrationRun(): MigrationRunStatus {
+    const state = this.state;
+    if (state.kind === 'done') {
+      return { ended: true, completed: true, canRetry: false, failed: false, ending: false, finished: true };
+    }
+    if (state.kind === 'ending') {
+      return { ended: true, completed: true, canRetry: false, failed: false, ending: true, finished: false };
+    }
+    const chosen = this.chosen;
+    const migration = this.stickers;
+    const failed = this.runFailed;
+    const stickersEnded =
+      !chosen.stickers ||
+      (migration !== null &&
+        ((state.kind === 'migrating' && state.run.status === 'ended') ||
+          migration.phase === 'done' ||
+          migration.phase === 'stopped'));
+    const friendsDone = !chosen.friends || this.friendsToAdd === 0 || this.friendsAdded !== null;
+    const saved = this.savedCopy;
+    const savedDone = !chosen.saved || (saved !== null && saved.copied >= saved.toCopy);
+    const completed = stickersEnded && friendsDone && savedDone && !failed;
+    const failedPacks = migration ? migration.selected.filter((entry) => entry.state === 'failed').length : 0;
+    const canRetry = failed || failedPacks > 0 || Boolean(migration?.announceError);
+    return { ended: failed || completed, completed, canRetry, failed, ending: false, finished: false };
   }
 
   /** The newest failure of background work: reading the packs or Signal's packs, the run. */

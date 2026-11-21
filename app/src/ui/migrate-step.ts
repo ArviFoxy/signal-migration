@@ -1,22 +1,13 @@
-// Step 6: the migration, laid out after Apple's list conventions. Every selected pack is in one list, in the user's
-// Telegram order, and rows never move. Each row starts with a status symbol (a check when installed, a progress ring
-// while working, a clock while waiting for Signal's upload limit, an empty circle before its turn) and has one line
-// saying what is happening. The list keeps the pack being worked on in view, unless the user has just scrolled;
-// "Jump to the current pack" brings it back. The overall progress stays at the top, the actions at the bottom.
+// The migrate step: shows progress across every chosen kind (friends, saved messages, and sticker packs). For sticker
+// packs, every selected pack stays in one list in Telegram order and rows never move; each row carries a status symbol
+// and one line saying what is happening, and the list follows the active pack unless the user scrolled away.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import {
-  icons,
-  primaryButton,
-  progressBar,
-  secondaryButton,
-  stepHeader,
-  stickyBar,
-  stickyFooter,
-} from '../../../ui/layout';
-import type { PackEntry, PackState } from '../migration';
-import { conversionDescription, formatDuration, MigrationView } from './view';
+import type { MigrationRunStatus } from '../app/workflow';
+import type { PackEntry, PackState } from '../kinds/stickers/migration';
+import { conversionDescription, formatDuration, MigrationView } from '../kinds/stickers/ui/view';
+import { icons, primaryButton, progressBar, secondaryButton, stepHeader, stickyBar, stickyFooter } from './layout';
 
 type Filter = 'all' | 'active' | 'waiting' | 'done' | 'failed';
 
@@ -74,20 +65,25 @@ const SYMBOLS = {
   </svg>`,
 };
 
-@customElement('sticker-migrate-step')
-export class StickerMigrateStep extends MigrationView {
-  /** The workflow finished: Signal unlinked, Telegram signed out, nothing kept. The screen stays as it was. */
-  @property({ attribute: false }) finished = false;
-  /** Unlinking Signal and signing out of Telegram, before `finished`. */
-  @property({ attribute: false }) ending = false;
+const DEFAULT_RUN: MigrationRunStatus = {
+  ended: false,
+  completed: false,
+  canRetry: false,
+  failed: false,
+  ending: false,
+  finished: false,
+};
+
+@customElement('migrate-step')
+export class MigrateStep extends MigrationView {
+  /** Cross-kind run status derived by the workflow (completion, retryability, ending, finished). */
+  @property({ attribute: false }) run: MigrationRunStatus = DEFAULT_RUN;
   /** Whether sticker packs are among what the user chose to move. */
   @property({ attribute: false }) stickers = true;
   /** The friends chosen to be added and how many the run has added, once it has; null when friends are not chosen. */
   @property({ attribute: false }) friends: { toAdd: number; added: number | null } | null = null;
   /** The saved messages to copy and how many of them are in Signal, or 'reading' after a reload; null if not chosen. */
   @property({ attribute: false }) saved: { toCopy: number; copied: number } | 'reading' | null = null;
-  /** The run stopped with an error. */
-  @property({ attribute: false }) failed = false;
   @state() private filter: Filter = 'all';
   /** Where the current pack's row is: in the list's view, or above or below it. */
   @state() private currentIs: 'in-view' | 'above' | 'below' = 'in-view';
@@ -275,28 +271,27 @@ export class StickerMigrateStep extends MigrationView {
   }
 
   /** The footer's actions; the footer is always there, so that nothing moves when the migration ends. */
-  private actions(ended: boolean, failed: number) {
-    const migration = this.migration!;
+  private actions(failedPacks: number) {
+    const run = this.run;
     const jump = html`<span></span>`;
-    if (this.finished) {
+    if (run.finished) {
       return html`${jump}<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>
           Start over
         </button>`;
     }
-    if (this.ending) {
+    if (run.ending) {
       return html`${jump}<button type="button" class=${primaryButton} disabled>Finishing…</button>`;
     }
-    if (!ended) {
+    if (!run.ended) {
       return html`${jump}<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
           Back to start
         </button>`;
     }
-    const retry =
-      failed > 0 || migration.announceError || this.failed
-        ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
-            ${failed > 0 ? 'Retry failed packs' : 'Try again'}
-          </button>`
-        : nothing;
+    const retry = run.canRetry
+      ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
+          ${failedPacks > 0 ? 'Retry failed packs' : 'Try again'}
+        </button>`
+      : nothing;
     return html`${jump}<span class="flex gap-3"
         >${retry}<button type="button" class=${primaryButton} @click=${() => this.emit('finish')}>Finish</button></span
       >`;
@@ -341,7 +336,7 @@ export class StickerMigrateStep extends MigrationView {
         ? 'Nobody to add'
         : friends.added !== null
           ? `${count} added to your Signal contacts`
-          : this.failed
+          : this.run.failed
             ? `${count} not added to your Signal contacts yet`
             : `Adding ${count} to your Signal contacts…`;
     return html`<section
@@ -388,17 +383,18 @@ export class StickerMigrateStep extends MigrationView {
 
   /** The migration without sticker packs: friends, saved messages or both. */
   private withoutPacks() {
-    const title = this.finished ? 'Done and logged out' : this.ending ? 'Migration finished' : 'Migrating';
-    const description = this.finished
+    const run = this.run;
+    const title = run.finished ? 'Done and logged out' : run.ending ? 'Migration finished' : 'Migrating';
+    const description = run.finished
       ? 'Logged out of Telegram and Signal. Nothing is kept in your browser.'
-      : this.ending
+      : run.ending
         ? 'Logging out of Telegram and Signal…'
         : 'Keep this tab open until it finishes.';
-    const action = this.finished
+    const action = run.finished
       ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>Start over</button>`
-      : this.ending
+      : run.ending
         ? html`<button type="button" class=${primaryButton} disabled>Finishing…</button>`
-        : this.failed
+        : run.failed
           ? html`<button type="button" class=${primaryButton} @click=${() => this.emit('retry')}>Try again</button>`
           : html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
               Back to start
@@ -409,9 +405,10 @@ export class StickerMigrateStep extends MigrationView {
 
   render() {
     if (!this.stickers) return this.withoutPacks();
+    const run = this.run;
     const migration = this.migration;
     if (!migration)
-      return this.finished
+      return run.finished
         ? stepHeader(
             this.position,
             'Done and logged out',
@@ -420,10 +417,6 @@ export class StickerMigrateStep extends MigrationView {
         : stepHeader(this.position, 'Migrating', 'Reading your packs from Telegram…');
     const selected = migration.selected;
     const stickersEnded = migration.phase === 'done' || migration.phase === 'stopped';
-    const friendsDone = !this.friends || this.friends.toAdd === 0 || this.friends.added !== null;
-    const savedDone = !this.saved || (this.saved !== 'reading' && this.saved.copied >= this.saved.toCopy);
-    const allDone = stickersEnded && friendsDone && savedDone && !this.failed;
-    const ended = this.failed || allDone;
     const done = selected.filter((entry) => entry.state === 'in-signal').length;
     const failed = selected.filter((entry) => entry.state === 'failed').length;
     const remainingUploads = migration.uploadQueue.filter(
@@ -440,12 +433,16 @@ export class StickerMigrateStep extends MigrationView {
       { id: 'done', label: 'Installed' },
       { id: 'failed', label: 'Failed' },
     ];
-    const description = this.finished
+    const description = run.finished
       ? 'Logged out of Telegram and Signal. Nothing is kept in your browser.'
-      : this.ending
+      : run.ending
         ? 'Logging out of Telegram and Signal…'
         : 'Keep this tab open until the uploads finish. After a reload, it continues where it stopped.';
-    const title = this.finished ? 'Done and logged out' : allDone || this.ending ? 'Migration finished' : 'Migrating';
+    const title = run.finished
+      ? 'Done and logged out'
+      : run.completed || run.ending
+        ? 'Migration finished'
+        : 'Migrating';
 
     return html`${stepHeader(this.position, title, description)}
     ${stickyBar(
@@ -494,6 +491,6 @@ export class StickerMigrateStep extends MigrationView {
             ${this.currentButton(current)}
           </div>`
     }
-    ${stickyFooter(this.actions(ended, failed))}`;
+    ${stickyFooter(this.actions(failed))}`;
   }
 }

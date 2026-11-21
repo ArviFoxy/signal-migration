@@ -1,16 +1,16 @@
-// Step 5: what the migration will do: install packs already on Signal, upload the rest, and the wait that Signal's
-// upload limit adds. Long lists start collapsed, for 100+ packs.
+// The review step: summarizes everything the user chose to move (sticker packs, friends, saved messages), including
+// Signal's upload limit wait when sticker packs need uploading. Long pack lists start collapsed, for 100+ packs.
 
 import { html, nothing } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
-import { primaryButton, secondaryButton, stepHeader, stickyFooter } from '../../../ui/layout';
-import { estimatedUploadWaitMs, UPLOAD_BURST, UPLOAD_INTERVAL_MS } from '../migration';
-import { formatDuration, MigrationView } from './view';
+import { estimatedUploadWaitMs, UPLOAD_BURST, UPLOAD_INTERVAL_MS } from '../kinds/stickers/migration';
+import { formatDuration, MigrationView } from '../kinds/stickers/ui/view';
+import { primaryButton, secondaryButton, stepHeader, stickyFooter } from './layout';
 
 const COLLAPSED_ROWS = 6;
 
-@customElement('sticker-review-step')
-export class StickerReviewStep extends MigrationView {
+@customElement('review-step')
+export class ReviewStep extends MigrationView {
   /** The packs are read from Telegram, the index and Signal. */
   @property({ attribute: false }) ready = false;
   /** Whether sticker packs are among what the user chose to move. */

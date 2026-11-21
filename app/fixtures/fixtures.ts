@@ -374,6 +374,12 @@ const FIXTURES: Record<string, Fixture> = {
       return setup('packs', { telegram: signedIn, signal: linked, packs: read(migration) });
     },
   },
+  'packs-empty': {
+    async state() {
+      const migration = await withPacks(0, false);
+      return setup('packs', { telegram: signedIn, signal: linked, packs: read(migration) });
+    },
+  },
   'review-170': {
     async state() {
       const migration = await withPacks(170);

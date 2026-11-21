@@ -549,4 +549,53 @@ describe('the workflow', () => {
     const bytes = JSON.stringify(kept, (_, value) => (value instanceof Uint8Array ? Array.from(value) : value));
     expect(bytes).not.toContain(JSON.stringify(Array.from(page.masterKey)).slice(1, -1));
   });
+
+  // Detects: an account with zero sticker packs staying indistinguishable from "still reading" because the view had to
+  // infer reading from entries.length === 0 instead of an explicit PacksState discriminant.
+  it('exposes packs.kind === "read" with zero entries for an account with no sticker packs', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([]);
+    const page = await openPage(alice, new Browser());
+    await signIn(page);
+    await until(() => page.scanSignalCode(), 'a Signal QR code to scan');
+    await until(() => page.workflow.step === 'packs' && page.workflow.packsReady, 'the empty packs step');
+
+    expect(page.workflow.packs.kind).toBe('read');
+    expect(page.workflow.stickers?.entries).toEqual([]);
+  });
+
+  // Detects: cross-kind migrationRun status reporting completed/ended prematurely while another chosen kind is still
+  // running, or failing to flag retry when a pack fails.
+  it('derives cross-kind migrationRun status once in the workflow', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const page = await openPage(alice, new Browser());
+    await signIn(page);
+    await link(page);
+
+    world.signal.failAnnouncements = 1000;
+    page.workflow.startMigration();
+    await until(() => page.workflow.stickers?.announceError != null, 'the sticker run ends with an announce error');
+    await settle(page);
+    expect(page.workflow.migrationRun).toEqual({
+      ended: true,
+      completed: true,
+      canRetry: true,
+      failed: false,
+      ending: false,
+      finished: false,
+    });
+
+    world.signal.failAnnouncements = 0;
+    page.workflow.tryAgain();
+    await until(() => page.workflow.state.kind === 'done', 'the retried migration finishes');
+    expect(page.workflow.migrationRun).toEqual({
+      ended: true,
+      completed: true,
+      canRetry: false,
+      failed: false,
+      ending: false,
+      finished: true,
+    });
+  });
 });
