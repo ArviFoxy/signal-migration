@@ -62,14 +62,18 @@ const simulated = vi.hoisted(() => {
     send(query: Query): Promise<unknown> {
       this.sent.push(query['@type']);
       if (this.crashed) return new Promise(() => undefined);
-      const file = (fileId: number) => ({
-        '@type': 'file',
-        id: fileId,
-        size: 4,
-        expected_size: 4,
-        local: { downloaded_size: 0 },
-        remote: { unique_id: this.uniqueIdOf(fileId) },
-      });
+      const file = (fileId: number) => {
+        const uniqueId = this.uniqueIdOf(fileId);
+        const size = bytesOf(uniqueId).length;
+        return {
+          '@type': 'file',
+          id: fileId,
+          size,
+          expected_size: size,
+          local: { downloaded_size: 0 },
+          remote: { id: uniqueId, unique_id: uniqueId },
+        };
+      };
       switch (query['@type']) {
         case 'setTdlibParameters':
           this.#report(
@@ -97,11 +101,22 @@ const simulated = vi.hoisted(() => {
           return this.holdDownloads ? new Promise(() => undefined) : Promise.resolve(file(query.file_id as number));
         case 'getFile':
           return Promise.resolve(file(query.file_id as number));
+        case 'getRemoteFile':
+          return Promise.resolve(file(this.fileIdOf(String(query.remote_file_id))));
         case 'readFile':
           return Promise.resolve({
             '@type': 'filePart',
             data: new Blob([bytesOf(this.uniqueIdOf(query.file_id as number))]),
           });
+        case 'readFilePart': {
+          const all = bytesOf(this.uniqueIdOf(query.file_id as number));
+          const offset = Number(query.offset ?? 0);
+          const count = Number(query.count ?? all.length);
+          return Promise.resolve({
+            '@type': 'filePart',
+            data: new Blob([all.subarray(offset, offset + count)]),
+          });
+        }
         case 'deleteFile':
         case 'cancelDownloadFile':
         case 'requestQrCodeAuthentication':
@@ -305,4 +320,50 @@ it('stops sending a download again after TDLib stopped three times', async () =>
     await vi.advanceTimersByTimeAsync(40_000);
   }
   expect(failure).toBe('the Telegram connection was closed');
+});
+
+// Detects: a run-tagged file reference reading the wrong file (or failing) when TDLib crashes mid-download and
+// renumbers files in the restarted run.
+it('re-resolves TelegramFileRef via getRemoteFile when TDLib restarts mid-download', async () => {
+  const { client } = await signedInClient();
+  const ref = { run: client.run, fileId: currentRun().fileIdOf('u1'), remoteId: 'u1' };
+  currentRun().holdDownloads = true;
+  const reading = client.readFileRef(ref);
+  await vi.waitFor(() => expect(currentRun().sent).toContain('downloadFile'));
+  currentRun().crash();
+  expect(await reading).toEqual(bytesOf('u1'));
+  expect(currentRun().sent).toContain('getRemoteFile');
+
+  // Streamed read via withFileRef also re-resolves stale run-1 references in run 2.
+  const chunks: Uint8Array[] = [];
+  await client.withFileRef(ref, async (_size, readChunks) => {
+    await readChunks(async (chunk) => {
+      chunks.push(chunk);
+    });
+  });
+  expect(chunks).toEqual([bytesOf('u1')]);
+});
+
+// Detects: terminating a client while a restart is waiting for TDLib to report its state triggering an unhandled
+// promise rejection from `#usable`.
+it('terminates cleanly during a restart without an unhandled promise rejection', async () => {
+  const { client } = await signedInClient();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown) => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    // Pause run 2 before it reports authorizationStateReady, then terminate the client.
+    SimulatedTdlib.onCreate = (run) => {
+      if (run.number === 2) {
+        run.send = () => new Promise(() => undefined);
+      }
+    };
+    currentRun().crash();
+    await vi.waitFor(() => expect(SimulatedTdlib.runs.length).toBe(2));
+    client.terminate();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });

@@ -5,7 +5,12 @@
 import type * as Td from 'tdlib-types';
 import { describe, expect, it } from 'vitest';
 import { savedMessagesOf } from '../../../src/kinds/saved/telegram-saved';
-import { type TelegramClient, TelegramError, TelegramRestartedError } from '../../../src/telegram/client';
+import {
+  type TelegramClient,
+  TelegramError,
+  type TelegramFileRef,
+  TelegramRestartedError,
+} from '../../../src/telegram/client';
 
 const MY_USER_ID = 5_000_001;
 
@@ -64,27 +69,31 @@ function telegram(
         throw new Error(`not simulated: ${query._}`);
     }
   };
-  const downloadedIds: number[] = [];
+  const downloadedRefs: TelegramFileRef[] = [];
   const client = {
     invoke,
     get run() {
       return run;
     },
-    async withDownloadedFile<T>(
-      fileId: number,
+    async withFileRef<T>(
+      ref: TelegramFileRef,
       use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
     ): Promise<T> {
-      downloadedIds.push(fileId);
+      downloadedRefs.push(ref);
+      const fileId =
+        ref.run === run
+          ? ref.fileId
+          : ((await invoke({ _: 'getRemoteFile', remote_file_id: ref.remoteId })) as { id: number }).id;
       const data = new TextEncoder().encode(`file-${fileId}`);
       return use(data.length, async (onChunk) => {
         await onChunk(data);
       });
     },
-  } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withDownloadedFile'>;
+  } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'>;
   return {
     client,
     requests,
-    downloadedIds,
+    downloadedRefs,
     bumpRun: () => {
       run++;
       knownInRun = new Set();
@@ -131,19 +140,20 @@ describe('reading Saved Messages', () => {
 
   // Detects: reading media failing after TDLib restarts between reading the message list and downloading a file,
   // because TDLib assigns fresh file IDs on each run.
-  it('resolves media file IDs via getRemoteFile when TDLib restarted after readMessages', async () => {
-    const { client, requests, downloadedIds, bumpRun } = telegram(2);
+  it('passes run-tagged file references through withFileRef so restarted runs resolve via getRemoteFile', async () => {
+    const { client, requests, downloadedRefs, bumpRun } = telegram(2);
     const source = savedMessagesOf(client);
     await source.readMessages(() => undefined);
     bumpRun();
     const received: Uint8Array[] = [];
-    await source.withMedia!({ fileId: 7, remoteId: 'remote-7', size: 10 }, async (_size, readChunks) => {
+    const ref: TelegramFileRef = { run: 1, fileId: 7, remoteId: 'remote-7' };
+    await source.withMedia!({ file: ref, size: 10 }, async (_size, readChunks) => {
       await readChunks(async (chunk) => {
         received.push(chunk);
       });
     });
+    expect(downloadedRefs).toEqual([ref]);
     expect(requests.some((r) => r._ === 'getRemoteFile' && r.remote_file_id === 'remote-7')).toBe(true);
-    expect(downloadedIds).toEqual([2007]);
     expect(new TextDecoder().decode(received[0])).toBe('file-2007');
   });
 });

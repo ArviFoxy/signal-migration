@@ -9,6 +9,7 @@
 import type * as Td from 'tdlib-types';
 import { attachmentFits, MAX_LONG_TEXT_BYTES } from '../../signal/attachment';
 import { type Note, type StyledRange, type TextStyle } from '../../signal/note-to-self';
+import { fileRef, type TelegramFileRef } from '../../telegram/client';
 import type { StickerFormat } from '../stickers/telegram-packs';
 
 export type SavedKind =
@@ -26,10 +27,8 @@ export type SavedKind =
 
 /** Media attached to a Telegram Saved Message, enough to check size limits and download on migration. */
 export type SavedMedia = {
-  /** TDLib file ID in the run that read the message list. */
-  fileId: number;
-  /** TDLib `remote.id`, used with `getRemoteFile` if TDLib restarts before the file is downloaded. */
-  remoteId: string;
+  /** Run-tagged TDLib file reference, re-resolved via `getRemoteFile` if TDLib restarts before download. */
+  file: TelegramFileRef;
   /** Plaintext byte length reported by TDLib (`size || expected_size`), or 0 if unknown until downloaded. */
   size: number;
   contentType: string;
@@ -132,11 +131,10 @@ export function styledText(formatted: Td.formattedText): { body: string; styles:
   return { body, styles };
 }
 
-function fileInfo(file: Td.file | undefined): { fileId: number; remoteId: string; size: number } | null {
+function fileInfo(file: Td.file | undefined, run: number): { file: TelegramFileRef; size: number } | null {
   if (!file) return null;
   return {
-    fileId: file.id,
-    remoteId: file.remote?.id ?? '',
+    file: fileRef(file, run),
     size: file.size || file.expected_size || 0,
   };
 }
@@ -150,11 +148,11 @@ function largestPhotoSize(sizes: Td.photoSize[] | undefined): Td.photoSize | nul
   return best;
 }
 
-function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
+function extractMedia(content: Td.MessageContent, run: number): SavedMedia | undefined {
   switch (content._) {
     case 'messagePhoto': {
       const largest = largestPhotoSize(content.photo?.sizes);
-      const info = fileInfo(largest?.photo);
+      const info = fileInfo(largest?.photo, run);
       if (!largest || !info) return undefined;
       return {
         ...info,
@@ -164,7 +162,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
       };
     }
     case 'messageVideo': {
-      const info = fileInfo(content.video?.video);
+      const info = fileInfo(content.video?.video, run);
       if (!info) return undefined;
       return {
         ...info,
@@ -175,7 +173,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
       };
     }
     case 'messageAnimation': {
-      const info = fileInfo(content.animation?.animation);
+      const info = fileInfo(content.animation?.animation, run);
       if (!info) return undefined;
       const contentType = content.animation.mime_type || 'video/mp4';
       return {
@@ -188,7 +186,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
       };
     }
     case 'messageVideoNote': {
-      const info = fileInfo(content.video_note?.video);
+      const info = fileInfo(content.video_note?.video, run);
       if (!info) return undefined;
       const length = content.video_note.length || undefined;
       return {
@@ -200,7 +198,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
       };
     }
     case 'messageVoiceNote': {
-      const info = fileInfo(content.voice_note?.voice);
+      const info = fileInfo(content.voice_note?.voice, run);
       if (!info) return undefined;
       return {
         ...info,
@@ -210,7 +208,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
       };
     }
     case 'messageAudio': {
-      const info = fileInfo(content.audio?.audio);
+      const info = fileInfo(content.audio?.audio, run);
       if (!info) return undefined;
       return {
         ...info,
@@ -220,7 +218,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
       };
     }
     case 'messageDocument': {
-      const info = fileInfo(content.document?.document);
+      const info = fileInfo(content.document?.document, run);
       if (!info) return undefined;
       return {
         ...info,
@@ -230,7 +228,7 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
     }
     case 'messageSticker': {
       const format = content.sticker?.format ? STICKER_FORMATS[content.sticker.format._] : undefined;
-      const info = fileInfo(content.sticker?.sticker);
+      const info = fileInfo(content.sticker?.sticker, run);
       if (!format || !info) return undefined;
       return {
         ...info,
@@ -247,13 +245,13 @@ function extractMedia(content: Td.MessageContent): SavedMedia | undefined {
 }
 
 /** A message of the chat as the migration keeps it. */
-export function savedMessageOf(message: Td.message): SavedMessage {
+export function savedMessageOf(message: Td.message, run = 0): SavedMessage {
   const content = message.content;
   const kind = KINDS[content._] ?? 'other';
   const formatted = content._ === 'messageText' ? content.text : 'caption' in content ? content.caption : null;
   const isSecret = 'is_secret' in content && Boolean(content.is_secret);
   const isProtected = message.can_be_saved === false || Boolean(message.self_destruct_type) || isSecret;
-  const media = isProtected ? undefined : extractMedia(content);
+  const media = isProtected ? undefined : extractMedia(content, run);
   const albumId = message.media_album_id && message.media_album_id !== '0' ? message.media_album_id : undefined;
   return {
     id: message.id,

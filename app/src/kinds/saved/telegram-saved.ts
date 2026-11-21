@@ -19,17 +19,15 @@ export interface SavedSource {
    * `use` completes. Optional in text-only test doubles.
    */
   withMedia?<T>(
-    media: Pick<SavedMedia, 'fileId' | 'remoteId' | 'size'>,
+    media: Pick<SavedMedia, 'file' | 'size'>,
     use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
   ): Promise<T>;
 }
 
 const MESSAGES_PER_REQUEST = 100;
 
-export function savedMessagesOf(client: Pick<TelegramClient, 'invoke' | 'run' | 'withDownloadedFile'>): SavedSource {
+export function savedMessagesOf(client: Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'>): SavedSource {
   const invoke = ((query: { _: string }) => client.invoke(query as never)) as Td.Invoke;
-  /** The TDLib run that produced the file IDs in the most recent `readMessages` call. */
-  let readRun = -1;
 
   return {
     async readMessages(onProgress) {
@@ -42,50 +40,46 @@ export function savedMessagesOf(client: Pick<TelegramClient, 'invoke' | 'run' | 
         // The chat with oneself is Saved Messages. With use_chat_info_database off, a fresh TDLib run needs the chat
         // created in memory before getChatHistory can read it.
         const chat = await invoke({ _: 'createPrivateChat', user_id: me.id, force: false });
-        chatRun = run;
-        chatId = chat.id;
-        return chatId;
+        if (client.run === run) {
+          chatRun = run;
+          chatId = chat.id;
+        }
+        return chat.id;
       };
       const byId = new Map<number, SavedMessage>();
       let from = 0;
       for (;;) {
+        let pageRun = 0;
         const page = await patiently(() =>
-          untilNotRestarted(async () =>
-            invoke({
+          untilNotRestarted(async () => {
+            const id = await ensureChat();
+            const before = client.run;
+            const result = await invoke({
               _: 'getChatHistory',
-              chat_id: await ensureChat(),
+              chat_id: id,
               from_message_id: from,
               offset: 0,
               limit: MESSAGES_PER_REQUEST,
               only_local: false,
-            }),
-          ),
+            });
+            pageRun = client.run === before ? before : 0;
+            return result;
+          }),
         );
         const messages = (page.messages ?? []).filter((message): message is Td.message => message != null);
         if (messages.length === 0) break;
-        for (const message of messages) byId.set(message.id, savedMessageOf(message));
+        for (const message of messages) byId.set(message.id, savedMessageOf(message, pageRun));
         const oldest = Math.min(...messages.map((message) => message.id));
         // An answer that does not go further back would be asked for again forever.
         if (from !== 0 && oldest >= from) break;
         from = oldest;
         onProgress(byId.size);
       }
-      readRun = client.run;
       return [...byId.values()].sort((a, b) => a.id - b.id);
     },
 
     withMedia(media, use) {
-      return patiently(() =>
-        untilNotRestarted(async () => {
-          let fileId = media.fileId;
-          // TDLib numbers files anew after a restart, so resolve the permanent remote ID in the current run.
-          if (client.run !== readRun && media.remoteId) {
-            const file = await invoke({ _: 'getRemoteFile', remote_file_id: media.remoteId });
-            fileId = file.id;
-          }
-          return client.withDownloadedFile(fileId, use);
-        }),
-      );
+      return patiently(() => client.withFileRef(media.file, use));
     },
   };
 }

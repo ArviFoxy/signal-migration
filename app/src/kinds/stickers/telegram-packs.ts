@@ -78,8 +78,9 @@ export function telegramSource(client: TelegramClient): TelegramSource {
   const reread = new Map<string, Promise<Map<string, number>>>();
 
   const readPack = async (setId: string): Promise<TelegramPack> => {
-    const run = client.run;
+    const before = client.run;
     const set = await client.invoke({ _: 'getStickerSet', set_id: setId });
+    const run = client.run === before ? before : 0;
     return toPack(set, (file) => issued.push({ run, id: file.id, setId, uniqueId: file.remote.unique_id }) - 1);
   };
 

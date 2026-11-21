@@ -32,11 +32,11 @@ describe('Saved Messages timeline', () => {
       msg(1, localSec(2020, 1, 5)),
       msg(2, localSec(2020, 1, 20), {
         kind: 'photo',
-        media: { fileId: 1, remoteId: 'r1', size: 120_000, contentType: 'image/jpeg' },
+        media: { file: { run: 1, fileId: 1, remoteId: 'r1' }, size: 120_000, contentType: 'image/jpeg' },
       }),
       msg(3, localSec(2023, 6, 15), {
         kind: 'file',
-        media: { fileId: 2, remoteId: 'r2', size: 110 * 1024 * 1024, contentType: 'application/zip' },
+        media: { file: { run: 1, fileId: 2, remoteId: 'r2' }, size: 110 * 1024 * 1024, contentType: 'application/zip' },
       }),
       msg(4, localSec(2026, 9, 12), { kind: 'other', body: '' }),
     ];

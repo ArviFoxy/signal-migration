@@ -133,7 +133,13 @@ describe('a saved message', () => {
     expect(photo).toMatchObject({
       kind: 'photo',
       body: 'at the lake',
-      media: { fileId: 11, remoteId: 'remote-11', size: 180_000, contentType: 'image/jpeg', width: 1280, height: 960 },
+      media: {
+        file: { run: 0, fileId: 11, remoteId: 'remote-11' },
+        size: 180_000,
+        contentType: 'image/jpeg',
+        width: 1280,
+        height: 960,
+      },
     });
     expect(reasonLeftOut(photo)).toBeNull();
 
@@ -145,7 +151,7 @@ describe('a saved message', () => {
       }),
     );
     expect(doc.media).toMatchObject({
-      fileId: 12,
+      file: { run: 0, fileId: 12, remoteId: 'remote-12' },
       contentType: 'application/pdf',
       fileName: 'notes.pdf',
       size: 42_000,
@@ -159,7 +165,12 @@ describe('a saved message', () => {
         caption: formatted(''),
       }),
     );
-    expect(voice.media).toMatchObject({ fileId: 13, contentType: 'audio/ogg', duration: 14, voiceNote: true });
+    expect(voice.media).toMatchObject({
+      file: { run: 0, fileId: 13, remoteId: 'remote-13' },
+      contentType: 'audio/ogg',
+      duration: 14,
+      voiceNote: true,
+    });
     expect(reasonLeftOut(voice)).toBeNull();
 
     const gif = savedMessageOf(
@@ -169,7 +180,13 @@ describe('a saved message', () => {
         caption: formatted(''),
       }),
     );
-    expect(gif.media).toMatchObject({ fileId: 14, contentType: 'video/mp4', gif: true, width: 480, height: 270 });
+    expect(gif.media).toMatchObject({
+      file: { run: 0, fileId: 14, remoteId: 'remote-14' },
+      contentType: 'video/mp4',
+      gif: true,
+      width: 480,
+      height: 270,
+    });
     expect(reasonLeftOut(gif)).toBeNull();
   });
 

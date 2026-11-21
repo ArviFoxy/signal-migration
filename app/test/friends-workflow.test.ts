@@ -18,14 +18,14 @@ const MARA: Person = {
   givenName: 'Mara',
   familyName: 'Lindqvist',
   phoneNumber: '+12025550102',
-  photoFileId: 12,
+  photo: { run: 1, fileId: 12, remoteId: 'r-12' },
 };
 const AIKO: Person = {
   userId: 6,
   givenName: 'Aiko',
   familyName: 'Tanaka',
   phoneNumber: '+447700900106',
-  photoFileId: 16,
+  photo: { run: 1, fileId: 16, remoteId: 'r-16' },
 };
 const JONAS: Person = { userId: 3, givenName: 'Jonas', familyName: '', phoneNumber: null };
 
@@ -34,12 +34,19 @@ const JONAS: Person = { userId: 3, givenName: 'Jonas', familyName: '', phoneNumb
  * Mara, Aiko and the group have a picture.
  */
 const people: PeopleSource = {
-  readPhoto: (fileId) => Promise.resolve(Uint8Array.of(fileId)),
+  readPhoto: (photo) => Promise.resolve(Uint8Array.of(photo.fileId)),
   readPeople: () =>
     Promise.resolve({
       chats: [
         { kind: 'person', userId: 2 },
-        { kind: 'group', chatId: 100, title: 'Flat 12', memberIds: [2, 3], memberCount: 2, photoFileId: 31 },
+        {
+          kind: 'group',
+          chatId: 100,
+          title: 'Flat 12',
+          memberIds: [2, 3],
+          memberCount: 2,
+          photo: { run: 1, fileId: 31, remoteId: 'r-31' },
+        },
         { kind: 'person', userId: 3 },
       ],
       people: new Map([MARA, AIKO, JONAS].map((person) => [person.userId, person])),

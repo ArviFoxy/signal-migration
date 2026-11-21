@@ -195,8 +195,7 @@ const SAVED_MESSAGES: SavedMessage[] = (() => {
     const media =
       kind === 'photo'
         ? {
-            fileId: index + 1,
-            remoteId: `photo-${index + 1}`,
+            file: { run: 1, fileId: index + 1, remoteId: `photo-${index + 1}` },
             size: 180_000 + (index % 5) * 45_000,
             contentType: 'image/jpeg',
             width: 1280,
@@ -204,8 +203,7 @@ const SAVED_MESSAGES: SavedMessage[] = (() => {
           }
         : kind === 'file'
           ? {
-              fileId: index + 1,
-              remoteId: `file-${index + 1}`,
+              file: { run: 1, fileId: index + 1, remoteId: `file-${index + 1}` },
               size: oversized ? 110 * 1024 * 1024 : 420_000,
               contentType: 'application/pdf',
               fileName: oversized ? `archive-${index + 1}.zip` : `doc-${index + 1}.pdf`,

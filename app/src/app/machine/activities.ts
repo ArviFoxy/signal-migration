@@ -7,6 +7,7 @@ import { addContacts, findFriends } from '../../kinds/friends/search';
 import { copyToNoteToSelf } from '../../kinds/saved/copy';
 import { StickerMigration } from '../../kinds/stickers/migration';
 import { LinkingCancelledError } from '../../signal/link';
+import type { TelegramFileRef } from '../../telegram/client';
 import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from '../services';
 import type { AppEvent } from './events';
 import { readRecord } from './record';
@@ -231,19 +232,19 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       const { chats, contacts, found } = work.search;
       // In the order of the rows: each chat's own picture, and after a group's picture those of its members. Then
       // the contacts who are in no chat.
-      const wanted = new Map<string, number>();
-      const want = (of: string, fileId: number | undefined) => {
-        if (fileId !== undefined && !wanted.has(of)) wanted.set(of, fileId);
+      const wanted = new Map<string, TelegramFileRef>();
+      const want = (of: string, photo: TelegramFileRef | undefined) => {
+        if (photo !== undefined && !wanted.has(of)) wanted.set(of, photo);
       };
       for (const chat of chats) {
         if (chat.kind === 'person') {
-          want(`user:${chat.userId}`, found.get(chat.userId)?.person.photoFileId);
+          want(`user:${chat.userId}`, found.get(chat.userId)?.person.photo);
         } else {
-          want(`chat:${chat.chatId}`, chat.photoFileId);
-          for (const userId of chat.memberIds) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
+          want(`chat:${chat.chatId}`, chat.photo);
+          for (const userId of chat.memberIds) want(`user:${userId}`, found.get(userId)?.person.photo);
         }
       }
-      for (const userId of contacts) want(`user:${userId}`, found.get(userId)?.person.photoFileId);
+      for (const userId of contacts) want(`user:${userId}`, found.get(userId)?.person.photo);
       const waiting = [...wanted];
       await Promise.all(
         Array.from({ length: PHOTOS_AT_ONCE }, async () => {

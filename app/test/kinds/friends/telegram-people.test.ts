@@ -4,7 +4,7 @@
 import type * as Td from 'tdlib-types';
 import { describe, expect, it } from 'vitest';
 import { GROUP_SIZE_LIMIT, peopleOf, type ReadingProgress } from '../../../src/kinds/friends/telegram-people';
-import { TelegramError } from '../../../src/telegram/client';
+import { TelegramError, type TelegramFileRef, TelegramRestartedError } from '../../../src/telegram/client';
 
 type UserKind = 'userTypeRegular' | 'userTypeBot' | 'userTypeDeleted';
 type FakeUser = { name: [string, string]; phone?: string; kind?: UserKind; photo?: number };
@@ -29,10 +29,13 @@ const SELF = 1;
 function account(
   users: Record<number, FakeUser>,
   chats: FakeChat[],
-  options: { tooFastOnce?: boolean; now?: () => number; contacts?: number[] } = {},
+  options: { tooFastOnce?: boolean; now?: () => number; contacts?: number[]; restartOnGetChat?: number } = {},
 ) {
   const requests: string[] = [];
+  let run = 1;
   let loaded = 0;
+  let getChatsSeen = 0;
+  let restarted = false;
   const member = (userId: number) => ({ member_id: { _: 'messageSenderUser', user_id: userId } });
   const chatAt = (chatId: number) => chats[chatId - 100]!;
   let tooFast = options.tooFastOnce ?? false;
@@ -55,6 +58,14 @@ function account(
       case 'getChats':
         return { chat_ids: chats.slice(0, loaded).map((_, index) => 100 + index) };
       case 'getChat': {
+        if (options.restartOnGetChat !== undefined && !restarted && getChatsSeen === options.restartOnGetChat) {
+          restarted = true;
+          run++;
+          loaded = 0;
+          throw new TelegramRestartedError();
+        }
+        if (loaded < chats.length) throw new TelegramError(400, 'Chat not found');
+        getChatsSeen++;
         const chat = chatAt(query.chat_id as number);
         if ('private' in chat) return { title: '', type: { _: 'chatTypePrivate', user_id: chat.private } };
         if ('basicGroup' in chat) {
@@ -75,7 +86,12 @@ function account(
           phone_number: user.phone ?? '',
           type: { _: user.kind ?? 'userTypeRegular' },
           ...(user.photo
-            ? { profile_photo: { small: { id: user.photo }, minithumbnail: { data: 'cHJldmlldw==' } } }
+            ? {
+                profile_photo: {
+                  small: { id: user.photo, remote: { id: `remote-${user.photo}` } },
+                  minithumbnail: { data: 'cHJldmlldw==' },
+                },
+              }
             : {}),
         };
       }
@@ -106,8 +122,20 @@ function account(
         throw new Error(`unexpected request ${query._}`);
     }
   }) as unknown as Td.Invoke;
-  const readFile = (fileId: number) => Promise.resolve(Uint8Array.of(fileId));
-  return { source: peopleOf({ invoke, readFile }, options.now), requests };
+  const readFileRef = (photo: TelegramFileRef) => Promise.resolve(Uint8Array.of(photo.fileId));
+  return {
+    source: peopleOf(
+      {
+        invoke,
+        get run() {
+          return run;
+        },
+        readFileRef,
+      },
+      options.now,
+    ),
+    requests,
+  };
 }
 
 const USERS: Record<number, FakeUser> = {
@@ -148,15 +176,37 @@ describe('the people of a Telegram account', () => {
     expect(people.get(3)).toEqual({ userId: 3, givenName: 'Jonas', familyName: '', phoneNumber: null });
   });
 
-  it("carries a person's picture: its file number and Telegram's small copy of it", async () => {
+  it("carries a person's picture: its run-tagged file reference and Telegram's small copy of it", async () => {
     const { source } = account({ ...USERS, 7: { name: ['Ines', 'Duarte'], photo: 55 } }, [
       { private: 7 },
       { private: 3 },
     ]);
     const { people } = await source.readPeople(() => undefined);
-    expect(people.get(7)).toMatchObject({ photoFileId: 55, photoPreview: 'cHJldmlldw==' });
-    expect(people.get(3)).not.toHaveProperty('photoFileId');
-    expect(await source.readPhoto(55)).toEqual(Uint8Array.of(55));
+    expect(people.get(7)).toMatchObject({
+      photo: { run: 1, fileId: 55, remoteId: 'remote-55' },
+      photoPreview: 'cHJldmlldw==',
+    });
+    expect(people.get(3)).not.toHaveProperty('photo');
+    expect(await source.readPhoto(people.get(7)!.photo!)).toEqual(Uint8Array.of(55));
+  });
+
+  // Detects: reading people failing with "Chat not found" after TDLib restarts mid-scan because
+  // use_chat_info_database is off and loadChats was not re-run in the new TDLib run.
+  it('reloads the chat list and finishes reading when TDLib restarts mid-getChat', async () => {
+    const { source, requests } = account(
+      { ...USERS, 7: { name: ['Ines', 'Duarte'], photo: 55 } },
+      [{ private: 2 }, { private: 7 }, { private: 3 }],
+      { restartOnGetChat: 1 },
+    );
+    const { chats, people } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([
+      { kind: 'person', userId: 2 },
+      { kind: 'person', userId: 7 },
+      { kind: 'person', userId: 3 },
+    ]);
+    expect(people.get(7)?.photo).toEqual({ run: 2, fileId: 55, remoteId: 'remote-55' });
+    // loadChats ran in run 1 and again in run 2 after the restart.
+    expect(requests.filter((request) => request === 'loadChats').length).toBeGreaterThanOrEqual(4);
   });
 
   it('reads the contact list, with people the user has no chat with', async () => {
