@@ -28,7 +28,7 @@ export type Session = {
   /** Telegram user IDs of found friends the user ticked, kept for when the friends are looked for again. */
   tickedFriends: number[];
   saved: SavedState;
-  /** The saved messages are copied from this date on (seconds since 1970); null while the user has chosen none. */
+  /** The saved messages are copied from this date on (seconds since 1970); null copies from the first message. */
   savedFrom: number | null;
   /**
    * Telegram's ID of the last saved message that is in Signal, so that a run continues behind it; null before the

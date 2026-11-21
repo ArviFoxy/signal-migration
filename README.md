@@ -140,7 +140,7 @@ to Self, Signal's conversation with oneself. Nothing below happens otherwise. `d
 reasons and what is not known yet.
 
 - **What is read:** every message of the chat, without files (`app/src/kinds/saved/telegram-saved.ts`).
-- **What is copied:** the text messages from a date on, which the user chooses; no date is chosen at first. The
+- **What is copied:** the text messages from a date on, chosen on a timeline of the chat (all messages by default). The
   styles Signal has are kept, and the address of a link behind a word is written after the word. A message with a
   photo, a video or a file, and a text above 2048 bytes, are counted and not copied yet. Where a message was
   forwarded from is not copied.

@@ -180,7 +180,7 @@ export class Workflow extends Runtime {
     return isSession(this.state) ? this.state.saved : { kind: 'none' };
   }
 
-  /** The date from which the saved messages are copied (seconds since 1970); null while the user chose none. */
+  /** The date from which the saved messages are copied (seconds since 1970); null copies from the first message. */
   get savedFrom(): number | null {
     return isSession(this.state) ? this.state.savedFrom : null;
   }

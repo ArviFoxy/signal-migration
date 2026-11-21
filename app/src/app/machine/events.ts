@@ -32,7 +32,7 @@ export type AppEvent =
   | { type: 'go-to'; step: SetupStep }
   | { type: 'choose'; what: 'stickers' | 'friends' | 'saved'; chosen: boolean }
   | { type: 'tick-friends'; userIds: number[]; ticked: boolean }
-  /** Copy the saved messages from this date on (seconds since 1970); null: none chosen. */
+  /** Copy the saved messages from this date on (seconds since 1970); null copies from the first message. */
   | { type: 'copy-saved-from'; from: number | null }
   | { type: 'start-migration' }
   | { type: 'run/retry' }

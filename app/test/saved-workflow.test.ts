@@ -99,14 +99,16 @@ describe('copying Saved Messages', () => {
     expect(page.workflow.savedCopy).toMatchObject({ toCopy: 5, copied: 5 });
   });
 
-  // Detects: messages being copied before the user chose a date. Nothing is chosen at first, so the migration must
-  // not start with saved messages alone.
-  it('copies nothing while no date is chosen', async () => {
+  // Detects: the default cutoff failing to include all messages, or a cutoff placed after the last message still
+  // copying messages or letting a saved-only migration start with nothing to copy.
+  it('starts with all messages selected, and copies nothing when the cutoff is past the last message', async () => {
     const world = new StickerWorld();
     const alice = world.user([]);
     const page = await openPage(alice, new Browser());
     await connectAndRead(page);
-    expect(page.workflow.savedCopy?.toCopy).toBe(0);
+    expect(page.workflow.savedCopy).toEqual({ toCopy: 6, copied: 0, leftOut: { media: 1, tooLong: 1, other: 0 } });
+    page.workflow.copySavedFrom(MESSAGES[MESSAGES.length - 1].date + 1);
+    expect(page.workflow.savedCopy).toEqual({ toCopy: 0, copied: 0, leftOut: { media: 0, tooLong: 0, other: 0 } });
     await startMigration(page);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(page.workflow.state.kind).toBe('setup');

@@ -182,14 +182,24 @@ const FRIENDS_ONLY = { stickers: false, friends: true, saved: false };
 const SAVED_ONLY = { stickers: false, friends: false, saved: true };
 const EVERYTHING = { stickers: true, friends: true, saved: true };
 
-/** 2,600 saved messages over about five years: mostly text, some with media, a few too long for one message. */
-const SAVED_MESSAGES: SavedMessage[] = Array.from({ length: 2600 }, (_, index) => ({
-  id: (index + 1) * 2 ** 20,
-  date: Date.UTC(2021, 8, 14) / 1000 + index * 62_000,
-  kind: index % 7 === 3 ? 'photo' : index % 31 === 5 ? 'file' : index % 53 === 9 ? 'other' : 'text',
-  body: index % 211 === 17 ? 'long '.repeat(600) : `Note ${index + 1}`,
-  styles: [],
-}));
+/** 2,600 saved messages over about five years with varied density: mostly text, some with media, a few too long. */
+const SAVED_MESSAGES: SavedMessage[] = (() => {
+  const list: SavedMessage[] = [];
+  let date = Date.UTC(2021, 8, 14) / 1000;
+  for (let index = 0; index < 2600; index++) {
+    // Deterministic bursty spacing so the timeline histogram has realistic peaks and quiet stretches.
+    const wave = 1 + 0.7 * Math.sin(index / 65) + 0.45 * Math.cos(index / 19);
+    date += Math.round(58_000 * Math.max(0.25, wave));
+    list.push({
+      id: (index + 1) * 2 ** 20,
+      date,
+      kind: index % 7 === 3 ? 'photo' : index % 31 === 5 ? 'file' : index % 53 === 9 ? 'other' : 'text',
+      body: index % 211 === 17 ? 'long '.repeat(600) : `Note ${index + 1}`,
+      styles: [],
+    });
+  }
+  return list;
+})();
 /** Copied from the 1,500th message on. */
 const SAVED_FROM = SAVED_MESSAGES[1500].date;
 const readSaved = () => ({ kind: 'read' as const, instance: 'fixture', attempt: 1, messages: SAVED_MESSAGES });

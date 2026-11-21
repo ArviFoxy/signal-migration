@@ -7,10 +7,9 @@
 import type { SignalAccount } from '../../signal/transport';
 import { noteOf, reasonLeftOut, type SavedMessage } from './messages';
 
-/** The messages copied when the user chose to copy from `from` on (seconds since 1970); none while it is null. */
+/** The messages copied when the user chose to copy from `from` on (seconds since 1970); all when null. */
 export function messagesToCopy(messages: readonly SavedMessage[], from: number | null): SavedMessage[] {
-  if (from === null) return [];
-  return messages.filter((message) => message.date >= from && reasonLeftOut(message) === null);
+  return messages.filter((message) => (from === null || message.date >= from) && reasonLeftOut(message) === null);
 }
 
 /** Of `messages`, those sent after the message `sentUpTo`, which is the last one a run has sent; all when null. */

@@ -21,7 +21,7 @@ export type Record = {
   deselected: string[];
   /** Telegram user IDs of found friends the user ticked. */
   tickedFriends: number[];
-  /** The saved messages are copied from this date on (seconds since 1970); null while none is chosen. */
+  /** The saved messages are copied from this date on (seconds since 1970); null copies from the first message. */
   savedFrom: number | null;
   /** Telegram's ID of the last saved message that is in Signal; null before the first. */
   savedSentUpTo: number | null;
