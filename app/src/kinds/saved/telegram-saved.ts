@@ -16,26 +16,39 @@ export interface SavedSource {
 
 const MESSAGES_PER_REQUEST = 100;
 
-export function savedMessagesOf(client: Pick<TelegramClient, 'invoke'>): SavedSource {
-  const invoke = ((query: { _: string }) =>
-    patiently(() => untilNotRestarted(() => client.invoke(query as never)))) as Td.Invoke;
+export function savedMessagesOf(client: Pick<TelegramClient, 'invoke' | 'run'>): SavedSource {
+  const invoke = ((query: { _: string }) => client.invoke(query as never)) as Td.Invoke;
 
   return {
     async readMessages(onProgress) {
-      const me = await invoke({ _: 'getMe' });
-      // The chat with oneself is Saved Messages.
-      const chat = await invoke({ _: 'createPrivateChat', user_id: me.id, force: false });
+      const me = await patiently(() => untilNotRestarted(() => invoke({ _: 'getMe' })));
+      let chatRun = -1;
+      let chatId = 0;
+      const ensureChat = async () => {
+        if (chatRun === client.run) return chatId;
+        const run = client.run;
+        // The chat with oneself is Saved Messages. With use_chat_info_database off, a fresh TDLib run needs the chat
+        // created in memory before getChatHistory can read it.
+        const chat = await invoke({ _: 'createPrivateChat', user_id: me.id, force: false });
+        chatRun = run;
+        chatId = chat.id;
+        return chatId;
+      };
       const byId = new Map<number, SavedMessage>();
       let from = 0;
       for (;;) {
-        const page = await invoke({
-          _: 'getChatHistory',
-          chat_id: chat.id,
-          from_message_id: from,
-          offset: 0,
-          limit: MESSAGES_PER_REQUEST,
-          only_local: false,
-        });
+        const page = await patiently(() =>
+          untilNotRestarted(async () =>
+            invoke({
+              _: 'getChatHistory',
+              chat_id: await ensureChat(),
+              from_message_id: from,
+              offset: 0,
+              limit: MESSAGES_PER_REQUEST,
+              only_local: false,
+            }),
+          ),
+        );
         const messages = (page.messages ?? []).filter((message): message is Td.message => message != null);
         if (messages.length === 0) break;
         for (const message of messages) byId.set(message.id, savedMessageOf(message));

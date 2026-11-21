@@ -216,4 +216,34 @@ describe('copying Saved Messages', () => {
     expect(reads).toBe(0);
     expect(workflow.saved.kind).toBe('none');
   });
+
+  // Detects: "Try again" doing nothing when re-reading Saved Messages fails after reloading mid-migration.
+  it('retries reading Saved Messages when a reload mid-migration fails to read them', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await connectAndRead(first);
+    world.signal.failNotesAfter = 2;
+    await startMigration(first);
+    await until(() => first.workflow.runFailed, 'the run to stop');
+    await first.workflow.settled();
+    browser.closePage();
+
+    world.signal.failNotesAfter = null;
+    let failRead = true;
+    const flakySaved: SavedSource = {
+      readMessages: () =>
+        failRead ? ((failRead = false), Promise.reject(new Error('network blip'))) : Promise.resolve(MESSAGES),
+    };
+    const page = appServices(alice, browser, { saved: flakySaved });
+    const workflow = new Workflow(page.services);
+    workflow.start();
+    await until(() => workflow.saved.kind === 'failed', 'the read to fail');
+    expect(workflow.error).toContain('network blip');
+
+    workflow.tryAgain();
+    await until(() => workflow.state.kind === 'done', 'the migration to finish after retrying the read');
+    expect(bodiesIn(world, alice)).toEqual(['note 1', 'note 2', 'note 4', 'note 6', 'note 7', 'note 8']);
+  });
 });

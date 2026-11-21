@@ -279,17 +279,16 @@ export class Workflow extends Runtime {
     this.dispatch({ type: 'start-migration' });
   }
 
-  /** Runs again what failed: reading packs, reading Signal, or the packs that failed to migrate. */
+  /** Runs again what failed: reading packs, reading Signal, reading friends or saved messages, or the run. */
   tryAgain(): void {
     const state = this.state;
-    if (state.kind === 'migrating') {
+    if (state.kind === 'migrating' && state.run.status !== 'running') {
       this.stickers?.retryFailed();
       this.dispatch({ type: 'run/retry' });
-    } else {
-      this.dispatch({ type: 'packs/try-again' });
-      this.dispatch({ type: 'friends/try-again' });
-      this.dispatch({ type: 'saved/try-again' });
     }
+    this.dispatch({ type: 'packs/try-again' });
+    this.dispatch({ type: 'friends/try-again' });
+    this.dispatch({ type: 'saved/try-again' });
   }
 
   dismissError(): void {

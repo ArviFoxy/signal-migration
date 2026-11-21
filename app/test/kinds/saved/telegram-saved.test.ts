@@ -5,7 +5,7 @@
 import type * as Td from 'tdlib-types';
 import { describe, expect, it } from 'vitest';
 import { savedMessagesOf } from '../../../src/kinds/saved/telegram-saved';
-import type { TelegramClient } from '../../../src/telegram/client';
+import { type TelegramClient, TelegramError, TelegramRestartedError } from '../../../src/telegram/client';
 
 const MY_USER_ID = 5_000_001;
 
@@ -21,9 +21,16 @@ const message = (number: number) =>
  * A chat with oneself holding the messages numbered 1 to `count`. `pageSize` gives how many messages each answer
  * holds at most; the first answer holds one message, as TDLib's often does.
  */
-function telegram(count: number, pageSize: (request: number) => number = () => 100) {
+function telegram(
+  count: number,
+  pageSize: (request: number) => number = () => 100,
+  restartOnHistory: number | null = null,
+) {
   const requests: { _: string; [key: string]: unknown }[] = [];
+  let run = 1;
+  let knownInRun = new Set<number>();
   let histories = 0;
+  let restarted = false;
   const invoke = async (query: { _: string; [key: string]: unknown }) => {
     requests.push(query);
     switch (query._) {
@@ -31,9 +38,17 @@ function telegram(count: number, pageSize: (request: number) => number = () => 1
         return { _: 'user', id: MY_USER_ID };
       case 'createPrivateChat':
         if (query.user_id !== MY_USER_ID) throw new Error('asked for the chat with someone else');
+        knownInRun.add(MY_USER_ID);
         return { _: 'chat', id: MY_USER_ID };
       case 'getChatHistory': {
         if (query.chat_id !== MY_USER_ID) throw new Error('asked for another chat');
+        if (!knownInRun.has(MY_USER_ID)) throw new TelegramError(400, 'Chat not found');
+        if (restartOnHistory !== null && !restarted && histories === restartOnHistory) {
+          restarted = true;
+          run++;
+          knownInRun = new Set();
+          throw new TelegramRestartedError();
+        }
         const limit = Math.min(Number(query.limit), 100, histories === 0 ? 1 : pageSize(histories));
         histories++;
         const from = Number(query.from_message_id);
@@ -47,7 +62,13 @@ function telegram(count: number, pageSize: (request: number) => number = () => 1
         throw new Error(`not simulated: ${query._}`);
     }
   };
-  return { client: { invoke } as unknown as Pick<TelegramClient, 'invoke'>, requests };
+  const client = {
+    invoke,
+    get run() {
+      return run;
+    },
+  } as unknown as Pick<TelegramClient, 'invoke' | 'run'>;
+  return { client, requests };
 }
 
 describe('reading Saved Messages', () => {
@@ -76,5 +97,14 @@ describe('reading Saved Messages', () => {
   it('gives no messages for an empty chat', async () => {
     const { client } = telegram(0);
     expect(await savedMessagesOf(client).readMessages(() => undefined)).toEqual([]);
+  });
+
+  // Detects: reading failing with "Chat not found" after TDLib restarts mid-read, because TDLib forgets the chat in
+  // memory (use_chat_info_database: false) until createPrivateChat is sent again in the new run.
+  it('recreates the chat and finishes reading when TDLib restarts mid-read', async () => {
+    const { client, requests } = telegram(250, () => 100, 2);
+    const messages = await savedMessagesOf(client).readMessages(() => undefined);
+    expect(messages).toHaveLength(250);
+    expect(requests.filter((r) => r._ === 'createPrivateChat')).toHaveLength(2);
   });
 });

@@ -479,7 +479,8 @@ export class SavedStep extends LightElement {
           )}
       </ul>
       <p class="text-sm text-muted">
-        Copied messages keep their original dates, but appear after anything already in Note to Self.
+        Copied messages keep their original dates, but appear after anything already in Note to Self. Previously
+        migrated messages will not be duplicated.
       </p>
       ${this.footer(next(toCopy))}`;
   }

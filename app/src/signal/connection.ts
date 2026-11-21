@@ -11,6 +11,7 @@ import { SignalSession } from './session';
 import { HandshakeRefusedError, SocketClosedError } from './socket';
 import { StorageClient } from './storage';
 import type { ChatChannel, SignalAccount } from './transport';
+import { loadSignalWasm } from './wasm';
 
 /** A linked device's login and storage service key, as kept between visits. */
 export type StoredDevice = {
@@ -79,11 +80,12 @@ export class SignalConnection implements SignalAccount {
   #ownDevices: OwnDevices | null = null;
 
   /** What sends to the account's other devices, with the sessions it has started with them. */
-  #toOwnDevices(): OwnDevices {
+  async #toOwnDevices(): Promise<OwnDevices> {
     const { aci, deviceId } = this.#account.credentials;
     const { identity, registrationId } = this.#account;
     if (!identity || registrationId === undefined)
       throw new Error('this device was linked by an earlier version of the app and cannot message your phone');
+    await loadSignalWasm();
     this.#ownDevices ??= new OwnDevices({ aci, deviceId, registrationId, identity });
     return this.#ownDevices;
   }
@@ -93,7 +95,7 @@ export class SignalConnection implements SignalAccount {
    * holds the packs' order. Two messages: Android acts on only one kind of request per sync message.
    */
   async announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void> {
-    const devices = this.#toOwnDevices();
+    const devices = await this.#toOwnDevices();
     await this.withChat(async (chat) => {
       if (packs.length > 0) await devices.send(chat, installStickerPacksMessage(packs));
       await devices.send(chat, fetchLatestStorageMessage());
@@ -105,7 +107,7 @@ export class SignalConnection implements SignalAccount {
   }
 
   async sendNoteToSelf(note: Note): Promise<void> {
-    const devices = this.#toOwnDevices();
+    const devices = await this.#toOwnDevices();
     const content = noteToSelfMessage(this.#account.credentials.aci, note);
     // Not urgent, as Signal Desktop sends a transcript (sendSyncMessageOnly): the phone is not woken for each note.
     await this.withChat((chat) => devices.send(chat, content, { timestamp: note.timestamp, urgent: false }));

@@ -402,7 +402,7 @@ export class MigrationApp extends LightElement {
           .position=${position}
           .stickers=${w.chosen.stickers}
           .friends=${w.chosen.friends ? { toAdd: w.friendsToAdd, added: w.friendsAdded } : null}
-          .saved=${w.chosen.saved ? w.savedCopy : null}
+          .saved=${w.chosen.saved ? (w.savedCopy ?? 'reading') : null}
           .failed=${w.runFailed}
           .finished=${w.state.kind === 'done'}
           .ending=${w.state.kind === 'ending'}
