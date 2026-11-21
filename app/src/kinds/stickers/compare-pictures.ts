@@ -58,27 +58,40 @@ export async function animationDifference(
 ): Promise<number | null> {
   const png = ownBuffer(converted);
   const opened = await askPngWorker<OpenedPng>({ open: png }, [png]);
-  const notAConversion = async () => {
-    await askPngWorker<null>({ compare: { key: opened.key, frames: null } });
-    return null;
+  let released = false;
+  const release = () => {
+    if (released) return Promise.resolve();
+    released = true;
+    return askPngWorker<null>({ compare: { key: opened.key, frames: null } }).then(() => undefined);
   };
-  if (opened.width !== opened.height || !SIZES.includes(opened.width)) return notAConversion();
-  const animation = await openAnimation(original, format);
   try {
-    const rates = allowedFrameRates(animation);
-    // A file with one picture holds no delay. It is a conversion only of an animation that has one frame at every
-    // allowed rate.
-    const rate =
-      opened.delays.length === 0
-        ? rates.every((allowed) => frameCount(animation, allowed) === 1)
-          ? rates[0]
-          : undefined
-        : rates.find((allowed) => opened.delays.every((delay) => delay === frameDelay(allowed)));
-    if (rate === undefined || frameCount(animation, rate) !== opened.frameCount) return notAConversion();
-    const frames = await animation.render(opened.width, rate);
-    return await askPngWorker<number>({ compare: { key: opened.key, frames } }, frames);
+    if (opened.width !== opened.height || !SIZES.includes(opened.width)) {
+      await release();
+      return null;
+    }
+    const animation = await openAnimation(original, format);
+    try {
+      const rates = allowedFrameRates(animation);
+      // A file with one picture holds no delay. It is a conversion only of an animation that has one frame at every
+      // allowed rate.
+      const rate =
+        opened.delays.length === 0
+          ? rates.every((allowed) => frameCount(animation, allowed) === 1)
+            ? rates[0]
+            : undefined
+          : rates.find((allowed) => opened.delays.every((delay) => delay === frameDelay(allowed)));
+      if (rate === undefined || frameCount(animation, rate) !== opened.frameCount) {
+        await release();
+        return null;
+      }
+      const frames = await animation.render(opened.width, rate);
+      released = true;
+      return await askPngWorker<number>({ compare: { key: opened.key, frames } }, frames);
+    } finally {
+      animation.close();
+    }
   } finally {
-    animation.close();
+    if (!released) void release().catch(() => undefined);
   }
 }
 

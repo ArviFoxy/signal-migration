@@ -2,7 +2,7 @@
 // fill in and each pack is looked up in the sticker pack index while the user chooses. The filters stay at the top
 // of the window and the actions at the bottom while the grid scrolls.
 
-import { html, nothing } from 'lit';
+import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import {
   icons,
@@ -13,24 +13,12 @@ import {
   stickyBar,
   stickyFooter,
 } from '../../../ui/layout';
+import { ObjectUrlPool } from '../../../ui/object-urls';
 import type { PackEntry } from '../migration';
 import { MAX_STICKERS } from '../upload';
 import { isOnSignal, MigrationView, packDescription } from './view';
 
 type Filter = 'all' | 'mine' | 'others' | 'upload';
-
-/** Object URLs of each pack's preview images, made once per pack. */
-const previewUrls = new WeakMap<PackEntry, string[]>();
-function previews(entry: PackEntry): string[] {
-  let urls = previewUrls.get(entry);
-  if (!urls && entry.thumbnails.length > 0) {
-    urls = entry.thumbnails.map((thumbnail) =>
-      URL.createObjectURL(new Blob([thumbnail.data as Uint8Array<ArrayBuffer>], { type: thumbnail.mimeType })),
-    );
-    previewUrls.set(entry, urls);
-  }
-  return urls ?? [];
-}
 
 /** A pack's state in a few words, with a dot in its colour. */
 function packStatus(entry: PackEntry) {
@@ -53,6 +41,26 @@ export class StickerPacksStep extends MigrationView {
   @property({ attribute: false }) canTryAgain = false;
   @state() private filter: Filter = 'all';
   @state() private search = '';
+  #previewUrls = new ObjectUrlPool<PackEntry>();
+
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (changed.has('migration')) this.#previewUrls.revokeAll();
+  }
+
+  override disconnectedCallback(): void {
+    this.#previewUrls.revokeAll();
+    super.disconnectedCallback();
+  }
+
+  private previews(entry: PackEntry): string[] {
+    if (entry.thumbnails.length === 0) return [];
+    return this.#previewUrls.get(entry, () =>
+      entry.thumbnails.map((thumbnail) =>
+        URL.createObjectURL(new Blob([thumbnail.data as Uint8Array<ArrayBuffer>], { type: thumbnail.mimeType })),
+      ),
+    );
+  }
 
   private visible(): PackEntry[] {
     const query = this.search.trim().toLowerCase();
@@ -72,7 +80,7 @@ export class StickerPacksStep extends MigrationView {
     const tooLarge = entry.pack.stickers.length > MAX_STICKERS;
     // A pack that is in the user's Signal has nothing left to choose: its box is ticked and cannot be changed.
     const mine = entry.state === 'in-signal';
-    const urls = previews(entry);
+    const urls = this.previews(entry);
     return html`<li>
       <label
         class="flex h-full flex-col gap-2 rounded-xl p-2.5 ring-1 ring-card-line ring-inset ${

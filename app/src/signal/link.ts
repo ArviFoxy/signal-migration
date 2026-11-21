@@ -74,46 +74,54 @@ async function receiveProvisionMessage(
   await loadSignalWasm();
   cancel.throwIfAborted();
   const receiver = new ProvisioningReceiver();
-  const socket = await connectChat('/v1/websocket/provisioning/', '/v1/keepalive/provisioning');
-  onEvent('linking socket open');
   try {
-    const envelope = await new Promise<Uint8Array>((resolve, reject) => {
-      const timer = setTimeout(
-        () => reject(new Error('the QR code was not scanned within 3 minutes')),
-        SCAN_TIMEOUT_MS,
-      );
-      const onCancel = () => {
-        clearTimeout(timer);
-        reject(new LinkingCancelledError());
-      };
-      if (cancel.aborted) onCancel();
-      cancel.addEventListener('abort', onCancel, { once: true });
-      socket.onUnexpectedClose = (code) => {
-        clearTimeout(timer);
-        onEvent(`linking socket closed, code ${code}`);
-        reject(new Error(`the connection to Signal closed (code ${code}) before the QR code was scanned`));
-      };
-      socket.onServerRequest = (request) => {
-        onEvent(`linking socket: Signal sent ${request.verb} ${request.path}`);
-        if (request.path === '/v1/address') {
-          const address = fromBinary(ProvisioningAddressSchema, request.body).address;
-          const url = new URL('sgnl://linkdevice');
-          url.search = new URLSearchParams({
-            uuid: address,
-            pub_key: base64(receiver.publicKey()),
-            capabilities: 'nopni,nopni2',
-          }).toString();
-          showQrCode(url.toString());
-        } else if (request.path === '/v1/message') {
+    const socket = await connectChat('/v1/websocket/provisioning/', '/v1/keepalive/provisioning');
+    onEvent('linking socket open');
+    try {
+      const envelope = await new Promise<Uint8Array>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          cancel.removeEventListener('abort', onCancel);
+          reject(new Error('the QR code was not scanned within 3 minutes'));
+        }, SCAN_TIMEOUT_MS);
+        const onCancel = () => {
           clearTimeout(timer);
-          resolve(request.body);
+          reject(new LinkingCancelledError());
+        };
+        if (cancel.aborted) {
+          onCancel();
+          return;
         }
-        return 200;
-      };
-    });
-    return fromBinary(ProvisionMessageSchema, receiver.decryptEnvelope(envelope));
+        cancel.addEventListener('abort', onCancel, { once: true });
+        socket.onUnexpectedClose = (code) => {
+          clearTimeout(timer);
+          cancel.removeEventListener('abort', onCancel);
+          onEvent(`linking socket closed, code ${code}`);
+          reject(new Error(`the connection to Signal closed (code ${code}) before the QR code was scanned`));
+        };
+        socket.onServerRequest = (request) => {
+          onEvent(`linking socket: Signal sent ${request.verb} ${request.path}`);
+          if (request.path === '/v1/address') {
+            const address = fromBinary(ProvisioningAddressSchema, request.body).address;
+            const url = new URL('sgnl://linkdevice');
+            url.search = new URLSearchParams({
+              uuid: address,
+              pub_key: base64(receiver.publicKey()),
+              capabilities: 'nopni,nopni2',
+            }).toString();
+            showQrCode(url.toString());
+          } else if (request.path === '/v1/message') {
+            clearTimeout(timer);
+            cancel.removeEventListener('abort', onCancel);
+            resolve(request.body);
+          }
+          return 200;
+        };
+      });
+      return fromBinary(ProvisionMessageSchema, receiver.decryptEnvelope(envelope));
+    } finally {
+      socket.close();
+    }
   } finally {
-    socket.close();
     receiver.free();
   }
 }

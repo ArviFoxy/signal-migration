@@ -5,7 +5,7 @@
 // stands for the people found in it. What is chosen is a set of people: a person's tick is the same tick in their own
 // row and inside every group. The list can also show the people alone, each once, to see who is chosen.
 
-import { html, nothing, type TemplateResult } from 'lit';
+import { html, nothing, type PropertyValues, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { FriendsState } from '../../../app/workflow';
 import {
@@ -18,6 +18,7 @@ import {
   type StepPosition,
   stickyFooter,
 } from '../../../ui/layout';
+import { ObjectUrlPool } from '../../../ui/object-urls';
 import { type FoundFriend, friendRows, type FriendSearch, friendsIn } from '../search';
 import { type ChatEntry, nameOf } from '../telegram-people';
 
@@ -47,17 +48,6 @@ const initials = (name: string) =>
     .join('')
     .toUpperCase();
 
-/** An address for each picture's bytes, made once. Telegram's profile pictures are JPEG files. */
-const pictureUrls = new WeakMap<Uint8Array, string>();
-function pictureUrl(bytes: Uint8Array): string {
-  let url = pictureUrls.get(bytes);
-  if (!url) {
-    url = URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' }));
-    pictureUrls.set(bytes, url);
-  }
-  return url;
-}
-
 @customElement('friends-step')
 export class FriendsStep extends LightElement {
   @property({ attribute: false }) friends!: FriendsState;
@@ -71,6 +61,28 @@ export class FriendsStep extends LightElement {
   @state() private view: View = 'chats';
   /** Which list is shown: the chats, or the Telegram contact list. */
   @state() private list: 'chats' | 'contacts' = 'chats';
+  #pictureUrls = new ObjectUrlPool<Uint8Array>();
+
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (changed.has('friends')) {
+      const previous = changed.get('friends') as FriendsState | undefined;
+      if (previous?.kind === 'found' && (this.friends.kind !== 'found' || this.friends.search !== previous.search)) {
+        this.#pictureUrls.revokeAll();
+      }
+    }
+  }
+
+  override disconnectedCallback(): void {
+    this.#pictureUrls.revokeAll();
+    super.disconnectedCallback();
+  }
+
+  private pictureUrl(bytes: Uint8Array): string {
+    return this.#pictureUrls.getOne(bytes, () =>
+      URL.createObjectURL(new Blob([bytes as Uint8Array<ArrayBuffer>], { type: 'image/jpeg' })),
+    );
+  }
 
   private tick(userIds: number[], ticked: boolean): void {
     this.emit('tick', { userIds, ticked });
@@ -88,7 +100,7 @@ export class FriendsStep extends LightElement {
    */
   private avatar(name: string, picture: Uint8Array | undefined, preview: string | undefined, small = false) {
     const size = small ? 'size-7 text-[11px]' : 'size-10 text-sm';
-    const address = picture ? pictureUrl(picture) : preview ? `data:image/jpeg;base64,${preview}` : null;
+    const address = picture ? this.pictureUrl(picture) : preview ? `data:image/jpeg;base64,${preview}` : null;
     if (address) {
       return html`<img src=${address} alt="" class="${size} flex-none rounded-full object-cover" />`;
     }

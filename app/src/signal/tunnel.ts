@@ -30,6 +30,7 @@ export class RelayLink {
     this.#socket.binaryType = 'arraybuffer';
     this.#socket.onopen = () => this.flush();
     this.#socket.onmessage = (event) => {
+      if (this.#closed) return;
       try {
         endpoint.receiveEncrypted(new Uint8Array(event.data as ArrayBuffer));
         this.flush();
@@ -46,22 +47,28 @@ export class RelayLink {
 
   /** Sends whatever ciphertext the endpoint has produced. */
   flush(): void {
+    if (this.#closed) return;
     const encrypted = this.#endpoint.takeEncrypted();
     if (encrypted.length > 0 && this.#socket.readyState === WebSocket.OPEN) this.#socket.send(encrypted);
   }
 
-  close(): void {
-    this.flush();
+  #detachAndClose(): void {
     this.#closed = true;
+    this.#socket.onopen = null;
+    this.#socket.onmessage = null;
     this.#socket.onclose = null;
     this.#socket.close();
   }
 
+  close(): void {
+    if (this.#closed) return;
+    this.flush();
+    this.#detachAndClose();
+  }
+
   #shutdown(reason: string, onClose: (reason: string) => void): void {
     if (this.#closed) return;
-    this.#closed = true;
-    this.#socket.onclose = null;
-    this.#socket.close();
+    this.#detachAndClose();
     onClose(reason);
   }
 }

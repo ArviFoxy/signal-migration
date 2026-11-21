@@ -4,6 +4,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, it, vi } from 'vitest';
 import { SignalConnection } from '../src/signal/connection';
+import { OwnDevices } from '../src/signal/own-devices';
 import { SignalSession } from '../src/signal/session';
 import { HandshakeRefusedError } from '../src/signal/socket';
 import { loadSignalWasm } from '../src/signal/wasm';
@@ -71,6 +72,7 @@ it('loads Signal WebAssembly before sending a note to self on a restored device'
         body: new Uint8Array(),
       };
     },
+    async unlinkSelf() {},
   } as unknown as SignalSession);
 
   const device = SignalConnection.restore({
@@ -83,10 +85,15 @@ it('loads Signal WebAssembly before sending a note to self on a restored device'
     registrationId: 1,
   });
 
+  const freeSpy = vi.spyOn(OwnDevices.prototype, 'free');
   await device.sendNoteToSelf({ timestamp: 1_700_000_000_000, body: 'hello', styles: [] });
   expect(loadSignalWasm).toHaveBeenCalled();
   expect(requests.map((r) => `${r.verb} ${r.path}`)).toEqual([
     'GET /v2/keys/simulated-account/*',
     'PUT /v1/messages/simulated-account',
   ]);
+
+  await device.unlink();
+  expect(freeSpy).toHaveBeenCalledTimes(1);
+  freeSpy.mockRestore();
 });

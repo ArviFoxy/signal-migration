@@ -7,6 +7,7 @@
 
 import { fromBinary } from '@bufbuild/protobuf';
 import { StickerPackSchema } from '../../gen/Stickers_pb';
+import { loadSignalWasm } from '../../signal/wasm';
 import { decryptStickerFile } from '../../wasm/signal_migration_wasm';
 import { isPlainPng } from './plain-png';
 import { isPlainWebp } from './plain-webp';
@@ -92,6 +93,7 @@ export async function isFaithfulCopy(
   onProgress: (done: number, total: number) => void = () => undefined,
 ): Promise<boolean> {
   if (original.stickers.length === 0) return false;
+  await loadSignalWasm();
   const encryptedManifest = await files.manifest(packId);
   const manifest = encryptedManifest && decrypted(encryptedManifest, packKey);
   if (!manifest || !manifestMatches(manifest, original)) return false;

@@ -99,7 +99,7 @@ export type SenderIdentity = {
 
 /** Sends messages to the account's other devices, keeping the sessions with them for as long as it lives. */
 export class OwnDevices {
-  #sessions: OwnDeviceSessions;
+  #sessions: OwnDeviceSessions | null;
   /** The other devices with a session. */
   #devices = new Set<number>();
   #bundlesRead = false;
@@ -112,6 +112,18 @@ export class OwnDevices {
       sender.aci,
       sender.deviceId,
     );
+  }
+
+  /** Frees the WebAssembly sessions and the copy of the account identity key they hold. */
+  free(): void {
+    this.#sessions?.free();
+    this.#sessions = null;
+    this.#devices.clear();
+  }
+
+  #activeSessions(): OwnDeviceSessions {
+    if (!this.#sessions) throw new Error('the device sessions were already closed');
+    return this.#sessions;
   }
 
   /** Starts sessions from the prekey bundles of the account's devices: all of them (`*`), or one. */
@@ -129,7 +141,7 @@ export class OwnDevices {
     for (const device of bundle.devices) {
       if (device.deviceId === this.sender.deviceId) continue;
       const { signedPreKey, pqPreKey, preKey } = device;
-      this.#sessions.startSession(
+      this.#activeSessions().startSession(
         device.deviceId,
         device.registrationId,
         identityKey,
@@ -163,7 +175,7 @@ export class OwnDevices {
     const padded = padMessageBody(content);
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = [...this.#devices].map((deviceId) => {
-        const encrypted = this.#sessions.encrypt(deviceId, padded);
+        const encrypted = this.#activeSessions().encrypt(deviceId, padded);
         const message = {
           type: encrypted.envelopeType,
           destinationDeviceId: deviceId,

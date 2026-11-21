@@ -1,6 +1,7 @@
 // Decodes video stickers (WebM) off the page's main thread, with the WebM decoder (webm-decoder.c, webm-decoding.ts).
 
 import createWebmDecoder from 'webm-decoder';
+import { retryableOnce } from '../../core/lazy';
 import { probeWebm, renderWebm } from './webm-decoding';
 
 /** What the page asks the worker. */
@@ -10,14 +11,14 @@ export type WebmCall =
 
 type WebmRequest = WebmCall & { id: number };
 
-const decoder = createWebmDecoder({ locateFile: () => '/webm-decoder.wasm' });
+const loadDecoder = retryableOnce(() => createWebmDecoder({ locateFile: () => '/webm-decoder.wasm' }));
 
 self.onmessage = async (event: MessageEvent<WebmRequest>) => {
   const request = event.data;
   const reply = (message: object, transfer: Transferable[] = []) =>
     (self as unknown as Worker).postMessage({ id: request.id, ...message }, transfer);
   try {
-    const module = await decoder;
+    const module = await loadDecoder();
     if (request.kind === 'probe') {
       reply({ result: probeWebm(module, request.file) });
     } else {

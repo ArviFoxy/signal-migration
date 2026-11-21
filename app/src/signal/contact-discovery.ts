@@ -6,6 +6,7 @@
 // module's messages over a WebSocket through the relay. Neither the migration server nor Signal's servers outside
 // the enclave see a phone number.
 
+import { retryableOnce } from '../core/lazy';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
 import init, { ContactDiscovery, contactDiscoveryEnclaveId } from '../wasm/attestation_wasm';
 import { basicAuthorization } from './session';
@@ -36,13 +37,10 @@ export class DiscoveryLimitError extends Error {
 const ALLOWANCE_USED_UP = 4008;
 const NORMAL_CLOSE = 1000;
 
-let loading: Promise<void> | null = null;
-
-/** Loads the attestation module once, before any of its functions are used. */
-export function loadAttestationWasm(): Promise<void> {
-  loading ??= init({ module_or_path: '/attestation_wasm_bg.wasm' }).then(() => undefined);
-  return loading;
-}
+/** Loads the attestation module once, before any of its functions are used; retries after a load failure. */
+export const loadAttestationWasm: () => Promise<void> = retryableOnce(() =>
+  init({ module_or_path: '/attestation_wasm_bg.wasm' }).then(() => undefined),
+);
 
 const hex = (bytes: Uint8Array) => Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
 
