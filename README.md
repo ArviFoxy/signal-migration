@@ -1,20 +1,19 @@
 # Telegram to Signal Migration 🔒🦊
 
-A web app that moves Telegram data into a Signal account: sticker packs, the user's Telegram friends who are on
-Signal, as Signal contacts, and the text messages of Telegram's Saved Messages, into Signal's Note to Self. All the
-work happens in the browser. The server serves the app, passes encrypted traffic
-on to Signal, and keeps a shared list of packs already uploaded.
+A web app for moving data from Telegram to Signal: sticker packs, Telegram friends who are on Signal, and Saved
+Messages (copied into Signal's Note to Self). Everything runs in the browser. The server only hosts the static files,
+relays encrypted traffic to Signal, and keeps a shared index of uploaded sticker packs.
 
 ## Parts
 
-| Part | What it is |
+| Path | Description |
 | --- | --- |
-| `app/` | The web app: TypeScript and Lit. |
-| `crates/signal-wasm/` | libsignal and rustls compiled to WebAssembly: device linking, prekeys, sessions, account keys, sticker and storage encryption, and the TLS connection to Signal. |
-| `crates/attestation-wasm/` | libsignal's check of an enclave's attestation, and the encrypted exchange with Signal's contact discovery, compiled to WebAssembly. libsignal does the check's certificate and signature work with BoringSSL, a C library, which `scripts/build-boringssl-wasm.sh` builds for WebAssembly. |
-| `crates/server/` | The server, in Rust: static files, the relay to Signal, the sticker pack index. |
-| `third_party/td` | TDLib, Telegram's library, compiled to WebAssembly by `scripts/build-tdweb.sh`, with one patch (`scripts/tdweb/`). |
-| `app/src/kinds/stickers/webm-decoder.c` | The decoder for video stickers: FFmpeg's WebM reader and libvpx's VP9 decoder, compiled to WebAssembly by `scripts/build-webm-decoder.sh`. |
+| `app/` | The web app (TypeScript and Lit). |
+| `crates/signal-wasm/` | `libsignal` and `rustls` compiled to WebAssembly: device linking, prekeys, sessions, account keys, sticker and storage encryption, and TLS to Signal. |
+| `crates/attestation-wasm/` | Signal contact discovery compiled to WebAssembly: checks the enclave attestation with `libsignal` and encrypts the lookup. BoringSSL handles the certificate and signature checks and is built for WebAssembly by `scripts/build-boringssl-wasm.sh`. |
+| `crates/server/` | The Rust server: static files, the Signal WebSocket relay, and the sticker pack index. |
+| `third_party/td` | Telegram's TDLib, compiled to WebAssembly by `scripts/build-tdweb.sh` with one patch in `scripts/tdweb/`. |
+| `app/src/kinds/stickers/webm-decoder.c` | Video sticker decoder built from FFmpeg's WebM demuxer and libvpx's VP9 decoder (`scripts/build-webm-decoder.sh`). |
 
 ## Connections
 
@@ -27,171 +26,174 @@ browser ──── HTTPS ─────────────────�
              server ──── HTTPS ─────────────────────────────▶ Signal's public CDN (cdn-ca.signal.org)
 ```
 
-Telegram is reached directly. Signal is not, because Signal's servers use certificates from Signal's own
-certificate authority, which browsers do not trust. The browser therefore opens a WebSocket to the server
-(`/tunnel/{host}`), which connects to that host if it is on its list (`chat`, `storage`, `cdn`, `cdn2`, `cdn3`,
-`cdsi` `.signal.org`) and copies bytes both ways. Inside, the browser runs its own TLS session with Signal, accepting
-only Signal's root certificates (the ones libsignal ships). The server connects to `cdsi.signal.org`, Signal's contact
-discovery, only for a user who looks for friends.
+The browser connects to Telegram directly, but it cannot connect straight to Signal's servers: they use Signal's own
+certificate authority, which browsers do not trust. Instead, the browser opens a WebSocket to `/tunnel/{host}` on this
+server. If `{host}` is in the server's allowlist (`chat`, `storage`, `cdn`, `cdn2`, `cdn3`, and `cdsi` under
+`.signal.org`), the server opens a TCP connection to it and forwards bytes in both directions. The browser runs its own
+TLS session through that tunnel, trusting only the root certificates from `libsignal`. The server only connects to
+`cdsi.signal.org` (Signal's contact discovery) when the user chooses to look for friends.
 
-Signal's public CDN has a certificate that browsers trust and serves the encrypted files of every sticker pack to
-anyone. The browser reads from it the copies of a pack that others uploaded. The server asks it whether a pack
-exists before listing the pack in the index.
+Signal's public CDN (`cdn-ca.signal.org`) has a certificate that browsers trust and serves encrypted sticker pack files
+publicly. The browser downloads previously uploaded pack copies from it, and the server checks it to make sure a pack
+exists before adding it to the index.
 
 ## What the server sees
 
-- **Relay:** encrypted bytes, which Signal host they go to, and when.
-- **Index:** for each uploaded pack, a 32-byte lookup key and the 16-byte Signal pack ID. Client addresses are used
-  for rate limits, in memory only, and are not logged. For a new entry, the server requests the headers of the
-  pack's manifest from Signal's public CDN, to learn whether Signal has the pack. It downloads no file of a pack.
-- **Nothing else:** no Telegram traffic, no Signal credentials, no pack keys, no stickers, no phone numbers and no
-  names of people.
+- **Relay:** Encrypted bytes, which Signal host they go to, and when.
+- **Index:** A 32-byte lookup key and a 16-byte Signal pack ID for each uploaded pack. Client IP addresses are kept in
+  memory for rate limiting and are never logged. When a new entry is submitted, the server sends a `HEAD` request for
+  the pack's manifest to Signal's public CDN to check that the pack exists, without downloading any pack files.
+- **Nothing else:** No Telegram traffic, Signal credentials, pack keys, stickers, phone numbers, or names.
 
 ## Pack keys and the index
 
-Each pack has two values, computed in the browser (`app/src/kinds/stickers/identity.ts`):
+The browser computes two keys for each sticker pack (`app/src/kinds/stickers/identity.ts`):
 
-- **Lookup key** = HKDF-SHA256(SHA-256(identity), `signal-migration sticker-pack lookup v1`). The identity is the
-  pack's title and each sticker's Telegram file ID and emoji, in order. It is known before anything is downloaded.
-- **Pack key** = HKDF-SHA256(SHA-256(content), `signal-migration pack key v2`). The content is the pack's title and
-  each sticker's original file and emoji, in order. Only someone who has every sticker can compute it.
+- **Lookup key** = `HKDF-SHA256(SHA-256(identity), "signal-migration sticker-pack lookup v1")`, where `identity` is the
+  pack's title followed by each sticker's Telegram file ID and emoji in order. This can be computed before downloading
+  any stickers.
+- **Pack key** = `HKDF-SHA256(SHA-256(content), "signal-migration pack key v2")`, where `content` is the pack's title
+  followed by each sticker's original file bytes and emoji in order. Only someone who has every sticker can compute it.
 
-Both encodings start with a fixed label and give every field a 4-byte length, so two different packs never encode
-the same. This scheme is fixed: changing it would make every earlier upload unfindable.
+Both encodings start with a fixed label and prefix every field with a 4-byte length, so two different packs never
+encode to the same bytes. This scheme is fixed: changing it would break lookups for every pack uploaded before it.
 
-Everyone who migrates the same Telegram pack computes the same values, so a later user finds an earlier upload.
-The index (`/v1/sticker-packs/index`) is an append-only list of 48-byte entries, `lookup key ‖ pack ID`. The browser
-downloads all of it and searches it locally, so the server does not learn which packs a user looks up.
+Everyone who migrates the same Telegram pack gets the same keys, so later users can reuse earlier uploads. The index
+(`/v1/sticker-packs/index`) is an append-only list of 48-byte entries; each entry concatenates the lookup key and pack
+ID (`lookup key ‖ pack ID`). The browser downloads the whole index and searches it locally, so the server never learns
+which packs a user looks up.
 
-Anyone can add an entry. The server adds one only if Signal has that pack and no entry lists that pack ID yet. An
-entry says nothing about what the pack contains, so the browser installs a copy that someone else uploaded only
-after comparing it with the Telegram pack itself (`compare-pack.ts`):
+Anyone can submit an entry, and the server accepts it if Signal has that pack and its pack ID is not already listed.
+Since index entries are untrusted, the browser checks any copy uploaded by someone else against the Telegram pack
+before installing it (`compare-pack.ts`):
 
-- The copy's manifest must decrypt with the pack key and hold the title, the emoji and the numbering that the app
-  writes, and nothing else.
-- A still sticker within Signal's size limit must be the Telegram file, byte for byte.
-- A larger still, which the app encodes again at lower quality, and an animation, which the app converts to an
-  animated PNG, are drawn and compared with the original drawn at the same size and frame rate
-  (`compare-pictures.ts`). An animation must have one of the sizes and frame rates the app converts to, and its file
-  may hold nothing but the pictures. Each frame may differ from the original by a tolerance that covers what the
-  encoding loses (`ANIMATION_TOLERANCE`, `STILL_TOLERANCE`).
+- The manifest must decrypt with the pack key and contain only the title, emoji, and sticker numbering that the app
+  writes.
+- Static stickers within Signal's size limit must match the Telegram file byte for byte.
+- Larger static stickers are re-encoded at lower quality, and animations are converted to animated PNG (APNG). For
+  both, the browser renders the uploaded copy and compares it visually against the original at the same size and frame
+  rate (`compare-pictures.ts`). Animations must use one of the app's target sizes and frame rates, and their files may
+  contain only image data. Each frame must stay within a tolerance that covers lossy encoding (`STILL_TOLERANCE`,
+  `ANIMATION_TOLERANCE`).
 
-The browser compares at most three copies of a pack: the oldest one that can be used, then the newest, then the
-second newest. To find them it looks at no more than the ten oldest and the ten newest entries of the pack. If no
-copy passes, it converts and uploads the pack and adds an entry. Right before the upload, it reads the entries added
-since its last read and looks again.
+The browser checks at most three copies of a pack: the oldest usable copy, then the newest, then the second newest. It
+finds those by scanning at most the ten oldest and ten newest entries for the pack. If none pass, it converts and
+uploads the pack and adds a new entry. Right before uploading, it pulls any new entries added since its last check and
+tries them first in case someone uploaded the pack in the meantime.
 
-Bad copies listed after a good one cost nothing, because the oldest copy passes and no other is read. When the
-oldest copy is bad, the first user who meets it uploads a good copy, which is then the newest one and is found by
-the users after them. Someone who keeps adding bad copies of a pack can make users upload that pack again.
+Bad copies added after a good one have no effect, since the oldest copy passes and the browser stops there. If the
+oldest copy is bad, the first user who hits it uploads a good copy, which becomes the newest entry and gets reused by
+later users. Someone who keeps adding bad copies of a pack can still force users to re-upload it.
 
-A copy is compared as soon as it is listed, so that no pack waits. The comparison shows what Signal's CDN served at
-that moment. For 30 minutes after an upload began, its uploader can replace the files, because Signal's upload forms
-are valid that long. A copy that was faithful when a browser compared it shows other pictures afterwards if its
-uploader replaces them in that time. Signal's CDN also goes on serving a version it read earlier (for more than 90
-minutes when measured), so a browser can still be given the earlier version to compare after the replacement. This
-risk is accepted. In every other case, a browser installs no copy whose pictures differ from the Telegram pack by
-more than the tolerance.
+Copies are checked as soon as they appear in the index rather than after a waiting period, so the check reflects what
+Signal's CDN served at that moment. Signal's upload forms stay valid for 30 minutes, so the uploader can overwrite the
+files during that window after a browser has already checked them. Signal's CDN also caches earlier versions for a
+while (more than 90 minutes when measured), so a browser can still get the old version to check even after a
+replacement. We accept that risk. Outside that window, the browser will not install a copy whose images differ from the
+Telegram pack by more than the tolerance.
 
 ## Signal
 
-- **Linking:** the browser becomes a linked device of the account (`PUT /v1/devices/link`). From the linking message
-  it keeps the storage service key, derived from the account entropy pool, and drops the pool itself.
-- **Installing:** packs are written to the account's storage service as sticker pack records. The `position` field
-  holds the Telegram order.
-- **Telling other devices:** the phone does not pick up storage changes by itself, so the browser sends sync
-  messages to the account's other devices: one with the packs to install, then one asking them to read the storage
-  service again. Android acts on only one kind of request per sync message, hence two. The messages are encrypted
-  with libsignal sessions started from each device's prekey bundle.
-- **Limits:** Signal allows 50 uploads, then one every 72 minutes. A pack has at most 200 stickers. Signal on iOS
-  ignores `position` and shows the newest pack first.
+- **Linking:** The browser links itself to the account as a secondary device (`PUT /v1/devices/link`). It derives the
+  storage service key from the linking message's account entropy pool, keeps only that key, and discards the pool.
+- **Installing:** The browser writes packs to Signal's storage service as sticker pack records, using `position` to
+  keep the Telegram order.
+- **Syncing other devices:** The phone does not pick up storage changes on its own, so the browser sends two sync
+  messages to the account's other devices: one listing the packs to install, and a second asking them to re-read the
+  storage service. Two messages are needed because Signal for Android only handles one kind of request per sync
+  message. Both are encrypted with `libsignal` sessions started from each device's prekey bundle.
+- **Limits:** Signal allows 50 uploads in a burst, then one every 72 minutes. A pack can have at most 200 stickers.
+  Signal on iOS ignores `position` and always shows the newest pack first.
 
-Stickers are converted to what Signal accepts: static WebP stays WebP; Lottie (TGS) and WebM animations become
-animated PNG, at a lower size and frame rate where needed to fit 300 KiB (`app/src/kinds/stickers/convert.ts`).
-A WebM sticker keeps its transparency as a second VP9 stream beside the video, which libvpx's decoder reads and
-FFmpeg's own does not; the decoder is built with only FFmpeg's Matroska reader, libvpx's VP9 decoder and swscale.
-That build of FFmpeg is under the LGPL 2.1, libvpx under a BSD licence; the script names the exact versions.
+Stickers are converted to formats Signal accepts (`app/src/kinds/stickers/convert.ts`): static WebP stays WebP, while
+Lottie (TGS) and WebM animations become APNG, scaled down in size or frame rate where needed to fit under 300 KiB. WebM
+stickers store transparency as a second VP9 stream alongside the main video. libvpx's VP9 decoder supports that alpha
+stream, while FFmpeg's built-in decoder does not, so the WebAssembly decoder combines FFmpeg's Matroska demuxer and
+`swscale` with libvpx's VP9 decoder. That build of FFmpeg is under LGPL 2.1 and libvpx is under a BSD license;
+`scripts/build-webm-decoder.sh` pins the exact versions.
 
 ## Friends
 
-The user can choose on the start page to look for Telegram friends on Signal. Nothing below happens otherwise.
+Looking for Telegram friends on Signal is optional and off by default on the start page. The app skips all of this
+unless the user turns it on.
 
-- **Who is looked for:** everyone the user has a one-to-one chat with, the members of the user's groups of up to
-  1000 members, and the user's Telegram contact list (`app/src/kinds/friends/telegram-people.ts`). Bots and deleted
-  accounts are left out. A person can be found only if Telegram shows the user their phone number.
-- **Asking Signal:** the phone numbers go to Signal's contact discovery, the service that Signal's own apps ask about
-  the phone's address book. It runs inside an enclave: a protected part of a server that Signal's operators cannot
-  look into. The enclave sends an attestation, a statement signed with a key of the processor's maker that says which
-  program runs inside. The browser checks it with libsignal's own code and encrypts the phone numbers for the enclave
-  alone (`crates/attestation-wasm/`, `app/src/signal/contact-discovery.ts`). Signal limits how many numbers an
-  account may look up in a period of time; a refusal names the wait.
-- **The answer:** for each number that has an account which can be found by number, the account's phone number
-  identity. The account ID comes back only for a person whose profile key the user's Signal already holds. The app
-  sends those keys' access keys along, and so recognises the people who are among the user's Signal contacts already.
-- **Adding:** nobody is ticked until the user ticks them. Each ticked person becomes a contact record in the
-  account's storage service: the identifiers, the phone number, the Telegram name as nickname, and `whitelisted`,
-  the field that says the user accepted the conversation, without which Signal for Android does not list the
-  contact. The account's other devices are then asked to read the storage service again.
+- **Who is included:** Everyone the user has a one-to-one chat with, members of the user's groups with up to 1,000
+  members, and the user's Telegram contact list (`app/src/kinds/friends/telegram-people.ts`). Bots and deleted accounts
+  are excluded. A person can only be matched if Telegram shows the user their phone number.
+- **Querying Signal:** The browser sends those phone numbers to Signal's contact discovery service, which Signal's own
+  apps use to check a phone's address book. It runs inside an enclave, a protected part of the server that Signal's
+  operators cannot inspect. The enclave sends an attestation signed with the CPU manufacturer's key proving which code
+  is running inside. The browser checks that attestation with `libsignal` and encrypts the phone numbers so only the
+  enclave can read them (`crates/attestation-wasm/`, `app/src/signal/contact-discovery.ts`). Signal rate-limits lookups
+  per account; if it rejects a request, the response says how long to wait before trying again.
+- **Response:** For each phone number that has a discoverable Signal account, the service returns its phone number
+  identity. It only returns the account ID if the user's Signal account already has that person's profile key. The app
+  sends the access keys derived from those stored profile keys, which lets it spot people who are already Signal
+  contacts.
+- **Adding contacts:** Nobody is selected by default. For each person the user selects, the app writes a contact record
+  to Signal's storage service with their Signal identifiers, phone number, Telegram name as a nickname, and the
+  `whitelisted` flag. That flag marks the conversation as accepted; without it, Signal for Android does not list the
+  contact. Afterward, the app asks the account's other devices to re-read the storage service.
 
 ## Saved Messages
 
-The user can choose on the start page to copy Saved Messages, the chat a Telegram user has with themselves, into Note
-to Self, Signal's conversation with oneself. Nothing below happens otherwise. `docs/saved_messages.md` has the
-reasons and what is not known yet.
+Copying Telegram's Saved Messages (the chat with yourself) into Signal's Note to Self is also optional and off by
+default on the start page. See `docs/saved_messages.md` for background and open questions.
 
-- **What is read:** the message list of the chat first (`app/src/kinds/saved/telegram-saved.ts`), without downloading
-  files until the migration runs. During the migration, each media file is downloaded from Telegram, streamed in parts
-  through WebAssembly encryption (`crates/signal-wasm/src/crypto.rs`), and deleted locally as soon as it is uploaded.
-- **What is copied:** every supported message from a date on, chosen on a timeline of the chat (all messages by
-  default): text (including long messages above 2048 bytes, uploaded as `text/x-signal-plain`), photos, videos, GIFs,
-  voice notes, audio files, round video messages, stickers (animated stickers converted to APNG), arbitrary files, and
-  grouped albums. The styles Signal has are kept, and the address of a link behind a word is written after the word.
-  Files above Signal's 100 MiB encrypted upload limit, protected/self-destructing messages, and unsupported kinds (such
-  as locations or polls) are counted and not copied. Where a message was forwarded from is not copied.
-- **How:** each attachment is encrypted in Signal's attachment format (logarithmic zero padding, AES-256-CBC,
-  HMAC-SHA256, and SHA-256 digest) and uploaded in chunks to Signal's CDN (`app/src/signal/attachment.ts`). Each
-  message is then sent to the account's other devices as a sent transcript, the message with which a device tells the
-  others what it sent, with the account itself as the recipient (`app/src/signal/note-to-self.ts`). It carries the
-  Telegram date, which Signal's apps show. They list a conversation in the order of arrival, so the messages are sent
-  oldest first and stand behind what Note to Self already holds.
-- **Repeating:** Signal's apps identify a message by its sender and its timestamp and drop one they already have.
-  The timestamp is computed from the Telegram message alone, so a message sent a second time, after an interruption
-  or in a later migration, appears once.
-- **A timer on Note to Self:** the messages carry no timer for disappearing messages, and a message without a timer
-  switches off the timer of the conversation it arrives in.
+- **Reading:** The app loads the chat's message list first (`app/src/kinds/saved/telegram-saved.ts`) without
+  downloading any media files. During the migration, it downloads each file from Telegram, encrypts it in chunks in
+  WebAssembly (`crates/signal-wasm/src/crypto.rs`), uploads it, and deletes the local copy right away.
+- **What is copied:** Every supported message from a start date picked on a timeline of the chat (all messages by
+  default). That covers text (messages over 2,048 bytes are uploaded as `text/x-signal-plain`), photos, videos, GIFs,
+  voice notes, audio files, round video messages, stickers (animated ones converted to APNG), arbitrary files, and
+  grouped albums. Text formatting that Signal supports is kept, and links are expanded by putting the URL after the link
+  text. Files over Signal's 100 MiB encrypted upload limit, protected or self-destructing messages, and unsupported types
+  like locations or polls are skipped and counted. Forwarding info is not copied.
+- **How messages are sent:** Each attachment is encrypted in Signal's attachment format (logarithmic zero padding,
+  AES-256-CBC, HMAC-SHA256, and a SHA-256 digest) and uploaded in chunks to Signal's CDN
+  (`app/src/signal/attachment.ts`). The app then sends each message to the account's other devices as a sent transcript
+  (the sync message a device uses to report what it sent), with the user's own account as the recipient
+  (`app/src/signal/note-to-self.ts`). Each message carries its original Telegram date, which Signal displays. Signal
+  orders conversations by arrival time rather than message date, so the app sends messages oldest first and they show
+  up after whatever Note to Self already has.
+- **Repeating:** Signal drops duplicate messages that share a sender and timestamp. The app derives each timestamp
+  solely from the Telegram message, so re-sending a message after an interruption or in a later run still only creates
+  one copy.
+- **Disappearing messages:** Copied messages carry no disappearing timer. Since Signal updates a conversation's timer
+  to match incoming messages, importing Saved Messages turns off any timer set on Note to Self.
 
 ## What the browser stores
 
-IndexedDB stores locally, until the migration ends or the user clears it:
+While a migration is in progress (until it finishes or the user clears it), the app keeps the following in IndexedDB:
 
-- TDLib's database with the Telegram session, saved right after sign-in, and a copy of its login file in a
-  database of the app's own, which is written back each time TDLib starts; The copy of login credentials is needed because TDLib often segfaults and its database has to be reset to recover.
-- the linked device's password, storage service key, account identity key pair and registration ID;
-- what the user chose to move, the deselected packs, the Telegram user IDs of the ticked friends, the date from which
-  saved messages are copied, Telegram's ID of the last saved message sent, and the progress, so that a reload
-  continues.
+- TDLib's database with the Telegram session, saved right after sign-in, plus a backup copy of its login file in the
+  app's own database. The app restores that backup whenever TDLib starts, because TDLib often segfaults and its
+  database has to be reset to recover.
+- The linked Signal device's password, storage service key, account identity key pair, and registration ID.
+- Progress and choices so the migration can resume after a reload: what the user chose to move, deselected sticker
+  packs, Telegram user IDs of selected friends, the Saved Messages start date, and the Telegram ID of the last copied
+  message.
 
-At the end, the device is unlinked, Telegram is signed out, and all of it is deleted.
+When the migration finishes, the app unlinks the Signal device, signs out of Telegram, and deletes all of it.
 
 ## Build
 
-You need Node.js, Rust (rustup picks the version from `rust-toolchain.toml`), `wasm-bindgen-cli` 0.2.130, CMake,
-and libclang, with which the bindings to BoringSSL are generated.
+You need Node.js, Rust (`rustup` picks the version from `rust-toolchain.toml`), `wasm-bindgen-cli` 0.2.130, CMake, and
+`libclang` (for generating BoringSSL bindings).
 
 ```sh
 git clone --recurse-submodules https://github.com/ArviFoxy/signal-migration
 cd signal-migration
 scripts/build-tdweb.sh          # TDLib; slow, needed once. Installs Emscripten 3.1.1 under build/ unless EMSDK is set
-scripts/build-webm-decoder.sh   # the WebM decoder; a few minutes, needed once. Installs Emscripten 7.0.0 under build/
+scripts/build-webm-decoder.sh   # WebM decoder; a few minutes, needed once. Installs Emscripten 7.0.0 under build/
 scripts/build-boringssl-wasm.sh # BoringSSL; a few minutes, needed once. Fetches wasi-sdk 34 into build/ unless WASI_SDK is set
 cd app && npm install && npm run build
 cd ../crates/server && cargo build --release
 ```
 
-Dependabot (`.github/dependabot.yml`) proposes newer npm and Cargo packages, submodules and GitHub Actions each
-week. The versions pinned in `scripts/build-webm-decoder.sh` and `scripts/build-boringssl-wasm.sh` are checked by a
-weekly workflow
-(`scripts/check-pinned-versions.sh`), which opens an issue when one is behind.
+Dependabot (`.github/dependabot.yml`) checks weekly for updates to npm and Cargo packages, submodules, and GitHub
+Actions. A weekly workflow also runs `scripts/check-pinned-versions.sh` to check the versions pinned in
+`scripts/build-webm-decoder.sh` and `scripts/build-boringssl-wasm.sh`, opening an issue when any fall behind.
 
 ## Run
 
@@ -203,25 +205,25 @@ crates/server/target/release/signal-migration-server
 
 | Variable | Meaning |
 | --- | --- |
-| `HOST`, `PORT` | Where the server listens. Default `127.0.0.1:8080`. |
-| `STATIC_DIR` | The built app, `app/dist`. |
-| `INDEX_FILE` | The sticker pack index. Keep it on a disk that is backed up. |
-| `TLS_CERT`, `TLS_KEY` | PEM files, to serve HTTPS. Browsers run the app only over HTTPS or on `localhost`. |
-| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | The Telegram app identity from [my.telegram.org](https://my.telegram.org). |
-| `TELEGRAM_TEST_DC` | `1` to use Telegram's test servers, for development. |
+| `HOST`, `PORT` | Where the server listens (default `127.0.0.1:8080`). |
+| `STATIC_DIR` | Path to the built app (`app/dist`). |
+| `INDEX_FILE` | Path to the sticker pack index. Keep it on a disk that gets backed up. |
+| `TLS_CERT`, `TLS_KEY` | PEM certificate and key files for HTTPS. Browsers only allow the app over HTTPS or `localhost`. |
+| `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram API credentials from [my.telegram.org](https://my.telegram.org). |
+| `TELEGRAM_TEST_DC` | Set to `1` to use Telegram's test servers during development. |
 
 ## Tests
 
 ```sh
-cd app && npm test               # the app, against simulated Telegram, Signal and index servers
-cd app && npm run test:attestation   # the exchange with contact discovery against a stand-in enclave, as WebAssembly in Node.js
-cd crates/server && cargo test   # the server
-cd crates/signal-wasm && cargo test --target x86_64-unknown-linux-gnu   # the WebAssembly module's Rust code, run natively
-cd app && npm run screens        # a screenshot of every screen, in build/screens
-cd app && npm run test:integration   # what needs a real Chrome; after `npm run build`
+cd app && npm test                                                    # app tests against simulated Telegram, Signal, and index servers
+cd app && npm run test:attestation                                    # contact discovery in Node.js (WebAssembly) against a mock enclave
+cd crates/server && cargo test                                        # server tests
+cd crates/signal-wasm && cargo test --target x86_64-unknown-linux-gnu # signal-wasm Rust tests, run natively
+cd app && npm run screens                                             # screenshots of every screen in build/screens
+cd app && npm run test:integration                                    # Chrome integration tests (run after `npm run build`)
 ```
 
-The integration tests (`app/integration/`) drive a headless Chrome over its DevTools protocol. `built-app.test.ts`
-starts the real server on the built app; each of its tests checks one thing that only the real server, the built
-files and a real browser together show. `pictures.test.ts` converts stickers with the app's conversion and compares
-them with their originals, which needs the browser's canvas and workers.
+The integration tests (`app/integration/`) drive headless Chrome over the Chrome DevTools Protocol. `built-app.test.ts`
+runs the real server against the built app to test things that only show up with the real server, built files, and a
+real browser together. `pictures.test.ts` runs the app's sticker conversion and compares the output against the
+originals, which needs a real browser's canvas and workers.
