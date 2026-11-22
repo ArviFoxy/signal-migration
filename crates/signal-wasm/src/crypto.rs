@@ -43,11 +43,7 @@ pub(crate) fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
 }
 
 fn random_bytes<const N: usize>() -> [u8; N] {
-    let mut bytes = [0u8; N];
-    OsRng
-        .try_fill_bytes(&mut bytes)
-        .expect("the browser provides randomness");
-    bytes
+    OsRng.unwrap_err().random()
 }
 
 /// A whole number from `min` to `max`, each equally likely, drawn with the `rand` library from the browser's
@@ -220,7 +216,21 @@ impl AttachmentEncryptor {
     pub fn new(plaintext_size: u32) -> AttachmentEncryptor {
         let key: [u8; 64] = random_bytes();
         let iv: [u8; 16] = random_bytes();
-        Self::with_key_and_iv(plaintext_size, key, iv)
+        let cipher = Encryptor::<Aes256>::new_from_slices(&key[..32], &iv).expect("32-byte key and 16-byte IV");
+        let mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&key[32..]).expect("32-byte HMAC key");
+        AttachmentEncryptor {
+            key,
+            iv,
+            iv_emitted: false,
+            cipher,
+            mac,
+            digest: Sha256::new(),
+            pending: [0u8; 16],
+            pending_len: 0,
+            written: 0,
+            expected_plaintext: plaintext_size,
+            finished: false,
+        }
     }
 
     /// Encrypts one plaintext chunk, returning the ciphertext bytes produced so far (prepended with the IV on the
@@ -292,24 +302,6 @@ impl AttachmentEncryptor {
 }
 
 impl AttachmentEncryptor {
-    fn with_key_and_iv(plaintext_size: u32, key: [u8; 64], iv: [u8; 16]) -> AttachmentEncryptor {
-        let cipher = Encryptor::<Aes256>::new_from_slices(&key[..32], &iv).expect("32-byte key and 16-byte IV");
-        let mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&key[32..]).expect("32-byte HMAC key");
-        AttachmentEncryptor {
-            key,
-            iv,
-            iv_emitted: false,
-            cipher,
-            mac,
-            digest: Sha256::new(),
-            pending: [0u8; 16],
-            pending_len: 0,
-            written: 0,
-            expected_plaintext: plaintext_size,
-            finished: false,
-        }
-    }
-
     fn emit_iv(&mut self, out: &mut Vec<u8>) {
         if self.iv_emitted {
             return;
@@ -407,23 +399,11 @@ mod tests {
     // Detects: block-boundary or streaming bugs in AttachmentEncryptor compared to one-shot Signal AES-CBC + HMAC + SHA-256.
     #[test]
     fn streaming_attachment_encryptor_matches_one_shot_and_decrypts() {
-        let key = [0x42u8; 64];
-        let iv = [0x11u8; 16];
         for len in [0usize, 1, 15, 16, 17, 541, 542, 4096, 10_003] {
             let plaintext: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
 
-            // One-shot reference using signal_crypto directly.
-            let padded_len = padded_attachment_size(len as u32) as usize;
-            let mut padded = plaintext.clone();
-            padded.resize(padded_len, 0);
-            let cbc = aes_256_cbc_encrypt(&padded, &key[..32], &iv).unwrap();
-            let authenticated = [iv.as_slice(), &cbc].concat();
-            let mac = hmac_sha256(&key[32..], &authenticated);
-            let expected = [authenticated, mac].concat();
-            let expected_digest = Sha256::digest(&expected).to_vec();
-
             // Streaming with irregular chunk sizes (3, 13, 16, 257 bytes).
-            let mut enc = AttachmentEncryptor::with_key_and_iv(len as u32, key, iv);
+            let mut enc = AttachmentEncryptor::new(len as u32);
             let mut streamed = Vec::new();
             let mut offset = 0;
             for step in [3usize, 13, 16, 257].into_iter().cycle() {
@@ -437,6 +417,18 @@ mod tests {
             let finished = enc.finish().unwrap();
             streamed.extend_from_slice(&finished.tail);
 
+            // One-shot reference using signal_crypto directly with the generated key and IV.
+            let iv = &streamed[..16];
+            let padded_len = padded_attachment_size(len as u32) as usize;
+            let mut padded = plaintext.clone();
+            padded.resize(padded_len, 0);
+            let cbc = aes_256_cbc_encrypt(&padded, &finished.key[..32], iv).unwrap();
+            let authenticated = [iv, &cbc].concat();
+            let mac = hmac_sha256(&finished.key[32..], &authenticated);
+            let expected = [authenticated, mac].concat();
+            let expected_digest = Sha256::digest(&expected).to_vec();
+
+            assert_eq!(finished.key.len(), 64);
             assert_eq!(streamed.len(), encrypted_attachment_size(len as u32) as usize);
             assert_eq!(finished.ciphertext_size as usize, streamed.len());
             assert_eq!(streamed, expected);
