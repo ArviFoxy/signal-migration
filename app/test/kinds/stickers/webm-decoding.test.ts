@@ -197,3 +197,20 @@ it('scales with a Lanczos filter and sharpens, as worked out independently', () 
   // The filter leaves a faint halo beside a hard edge, and overshoots inside it: both are there.
   expect(expected.some((value, at) => at % 4 === 3 && value > 0 && value < 30)).toBe(true);
 });
+
+// Detects: reused Lanczos taps or scratch buffers corrupting frames after frame 0 when downscaling multiple frames.
+it('reuses cached resize taps accurately across multiple downscaled frames', () => {
+  const frames = renderWebm(decoder, file, 32, 10, 5);
+  expect(frames).toHaveLength(5);
+  frames.forEach((frame, f) => {
+    const left = Math.round(squareLeft(f) / 2);
+    expect(isRed(pixel(frame, 32, left + 1, 12)), `frame ${f}`).toBe(true);
+    expect(isClear(pixel(frame, 32, Math.max(0, left - 2), 12)), `frame ${f}`).toBe(true);
+  });
+});
+
+// Detects: invalid render dimensions or frame rates bypassing validation in webm_render.
+it('rejects invalid render dimensions and frame rates', () => {
+  expect(() => renderWebm(decoder, file, 0, 10, 1)).toThrow('invalid render parameters');
+  expect(() => renderWebm(decoder, file, 32, 0, 1)).toThrow('invalid render parameters');
+});

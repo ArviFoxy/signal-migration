@@ -90,6 +90,7 @@ static void video_close(Video *video) {
 
 static int video_open(Video *video, const uint8_t *data, int size) {
   memset(video, 0, sizeof *video);
+  if (size < 0) return fail("invalid video size", AVERROR(EINVAL));
   video->input = (Input){data, size, 0};
   const int buffer_size = 32768;
   uint8_t *buffer = av_malloc(buffer_size);
@@ -201,6 +202,8 @@ EMSCRIPTEN_KEEPALIVE int webm_probe(const uint8_t *data, int size, double *info)
 
 /** How much of the difference between a scaled picture and its blur is added back to it. */
 #define SHARPENING 0.7
+/** Upper bound on decoded and output dimensions so byte-size calculations never overflow 32-bit size_t on wasm32. */
+#define MAX_FRAME_DIM 4096
 
 static double lanczos3(double x) {
   if (x == 0) return 1;
@@ -223,6 +226,9 @@ typedef struct {
 static void taps_free(Taps *taps) {
   free(taps->first);
   free(taps->weights);
+  taps->first = NULL;
+  taps->weights = NULL;
+  taps->count = 0;
 }
 
 static int taps_make(Taps *taps, int length, int target_length) {
@@ -248,6 +254,41 @@ static int taps_make(Taps *taps, int length, int target_length) {
   return 0;
 }
 
+/** Lanczos taps and intermediate buffers reused across frames of the same dimensions during one render call. */
+typedef struct {
+  int width, height, target_width, target_height;
+  Taps across, down;
+  float *rows;
+  float *fitted;
+} ResizeCache;
+
+static void resize_cache_free(ResizeCache *cache) {
+  free(cache->rows);
+  free(cache->fitted);
+  taps_free(&cache->across);
+  taps_free(&cache->down);
+  memset(cache, 0, sizeof *cache);
+}
+
+static int resize_cache_prepare(ResizeCache *cache, int width, int height, int target_width, int target_height) {
+  if (cache->rows && cache->width == width && cache->height == height && cache->target_width == target_width &&
+      cache->target_height == target_height)
+    return 0;
+  resize_cache_free(cache);
+  cache->rows = malloc((size_t)target_width * height * 4 * sizeof(float));
+  cache->fitted = malloc((size_t)target_width * target_height * 4 * sizeof(float));
+  if (!cache->rows || !cache->fitted || taps_make(&cache->across, width, target_width) < 0 ||
+      taps_make(&cache->down, height, target_height) < 0) {
+    resize_cache_free(cache);
+    return -1;
+  }
+  cache->width = width;
+  cache->height = height;
+  cache->target_width = target_width;
+  cache->target_height = target_height;
+  return 0;
+}
+
 /**
  * Resizes premultiplied RGBA `source` (width x height, in rows of `row_pixels` pixels) to `target` (target_width x
  * target_height) with a Lanczos filter, and then sharpens it: the difference between each pixel and the average of
@@ -256,24 +297,19 @@ static int taps_make(Taps *taps, int length, int target_length) {
  * blind comparison on real drawn video stickers this looked best every time. Returns 0, or -1 without memory.
  */
 static int resize_sharp(const uint8_t *source, int row_pixels, int width, int height, uint8_t *target,
-                        int target_width, int target_height) {
-  Taps across = {0}, down = {0};
-  float *rows = malloc((size_t)target_width * height * 4 * sizeof(float));
-  float *fitted = malloc((size_t)target_width * target_height * 4 * sizeof(float));
-  if (!rows || !fitted || taps_make(&across, width, target_width) < 0 || taps_make(&down, height, target_height) < 0) {
-    free(rows);
-    free(fitted);
-    taps_free(&across);
-    taps_free(&down);
-    return -1;
-  }
+                        int target_width, int target_height, ResizeCache *cache) {
+  if (resize_cache_prepare(cache, width, height, target_width, target_height) < 0) return -1;
+  const Taps *across = &cache->across;
+  const Taps *down = &cache->down;
+  float *rows = cache->rows;
+  float *fitted = cache->fitted;
   for (int y = 0; y < height; y++) {
     const uint8_t *line = source + (size_t)y * row_pixels * 4;
     for (int t = 0; t < target_width; t++) {
-      const float *weights = across.weights + (size_t)t * across.count;
+      const float *weights = across->weights + (size_t)t * across->count;
       float sum[4] = {0, 0, 0, 0};
-      for (int k = 0; k < across.count; k++) {
-        const int s = across.first[t] + k;
+      for (int k = 0; k < across->count; k++) {
+        const int s = across->first[t] + k;
         const uint8_t *pixel = line + (size_t)(s < 0 ? 0 : s >= width ? width - 1 : s) * 4;
         for (int c = 0; c < 4; c++) sum[c] += weights[k] * pixel[c];
       }
@@ -281,11 +317,11 @@ static int resize_sharp(const uint8_t *source, int row_pixels, int width, int he
     }
   }
   for (int t = 0; t < target_height; t++) {
-    const float *weights = down.weights + (size_t)t * down.count;
+    const float *weights = down->weights + (size_t)t * down->count;
     for (int x = 0; x < target_width; x++) {
       float sum[4] = {0, 0, 0, 0};
-      for (int k = 0; k < down.count; k++) {
-        const int s = down.first[t] + k;
+      for (int k = 0; k < down->count; k++) {
+        const int s = down->first[t] + k;
         const float *pixel = rows + ((size_t)(s < 0 ? 0 : s >= height ? height - 1 : s) * target_width + x) * 4;
         for (int c = 0; c < 4; c++) sum[c] += weights[k] * pixel[c];
       }
@@ -310,10 +346,6 @@ static int resize_sharp(const uint8_t *source, int row_pixels, int width, int he
       }
     }
   }
-  free(rows);
-  free(fitted);
-  taps_free(&across);
-  taps_free(&down);
   return 0;
 }
 
@@ -331,8 +363,11 @@ static const int *coefficients(enum AVColorSpace space) {
 }
 
 /** Draws the decoded frame into `square` (size x size RGBA): scaled to fit, centred, transparent around it. */
-static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct SwsContext **converter) {
+static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct SwsContext **converter,
+                      ResizeCache *resize) {
   const int width = frame->width, height = frame->height;
+  if (width <= 0 || height <= 0 || width > MAX_FRAME_DIM || height > MAX_FRAME_DIM)
+    return fail("the video has unsupported dimensions", 0);
   // swscale's direct conversion writes pixels two at a time and leaves the last column of an odd width unwritten.
   // Such a frame is converted one column wider, which the rows of a decoded frame have room for, and the extra
   // column is not used. Each row of `rgba` is `converted` pixels long.
@@ -368,7 +403,7 @@ static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct Sw
     // At the video's own size nothing is scaled.
     for (int y = 0; y < height; y++)
       memcpy(fitted + (size_t)y * width * 4, rgba + (size_t)y * converted * 4, (size_t)width * 4);
-  } else if (resize_sharp(rgba, converted, width, height, fitted, fit_width, fit_height) < 0) {
+  } else if (resize_sharp(rgba, converted, width, height, fitted, fit_width, fit_height, resize) < 0) {
     free(rgba);
     free(fitted);
     return fail("out of memory", AVERROR(ENOMEM));
@@ -399,10 +434,13 @@ static int draw_frame(const AVFrame *frame, int size, uint8_t *square, struct Sw
  */
 EMSCRIPTEN_KEEPALIVE int webm_render(const uint8_t *data, int data_size, int size, double frame_rate, int count,
                                      uint8_t *out) {
+  if (size <= 0 || size > MAX_FRAME_DIM || count <= 0 || !isfinite(frame_rate) || frame_rate <= 0)
+    return fail("invalid render parameters", AVERROR(EINVAL));
   const size_t frame_bytes = (size_t)size * size * 4;
   uint8_t *shown = malloc(frame_bytes);
   if (!shown) return fail("out of memory", AVERROR(ENOMEM));
   struct SwsContext *converter = NULL;
+  ResizeCache resize = {0};
   Video video;
   int code = video_open(&video, data, data_size);
   int written = 0, have_shown = 0;
@@ -420,8 +458,9 @@ EMSCRIPTEN_KEEPALIVE int webm_render(const uint8_t *data, int data_size, int siz
     // The output frames before this frame's time show the frame before it.
     if (have_shown)
       while (written < count && written / frame_rate < time - 1e-6)
-        memcpy(out + written++ * frame_bytes, shown, frame_bytes);
-    code = draw_frame(video.frame, size, shown, &converter);
+        memcpy(out + (size_t)written++ * frame_bytes, shown, frame_bytes);
+    if (written >= count) break;
+    code = draw_frame(video.frame, size, shown, &converter, &resize);
     have_shown = code >= 0;
   }
   if (code >= 0 || code == AVERROR_EOF) {
@@ -429,10 +468,11 @@ EMSCRIPTEN_KEEPALIVE int webm_render(const uint8_t *data, int data_size, int siz
       code = fail("the video has no frames", 0);
     } else {
       // The last frame shows until the end.
-      while (written < count) memcpy(out + written++ * frame_bytes, shown, frame_bytes);
+      while (written < count) memcpy(out + (size_t)written++ * frame_bytes, shown, frame_bytes);
       code = written;
     }
   }
+  resize_cache_free(&resize);
   sws_freeContext(converter);
   video_close(&video);
   free(shown);
