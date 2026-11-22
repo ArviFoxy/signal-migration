@@ -14,12 +14,16 @@ const dist = path.resolve(import.meta.dirname, '../dist');
 /** The attestation of a contact discovery enclave that libsignal's own tests record. */
 const recorded = path.resolve(import.meta.dirname, '../../third_party/libsignal/rust/attest/tests/data');
 let site: string;
+let wasmFile: string;
 let chrome: Awaited<ReturnType<typeof launchChrome>>;
 let server: Awaited<ReturnType<typeof startServer>>;
 
 beforeAll(async () => {
-  if (!fs.existsSync(path.join(dist, 'attestation_wasm_bg.wasm')))
-    throw new Error('dist/ is missing: run `npm run build` first');
+  const found = fs.existsSync(dist)
+    ? fs.readdirSync(dist).find((file) => /^attestation_wasm_bg(?:-[0-9a-f]+)?\.wasm$/.test(file))
+    : undefined;
+  if (!found) throw new Error('dist/ is missing: run `npm run build` first');
+  wasmFile = found;
   // The built app, with the module's loader as a file of its own (the app has it inside its bundle) and the
   // recorded attestation beside it.
   site = fs.mkdtempSync(path.join(os.tmpdir(), 'attestation-site-'));
@@ -45,7 +49,7 @@ it('accepts the recorded attestation in the browser and refuses a changed or out
   await tab.navigate(server.base);
   const outcome = await tab.evaluate(`(async () => {
     const module = await import('/loader.js');
-    await module.default({ module_or_path: '/attestation_wasm_bg.wasm' });
+    await module.default({ module_or_path: '/${wasmFile}' });
     const bytes = async (part) => new Uint8Array(await (await fetch('/recorded-' + part + '.bin')).arrayBuffer());
     const [enclaveId, attestation, timestamp] = await Promise.all(['mrenclave', 'handshakestart', 'timestamp'].map(bytes));
     const recordedAt = Number(new DataView(timestamp.buffer).getBigUint64(0));

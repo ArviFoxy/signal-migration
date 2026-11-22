@@ -20,6 +20,8 @@
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
+import { buildVerifier } from '../attestation/runtime';
+import { tdlibFiles } from '../core/assets';
 import { errorMessage } from '../core/errors';
 import { randomHex } from '../core/random';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
@@ -286,6 +288,19 @@ export class TelegramClient {
   async #startRun(run: number, delayMs: number): Promise<void> {
     if (delayMs > 0) await wait(delayMs);
     if (this.#isStopped || run !== this.#run) return;
+    const files = tdlibFiles();
+    if (files.length > 0) {
+      try {
+        await Promise.all(files.map((file) => buildVerifier.verifyAsset(file, import.meta.url)));
+      } catch (error) {
+        this.#isStopped = true;
+        const message = errorMessage(error);
+        this.#stop(new Error(message));
+        this.onFatalError(message, false);
+        return;
+      }
+      if (this.#isStopped || run !== this.#run) return;
+    }
     // Without a copy (a new login, or one whose copy could not be read), TDLib's own database is used.
     if (await this.loginCopies.restore(this.instance).catch(() => false)) this.#hasLoginCopy = true;
     if (this.#isStopped || run !== this.#run) return;

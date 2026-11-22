@@ -4,6 +4,7 @@
 // the relay forwards ciphertext it cannot read or alter.
 
 import { errorMessage } from '../core/errors';
+import { serverWsUrl } from '../core/server';
 
 /** The ciphertext side of a TLS connection object from the WebAssembly module. */
 export interface EncryptedEndpoint {
@@ -11,10 +12,9 @@ export interface EncryptedEndpoint {
   takeEncrypted(): Uint8Array;
 }
 
-/** The relay endpoint on this page's own origin. */
+/** The relay endpoint on the migration server. */
 export function relayUrl(host: string): string {
-  const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${location.host}/tunnel/${host}`;
+  return serverWsUrl(`/tunnel/${host}`);
 }
 
 export class RelayLink {

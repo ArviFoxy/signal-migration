@@ -5,12 +5,12 @@
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { ATTESTATIONS_URL, GITHUB_REPOSITORY_URL } from '../attestation/config';
+import type { BuildVerification } from '../attestation/verify';
 import { connectionDiagram, type DiagramPart, icons, LightElement } from './layout';
 
 export type ConnectionState = 'off' | 'wait' | 'on' | 'ended';
 export type Connection = { state: ConnectionState; status: string; action?: { label: string; event: string } };
-
-const SOURCE_CODE = 'https://github.com/ArviFoxy/signal-migration';
 
 const DOTS: Record<ConnectionState, string> = {
   on: 'bg-accent',
@@ -104,6 +104,8 @@ export class ConnectionsPanel extends LightElement {
   @property({ attribute: false }) clearTarget = '';
   /** Whether there is anything to clear; the button stays in place either way. */
   @property({ attribute: false }) canClear = false;
+  /** Verification result for this build's GitHub Artifact Attestation. */
+  @property({ attribute: false }) build: BuildVerification = { kind: 'unverified', url: ATTESTATIONS_URL };
 
   private card(id: keyof typeof INFO) {
     const info = INFO[id];
@@ -165,6 +167,43 @@ export class ConnectionsPanel extends LightElement {
     </li>`;
   }
 
+  private buildLink() {
+    const base = 'inline-flex items-center gap-2 self-start text-[13px] font-medium';
+    switch (this.build.kind) {
+      case 'checking':
+        return html`<span class="${base} text-muted">${icons.shield('currentColor', 16)} Checking build…</span>`;
+      case 'verified':
+        return html`<a
+          href=${this.build.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="${base} text-muted hover:text-ink"
+        >
+          <span class="inline-flex text-verified">${icons.shieldCheck('currentColor', 16)}</span>
+          Verified build · ${this.build.tag}
+        </a>`;
+      case 'unverified':
+        return html`<a
+          href=${this.build.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="${base} text-muted hover:text-ink"
+        >
+          ${icons.shield('currentColor', 16)} Unverified build
+        </a>`;
+      case 'failed':
+        return html`<a
+          href=${this.build.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          title=${this.build.reason}
+          class="${base} text-danger hover:underline"
+        >
+          ${icons.shieldAlert('currentColor', 16)} Build check failed
+        </a>`;
+    }
+  }
+
   render() {
     return html`<section aria-labelledby="connections-heading-${this.placement}" class="flex flex-col gap-2.5">
       <h2
@@ -184,14 +223,17 @@ export class ConnectionsPanel extends LightElement {
       >
         Disconnect and clear local state
       </button>
-      <a
-        href=${SOURCE_CODE}
-        target="_blank"
-        rel="noopener noreferrer"
-        class="mt-1 inline-flex items-center gap-2 self-start text-[13px] font-medium text-muted hover:text-ink"
-      >
-        ${githubMark} Source code on GitHub
-      </a>
+      <div class="mt-1 flex flex-col gap-1.5">
+        <a
+          href=${GITHUB_REPOSITORY_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          class="inline-flex items-center gap-2 self-start text-[13px] font-medium text-muted hover:text-ink"
+        >
+          ${githubMark} Source code on GitHub
+        </a>
+        ${this.buildLink()}
+      </div>
     </section>`;
   }
 }

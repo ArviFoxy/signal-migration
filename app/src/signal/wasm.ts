@@ -3,11 +3,14 @@
 // Callers that access the module through `signalWasm()` cannot accidentally invoke a WebAssembly export before
 // initialization completes, and a transient fetch failure clears the cached promise so "Try again" can recover.
 
+import { buildVerifier } from '../attestation/runtime';
+import { assetFile } from '../core/assets';
 import { retryableOnce } from '../core/lazy';
 import init, * as wasm from '../wasm/signal_migration_wasm';
 
 const load = retryableOnce(async () => {
-  await init({ module_or_path: '/signal_migration_wasm_bg.wasm' });
+  const input = await buildVerifier.resolveWasmInput(assetFile('signalWasm'), import.meta.url);
+  await init({ module_or_path: input });
   return wasm;
 });
 

@@ -13,6 +13,7 @@
 // handing out a version it read earlier. That risk is accepted: no copy is made to wait.
 
 import { toHex } from '../../core/bytes';
+import { serverHttpUrl } from '../../core/server';
 import { fetchWithTimeLimit, REQUEST_TIME_LIMIT_S, SERVER_TIME_LIMIT_S } from '../../core/time-limit';
 import { fromBinary } from '@bufbuild/protobuf';
 import { type StickerPack, StickerPackSchema } from '../../gen/Stickers_pb';
@@ -54,8 +55,8 @@ export type ManifestSource = (packId: Uint8Array) => Promise<Uint8Array | null>;
 /** Reads one encrypted sticker file of a pack from Signal's CDN; null when the CDN has no such file. */
 export type StickerSource = (packId: Uint8Array, number: number) => Promise<Uint8Array | null>;
 
-const fetchServer = (url: string, init?: RequestInit) =>
-  fetchWithTimeLimit('The migration server', SERVER_TIME_LIMIT_S, url, init);
+const fetchServer = (path: string, init?: RequestInit) =>
+  fetchWithTimeLimit('The migration server', SERVER_TIME_LIMIT_S, serverHttpUrl(path), init);
 
 /** The index on the server that served this page. */
 export const httpIndexBackend: IndexBackend = {

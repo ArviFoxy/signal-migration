@@ -6,6 +6,8 @@
 // module's messages over a WebSocket through the relay. Neither the migration server nor Signal's servers outside
 // the enclave see a phone number.
 
+import { buildVerifier } from '../attestation/runtime';
+import { assetFile } from '../core/assets';
 import { toHex } from '../core/bytes';
 import { retryableOnce } from '../core/lazy';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
@@ -39,9 +41,10 @@ const ALLOWANCE_USED_UP = 4008;
 const NORMAL_CLOSE = 1000;
 
 /** Loads the attestation module once, before any of its functions are used; retries after a load failure. */
-export const loadAttestationWasm: () => Promise<void> = retryableOnce(() =>
-  init({ module_or_path: '/attestation_wasm_bg.wasm' }).then(() => undefined),
-);
+export const loadAttestationWasm: () => Promise<void> = retryableOnce(async () => {
+  const input = await buildVerifier.resolveWasmInput(assetFile('attestationWasm'), import.meta.url);
+  await init({ module_or_path: input });
+});
 
 /** The wait that Signal names in the text of its refusal, `{"retry_after": seconds}`. */
 function waitNamedIn(reason: string): number {
