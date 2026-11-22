@@ -120,6 +120,16 @@ describe('messages to the account’s other devices', () => {
     expect(list).toMatchObject({ online: false, urgent: true, timestamp: expect.any(Number) });
   });
 
+  // Detects: a message that carries a date of its own (a note to self) being sent under the time of sending; Signal's
+  // apps send both with one timestamp. And a phone woken for every one of thousands of notes.
+  it('sends a message under the timestamp it is given, and not as urgent when asked', async () => {
+    const data = await account([1, OUR_DEVICE]);
+    const { chat, sent } = server(data, []);
+    const longAgo = Date.UTC(2020, 0, 2, 3, 4, 5, 678);
+    await sender(data).send(chat, new Uint8Array([1]), { timestamp: longAgo, urgent: false });
+    expect(sent()[0]).toMatchObject({ timestamp: longAgo, urgent: false });
+  });
+
   // Detects: a message list the server refused (409) because the account gained or lost a device, sent again
   // unchanged, so that the new device never hears of the packs.
   it('adds a device the server says is missing and drops one it says is gone', async () => {

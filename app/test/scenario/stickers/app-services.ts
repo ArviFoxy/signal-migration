@@ -15,6 +15,7 @@
 
 import type { FriendSource } from '../../../src/kinds/friends/search';
 import type { PeopleSource } from '../../../src/kinds/friends/telegram-people';
+import type { SavedSource } from '../../../src/kinds/saved/telegram-saved';
 import type * as Td from 'tdlib-types';
 import type {
   AppServices,
@@ -102,6 +103,8 @@ export function appServices(
     saveFails?: boolean;
     /** The people of the Telegram account; none when left out. */
     people?: PeopleSource;
+    /** The messages of the Telegram account's Saved Messages; none when left out. */
+    saved?: SavedSource;
     /** The ways of finding Signal accounts; none when left out. */
     friendSources?: FriendSource[];
   } = {},
@@ -231,6 +234,7 @@ export function appServices(
           readPeople: () => Promise.resolve({ chats: [], people: new Map(), contactIds: [] }),
           readPhoto: () => Promise.reject(new Error('the simulated account has no pictures')),
         },
+        saved: options.saved ?? { readMessages: () => Promise.resolve([]) },
         async checkpoint() {
           if (browser.instances.has(instance)) browser.instances.set(instance, { ...live });
         },
@@ -278,6 +282,7 @@ export function appServices(
       storage: () => account.storage(),
       announceStickerPacks: (packs) => account.announceStickerPacks(packs),
       announceStorageChange: () => account.announceStorageChange(),
+      sendNoteToSelf: (note) => account.sendNoteToSelf(note),
       async unlink() {
         if (options.unlinkNever) await new Promise(() => undefined);
         if (world.signal.failUnlinks > 0) {

@@ -2,6 +2,7 @@
 // requests to a Signal host. In the app both go through our relay (socket.ts, http-client.ts); tests supply
 // simulated ones.
 
+import type { Note } from './note-to-self';
 import type { StorageClient } from './storage';
 
 /** A response on the chat connection, as in Signal's WebSocketResponseMessage. Headers are "name:value". */
@@ -46,6 +47,11 @@ export interface SignalAccount {
    * there, such as new contacts, only after their next start.
    */
   announceStorageChange(): Promise<void>;
+  /**
+   * Puts a message into the account's Note to Self, by sending it to the account's other devices. A note with the
+   * timestamp of one that the devices already have is dropped by them.
+   */
+  sendNoteToSelf(note: Note): Promise<void>;
 }
 
 /** Reads a header from chat response headers. */

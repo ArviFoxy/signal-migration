@@ -23,6 +23,7 @@ export const STEP_LABEL: Record<Step, string> = {
   signal: 'Signal login',
   packs: 'Select sticker packs',
   friends: 'Select friends',
+  saved: 'Select saved messages',
   review: 'Review',
   migrate: 'Migrate',
 };

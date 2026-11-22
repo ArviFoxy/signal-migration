@@ -1,13 +1,20 @@
-// The linked device when Signal refuses its login (signal/connection.ts). Opening the logged-in connection is
-// replaced, so that the server can refuse it; everything above it is the app's own code.
+// The linked device when Signal refuses its login, and when it sends after a reload before WASM is loaded
+// (signal/connection.ts). Opening the logged-in connection is replaced; everything above it is the app's own code.
 
+import { readFileSync } from 'node:fs';
 import { expect, it, vi } from 'vitest';
 import { SignalConnection } from '../src/signal/connection';
 import { SignalSession } from '../src/signal/session';
 import { HandshakeRefusedError } from '../src/signal/socket';
-import './wasm';
+import { loadSignalWasm } from '../src/signal/wasm';
+import { initSync } from '../src/wasm/signal_migration_wasm';
 
 vi.mock('../src/signal/session', () => ({ SignalSession: { open: vi.fn() }, basicAuthorization: () => '' }));
+vi.mock('../src/signal/wasm', () => ({
+  loadSignalWasm: vi.fn(async () => {
+    initSync({ module: readFileSync(new URL('../src/wasm/signal_migration_wasm_bg.wasm', import.meta.url)) });
+  }),
+}));
 
 /** A device as the browser keeps it, with Signal answering its login with `status` at the WebSocket upgrade. */
 function deviceRefusedWith(status: number): SignalConnection {
@@ -44,4 +51,42 @@ it('keeps a device linked when its login fails for another reason', async () => 
   const device = deviceRefusedWith(500);
   await expect(device.unlink()).rejects.toThrow(HandshakeRefusedError);
   expect(device.isLinked).toBe(true);
+});
+
+// Detects: sending a note to self on a restored device after a reload crashing because the Signal WebAssembly module
+// has not been loaded yet (nothing else on a saved-messages-only reload loads it first).
+it('loads Signal WebAssembly before sending a note to self on a restored device', async () => {
+  const pair = (await crypto.subtle.generateKey({ name: 'X25519' }, true, ['deriveBits'])) as CryptoKeyPair;
+  const publicRaw = new Uint8Array(await crypto.subtle.exportKey('raw', pair.publicKey));
+  const pkcs8 = new Uint8Array(await crypto.subtle.exportKey('pkcs8', pair.privateKey));
+  const requests: { verb: string; path: string }[] = [];
+  vi.mocked(SignalSession.open).mockResolvedValue({
+    onUnexpectedClose: () => undefined,
+    async request(verb: string, path: string) {
+      requests.push({ verb, path });
+      return {
+        status: verb === 'GET' ? 404 : 200,
+        message: '',
+        headers: [],
+        body: new Uint8Array(),
+      };
+    },
+  } as unknown as SignalSession);
+
+  const device = SignalConnection.restore({
+    aci: 'simulated-account',
+    deviceId: 3,
+    password: 'simulated',
+    storageServiceKey: new Uint8Array(32).fill(7),
+    identityPublic: new Uint8Array([0x05, ...publicRaw]),
+    identityPrivate: pkcs8.slice(-32),
+    registrationId: 1,
+  });
+
+  await device.sendNoteToSelf({ timestamp: 1_700_000_000_000, body: 'hello', styles: [] });
+  expect(loadSignalWasm).toHaveBeenCalled();
+  expect(requests.map((r) => `${r.verb} ${r.path}`)).toEqual([
+    'GET /v2/keys/simulated-account/*',
+    'PUT /v1/messages/simulated-account',
+  ]);
 });

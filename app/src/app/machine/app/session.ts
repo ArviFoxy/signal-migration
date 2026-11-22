@@ -5,6 +5,7 @@ import type { Context } from '../core';
 import type { AppEvent } from '../events';
 import { friendsTransition, type FriendsEvent, type FriendsState } from '../friends';
 import { packsTransition, type PacksEvent, type PacksState } from '../packs';
+import { savedTransition, type SavedEvent, type SavedState } from '../saved';
 import { signalTransition, signalWork, type SignalEvent, type SignalState } from '../signal';
 import { telegramTransition, telegramWork, type TelegramEvent, type TelegramState } from '../telegram';
 import type { Work } from '../work';
@@ -12,13 +13,14 @@ import { type EndReason, type Session, type SessionState, sessionOf } from './st
 import { type Chosen, setupStepShown, type Step } from './steps';
 
 /** What a new visit starts with: sticker packs. Looking for friends asks Signal about phone numbers, so the user chooses it. */
-export const INITIAL_CHOICE: Chosen = { stickers: true, friends: false };
+export const INITIAL_CHOICE: Chosen = { stickers: true, friends: false, saved: false };
 
 const isTelegramEvent = (event: AppEvent): event is TelegramEvent =>
   event.type.startsWith('telegram/') || event.type.startsWith('record/');
 const isSignalEvent = (event: AppEvent): event is SignalEvent => event.type.startsWith('signal/');
 const isPacksEvent = (event: AppEvent): event is PacksEvent => event.type.startsWith('packs/');
 const isFriendsEvent = (event: AppEvent): event is FriendsEvent => event.type.startsWith('friends/');
+const isSavedEvent = (event: AppEvent): event is SavedEvent => event.type.startsWith('saved/');
 
 /** The notice an event brings, or the current one. */
 function noticeAfter(notice: string | null, event: AppEvent): string | null {
@@ -36,11 +38,12 @@ const withoutError = <S extends { error?: string | null }>(state: S): S =>
 
 /** Passes `event` to the session's machines; each ignores the events that are not its own. */
 export function toMachines<S extends SessionState>(state: S, event: AppEvent, context: Context): S {
-  let { telegram, signal, packs, friends, tickedFriends } = state;
+  let { telegram, signal, packs, friends, tickedFriends, saved } = state;
   if (isTelegramEvent(event)) telegram = telegramTransition(telegram, event, context);
   if (isSignalEvent(event)) signal = signalTransition(signal, event, context);
   if (isPacksEvent(event)) packs = packsTransition(packs, event, context);
   if (isFriendsEvent(event)) friends = friendsTransition(friends, event, context);
+  if (isSavedEvent(event)) saved = savedTransition(saved, event, context);
   if (event.type === 'tick-friends') {
     const others = tickedFriends.filter((userId) => !event.userIds.includes(userId));
     tickedFriends = event.ticked ? [...others, ...event.userIds] : others;
@@ -60,8 +63,9 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
     packs === state.packs &&
     friends === state.friends &&
     tickedFriends === state.tickedFriends &&
+    saved === state.saved &&
     notice === state.notice;
-  return same ? state : { ...state, telegram, signal, packs, friends, tickedFriends, notice };
+  return same ? state : { ...state, telegram, signal, packs, friends, tickedFriends, saved, notice };
 }
 
 export { sessionOf };
@@ -129,6 +133,20 @@ export function friendsFollowAccounts(session: Session): Session {
   return { ...session, friends: looking };
 }
 
+/**
+ * The saved messages follow the login, as the packs do: read for each new signed-in instance when the user chose
+ * them, dropped when there is no login.
+ */
+export function savedFollowLogin(session: Session): Session {
+  const instance = session.chosen.saved ? signedInInstance(session.telegram) : null;
+  const saved = session.saved;
+  const current = saved.kind === 'none' ? null : saved.instance;
+  if (instance === current) return session;
+  if (!instance && session.telegram.kind === 'saving') return session;
+  const next: SavedState = instance ? { kind: 'reading', instance, attempt: 1, read: 0 } : { kind: 'none' };
+  return { ...session, saved: next };
+}
+
 /** A Signal device linked by an earlier version is unlinked, so that the user links again. */
 export function unlinkOldDevice(session: Session, context: Context): Session {
   const signal = session.signal;
@@ -158,6 +176,9 @@ export function beginEnding(state: SessionState, reason: EndReason, context: Con
     deselected: cleared ? [] : state.deselected,
     friends: cleared ? { kind: 'none' } : state.friends,
     tickedFriends: cleared ? [] : state.tickedFriends,
+    saved: cleared ? { kind: 'none' } : state.saved,
+    savedFrom: cleared ? null : state.savedFrom,
+    savedSentUpTo: cleared ? null : state.savedSentUpTo,
     notice: state.notice,
   };
 }
@@ -177,6 +198,9 @@ export function freshSession(state: Session): Session {
     deselected: [],
     friends: { kind: 'none' },
     tickedFriends: [],
+    saved: { kind: 'none' },
+    savedFrom: null,
+    savedSentUpTo: null,
     notice: state.notice,
   };
 }
@@ -202,6 +226,9 @@ export function sessionWork(state: SessionState): Work[] {
       instance: friends.instance,
       search: friends.search,
     });
+  const saved = state.saved;
+  if (saved.kind === 'reading')
+    work.push({ kind: 'read-saved', key: `read-saved:${saved.instance}:${saved.attempt}`, instance: saved.instance });
   if (packs.kind === 'reading')
     work.push({
       kind: 'read-packs',

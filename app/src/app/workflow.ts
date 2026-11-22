@@ -2,6 +2,7 @@
 // state, and the user's actions as events. Nothing here holds state of its own.
 
 import { contactsToAdd } from '../kinds/friends/search';
+import { type LeftOut, leftOutFrom, mediaSummaryFrom, messagesToCopy, notYetSent } from '../kinds/saved/copy';
 import type { PackEntry, StickerMigration } from '../kinds/stickers/migration';
 import { DEFAULT_DEVICE_NAME } from '../signal/device-name';
 import {
@@ -18,13 +19,14 @@ import {
 } from './machine/app';
 import type { Context } from './machine/core';
 import type { FriendsState } from './machine/friends';
+import type { SavedState } from './machine/saved';
 import { Runtime } from './machine/runtime';
 import { initialSignal, type SignalState } from './machine/signal';
 import { initialTelegram, type LoginMethod, type LoginQuery, type TelegramState } from './machine/telegram';
 import type { AppServices, StoredDevice } from './services';
 
 export { type Chosen, STEPS, type SetupStep, type Step, stepIncluded } from './machine/app';
-export type { FriendsState };
+export type { FriendsState, SavedState };
 export type { AppState };
 
 /** The Telegram login as the Telegram step shows it. */
@@ -173,6 +175,42 @@ export class Workflow extends Runtime {
     return state.kind === 'done' && state.chosen.friends ? this.friendsToAdd : null;
   }
 
+  /** The reading of Saved Messages: none while they are not chosen or Telegram is not signed in. */
+  get saved(): SavedState {
+    return isSession(this.state) ? this.state.saved : { kind: 'none' };
+  }
+
+  /** The date from which the saved messages are copied (seconds since 1970); null copies from the first message. */
+  get savedFrom(): number | null {
+    return isSession(this.state) ? this.state.savedFrom : null;
+  }
+
+  copySavedFrom(from: number | null): void {
+    this.dispatch({ type: 'copy-saved-from', from });
+  }
+
+  /**
+   * The saved messages of the chosen dates: how many are copied, how many of them are in Signal, how many carry
+   * media (and their known byte size), and how many are left out, by the reason. Null until the messages are read.
+   */
+  get savedCopy(): {
+    toCopy: number;
+    copied: number;
+    withMedia: number;
+    mediaBytes: number;
+    leftOut: LeftOut;
+  } | null {
+    const state = this.state;
+    if (!isSession(state) || state.saved.kind !== 'read') return null;
+    const toCopy = messagesToCopy(state.saved.messages, state.savedFrom);
+    return {
+      toCopy: toCopy.length,
+      copied: toCopy.length - notYetSent(toCopy, state.savedSentUpTo).length,
+      ...mediaSummaryFrom(state.saved.messages, state.savedFrom),
+      leftOut: leftOutFrom(state.saved.messages, state.savedFrom),
+    };
+  }
+
   /** The pack list, once read. */
   get stickers(): StickerMigration | null {
     const state = this.state;
@@ -190,7 +228,11 @@ export class Workflow extends Runtime {
   /** Each kind the user chose is ready for the migration: the packs are read, the friends are looked for. */
   get ready(): boolean {
     const chosen = this.chosen;
-    return (!chosen.stickers || this.packsReady) && (!chosen.friends || this.friends.kind === 'found');
+    return (
+      (!chosen.stickers || this.packsReady) &&
+      (!chosen.friends || this.friends.kind === 'found') &&
+      (!chosen.saved || this.saved.kind === 'read')
+    );
   }
 
   /** The run stopped with an error. */
@@ -203,6 +245,7 @@ export class Workflow extends Runtime {
     const state = this.state;
     if (!isSession(state)) return null;
     if (state.friends.kind === 'failed') return state.friends.error;
+    if (state.saved.kind === 'failed') return state.saved.error;
     if (state.packs.kind === 'failed') return state.packs.error;
     if (state.packs.kind === 'read' && state.packs.signalError) return state.packs.signalError;
     if (state.kind === 'migrating' && state.run.error) return state.run.error;
@@ -243,16 +286,16 @@ export class Workflow extends Runtime {
     this.dispatch({ type: 'start-migration' });
   }
 
-  /** Runs again what failed: reading packs, reading Signal, or the packs that failed to migrate. */
+  /** Runs again what failed: reading packs, reading Signal, reading friends or saved messages, or the run. */
   tryAgain(): void {
     const state = this.state;
-    if (state.kind === 'migrating') {
+    if (state.kind === 'migrating' && state.run.status !== 'running') {
       this.stickers?.retryFailed();
       this.dispatch({ type: 'run/retry' });
-    } else {
-      this.dispatch({ type: 'packs/try-again' });
-      this.dispatch({ type: 'friends/try-again' });
     }
+    this.dispatch({ type: 'packs/try-again' });
+    this.dispatch({ type: 'friends/try-again' });
+    this.dispatch({ type: 'saved/try-again' });
   }
 
   dismissError(): void {

@@ -1748,11 +1748,14 @@ dependencies = [
 name = "signal-migration-wasm"
 version = "0.1.0"
 dependencies = [
+ "aes",
  "base64",
+ "cbc",
  "futures-util",
  "getrandom 0.3.4",
  "getrandom 0.4.3",
  "hkdf",
+ "hmac",
  "httparse",
  "js-sys",
  "libsignal-account-keys",

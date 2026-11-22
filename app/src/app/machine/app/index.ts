@@ -77,7 +77,7 @@ export function recordOf(state: AppState): Record | null | undefined {
   const ending = state.kind === 'ending' || state.kind === 'end-failed' || state.kind === 'done';
   if (ending && nothingKept) return null;
   return {
-    version: 4,
+    version: 5,
     phase: ending ? 'ending' : state.kind === 'migrating' ? 'migrating' : 'setup',
     step: state.kind === 'setup' ? state.step : 'review',
     why: state.kind === 'ending' || state.kind === 'end-failed' ? state.reason : ending ? 'finish' : null,
@@ -86,5 +86,7 @@ export function recordOf(state: AppState): Record | null | undefined {
     chosen: state.chosen,
     deselected,
     tickedFriends: state.tickedFriends,
+    savedFrom: state.savedFrom,
+    savedSentUpTo: state.savedSentUpTo,
   };
 }

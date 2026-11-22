@@ -8,6 +8,7 @@ import { systemClock } from '../core/clock';
 import { fetchWithTimeLimit, SERVER_TIME_LIMIT_S } from '../core/time-limit';
 import { type FriendSource, phoneNumberSource } from '../kinds/friends/search';
 import { type PeopleSource, peopleOf } from '../kinds/friends/telegram-people';
+import { type SavedSource, savedMessagesOf } from '../kinds/saved/telegram-saved';
 import { browserPictures } from '../kinds/stickers/compare-pictures';
 import { convertSticker } from '../kinds/stickers/convert';
 import type { MigrationServices } from '../kinds/stickers/migration';
@@ -34,6 +35,8 @@ export interface TelegramSession {
   readonly source: TelegramSource;
   /** The people of the account: its one-to-one chats, the members of its groups and its contact list. */
   readonly people: PeopleSource;
+  /** The messages of the account's Saved Messages. */
+  readonly saved: SavedSource;
   /** Saves the login in this browser now. */
   checkpoint(): Promise<void>;
   /** Ends the session on Telegram's side; resolves once Telegram has answered. */
@@ -138,6 +141,7 @@ export const realServices: AppServices = {
         invoke: client.invoke,
         source: telegramSource(client),
         people: peopleOf(client),
+        saved: savedMessagesOf(client),
         checkpoint: () => client.checkpoint(),
         logOut: () => client.logOut(),
         terminate: () => client.terminate(),

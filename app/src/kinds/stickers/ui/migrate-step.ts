@@ -84,6 +84,8 @@ export class StickerMigrateStep extends MigrationView {
   @property({ attribute: false }) stickers = true;
   /** The friends chosen to be added and how many the run has added, once it has; null when friends are not chosen. */
   @property({ attribute: false }) friends: { toAdd: number; added: number | null } | null = null;
+  /** The saved messages to copy and how many of them are in Signal, or 'reading' after a reload; null if not chosen. */
+  @property({ attribute: false }) saved: { toCopy: number; copied: number } | 'reading' | null = null;
   /** The run stopped with an error. */
   @property({ attribute: false }) failed = false;
   @state() private filter: Filter = 'all';
@@ -290,7 +292,7 @@ export class StickerMigrateStep extends MigrationView {
         </button>`;
     }
     const retry =
-      failed > 0 || migration.announceError
+      failed > 0 || migration.announceError || this.failed
         ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
             ${failed > 0 ? 'Retry failed packs' : 'Try again'}
           </button>`
@@ -351,7 +353,40 @@ export class StickerMigrateStep extends MigrationView {
     </section>`;
   }
 
-  /** The migration of friends alone, when the user did not choose sticker packs. */
+  /** What happens to the saved messages: their progress, beside the packs or on its own. */
+  private savedBlock() {
+    const saved = this.saved;
+    if (!saved) return nothing;
+    if (saved === 'reading') {
+      return html`<section
+        aria-label="Saved Messages"
+        class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+      >
+        <span class="text-sm font-semibold">Saved Messages</span>
+        <span class="text-sm text-muted">Reading your Saved Messages…</span>
+      </section>`;
+    }
+    const count = `${saved.toCopy.toLocaleString('en')} message${saved.toCopy === 1 ? '' : 's'}`;
+    const done = saved.copied >= saved.toCopy;
+    const text =
+      saved.toCopy === 0
+        ? 'Nothing to copy'
+        : done
+          ? `${count} copied to Note to Self`
+          : `${saved.copied.toLocaleString('en')} of ${count} copied to Note to Self`;
+    return html`<section
+      aria-label="Saved Messages"
+      class="flex flex-col gap-2 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+    >
+      <div class="flex items-center justify-between gap-3">
+        <span class="text-sm font-semibold">Saved Messages</span>
+        <span class="text-sm text-muted tabular-nums">${text}</span>
+      </div>
+      ${saved.toCopy === 0 || done ? nothing : progressBar('Saved messages copied', saved.copied, saved.toCopy)}
+    </section>`;
+  }
+
+  /** The migration without sticker packs: friends, saved messages or both. */
   private withoutPacks() {
     const title = this.finished ? 'Done and logged out' : this.ending ? 'Migration finished' : 'Migrating';
     const description = this.finished
@@ -368,7 +403,7 @@ export class StickerMigrateStep extends MigrationView {
           : html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
               Back to start
             </button>`;
-    return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()}
+    return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
     ${stickyFooter(html`<span></span>${action}`)}`;
   }
 
@@ -384,7 +419,11 @@ export class StickerMigrateStep extends MigrationView {
           )
         : stepHeader(this.position, 'Migrating', 'Reading your packs from Telegram…');
     const selected = migration.selected;
-    const ended = migration.phase === 'done' || migration.phase === 'stopped';
+    const stickersEnded = migration.phase === 'done' || migration.phase === 'stopped';
+    const friendsDone = !this.friends || this.friends.toAdd === 0 || this.friends.added !== null;
+    const savedDone = !this.saved || (this.saved !== 'reading' && this.saved.copied >= this.saved.toCopy);
+    const allDone = stickersEnded && friendsDone && savedDone && !this.failed;
+    const ended = this.failed || allDone;
     const done = selected.filter((entry) => entry.state === 'in-signal').length;
     const failed = selected.filter((entry) => entry.state === 'failed').length;
     const remainingUploads = migration.uploadQueue.filter(
@@ -406,7 +445,7 @@ export class StickerMigrateStep extends MigrationView {
       : this.ending
         ? 'Logging out of Telegram and Signal…'
         : 'Keep this tab open until the uploads finish. After a reload, it continues where it stopped.';
-    const title = this.finished ? 'Done and logged out' : ended || this.ending ? 'Migration finished' : 'Migrating';
+    const title = this.finished ? 'Done and logged out' : allDone || this.ending ? 'Migration finished' : 'Migrating';
 
     return html`${stepHeader(this.position, title, description)}
     ${stickyBar(
@@ -418,7 +457,7 @@ export class StickerMigrateStep extends MigrationView {
           ${progressBar('Packs in your Signal', done, selected.length)}
         </div>
         <div class="flex flex-wrap items-center justify-between gap-3">
-          <span class="text-sm">${this.statusLine(ended, failed, remainingUploads)}</span>
+          <span class="text-sm">${this.statusLine(stickersEnded, failed, remainingUploads)}</span>
           <div
             role="group"
             aria-label="Filter the list"
@@ -440,7 +479,7 @@ export class StickerMigrateStep extends MigrationView {
           </div>
         </div>`,
     )}
-    ${this.friendsBlock()}
+    ${this.friendsBlock()} ${this.savedBlock()}
     ${migration.stopReason ? html`<p class="text-danger" role="alert">${migration.stopReason}.</p>` : nothing}
     ${
       shown.length === 0

@@ -6,6 +6,7 @@
 // encryption, and whatever a kind uses on top of it.
 
 import type { ManifestRecord } from '../../src/gen/SignalStorage_pb';
+import type { Note } from '../../src/signal/note-to-self';
 import { basicAuthorization } from '../../src/signal/session';
 import { StorageClient } from '../../src/signal/storage';
 import type { ChatChannel, SignalAccount } from '../../src/signal/transport';
@@ -49,6 +50,10 @@ export class SimulatedAccount implements SignalAccount {
 
   async announceStorageChange(): Promise<void> {
     this.signal.deliverToOtherDevices(this.aci, this.deviceId, []);
+  }
+
+  async sendNoteToSelf(note: Note): Promise<void> {
+    this.signal.deliverNote(this.aci, this.deviceId, note);
   }
 }
 

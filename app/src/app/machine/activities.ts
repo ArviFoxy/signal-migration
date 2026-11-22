@@ -4,6 +4,7 @@
 
 import { withTimeLimit } from '../../core/time-limit';
 import { addContacts, findFriends } from '../../kinds/friends/search';
+import { copyToNoteToSelf } from '../../kinds/saved/copy';
 import { StickerMigration } from '../../kinds/stickers/migration';
 import { LinkingCancelledError } from '../../signal/link';
 import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from '../services';
@@ -28,6 +29,8 @@ export type WorkContext = {
 
 /** How many Telegram pictures are read at the same time. */
 const PHOTOS_AT_ONCE = 6;
+/** While saved messages are copied, the state hears of the last one sent at most this often. */
+const SAVED_PROGRESS_EVERY_MS = 500;
 /** How long deleting Telegram data may take; what is left is deleted at the next visit. */
 const DELETE_TIME_LIMIT_MS = 5000;
 
@@ -261,6 +264,49 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         if (!cancel.aborted) emit({ type: 'run/friends-failed', error: message(error) });
       }
       return;
+    case 'read-saved':
+      try {
+        const messages = await sessionOf(resources, work.instance).saved.readMessages((read) =>
+          emit({ type: 'saved/progress', read }),
+        );
+        emit({ type: 'saved/read', messages });
+      } catch (error) {
+        emit({ type: 'saved/failed', error: message(error) });
+      }
+      return;
+    case 'copy-saved': {
+      // Every message sent is reported, but not every one at once: the browser keeps the last one reported, and
+      // writes it each time. What a reload loses of the last half second is sent again, and Signal's apps drop it.
+      let sent: number | null = null;
+      let reported: number | null = null;
+      let reportedAt = 0;
+      const report = () => {
+        if (sent === null || sent === reported) return;
+        reported = sent;
+        reportedAt = Date.now();
+        emit({ type: 'run/saved-sent', upTo: sent });
+      };
+      try {
+        await copyToNoteToSelf(
+          deviceOf(context, work.device),
+          work.messages,
+          (id) => {
+            sent = id;
+            if (Date.now() - reportedAt >= SAVED_PROGRESS_EVERY_MS) report();
+          },
+          cancel,
+          {
+            source: sessionOf(resources, work.instance).saved,
+            convert: context.services.migration().convert,
+          },
+        );
+        report();
+      } catch (error) {
+        report();
+        if (!cancel.aborted) emit({ type: 'run/saved-failed', error: message(error) });
+      }
+      return;
+    }
     case 'run':
       try {
         await work.migration.run(deviceOf(context, work.device), sessionOf(resources, work.instance).source, cancel);

@@ -4,6 +4,7 @@
 // it is not started again.
 
 import type { FriendSearch } from '../../kinds/friends/search';
+import type { SavedMessage } from '../../kinds/saved/messages';
 import type { StickerMigration } from '../../kinds/stickers/migration';
 import type { NewContact } from '../../signal/storage';
 import type { StoredDevice } from '../services';
@@ -40,5 +41,9 @@ export type Work =
   | { kind: 'load-friend-photos'; key: string; instance: string; search: FriendSearch }
   /** Adds the chosen friends to the Signal contacts. */
   | { kind: 'add-friends'; key: string; contacts: NewContact[]; device: StoredDevice }
+  /** Reads the messages of Telegram's Saved Messages. */
+  | { kind: 'read-saved'; key: string; instance: string }
+  /** Sends these saved messages (and any media they carry) to Signal's Note to Self, in their order. */
+  | { kind: 'copy-saved'; key: string; instance: string; messages: SavedMessage[]; device: StoredDevice }
   /** Migrates the selected packs. */
   | { kind: 'run'; key: string; instance: string; migration: StickerMigration; device: StoredDevice };

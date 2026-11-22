@@ -11,6 +11,7 @@ import type { SignalState, UnlinkReason } from '../app/machine/signal';
 import type { TelegramState } from '../app/machine/telegram';
 import type { Step, Workflow } from '../app/workflow';
 import '../kinds/friends/ui/friends-step';
+import '../kinds/saved/ui/saved-step';
 import '../kinds/stickers/ui/migrate-step';
 import '../kinds/stickers/ui/packs-step';
 import '../kinds/stickers/ui/review-step';
@@ -227,7 +228,7 @@ export class MigrationApp extends LightElement {
     const w = this.workflow;
     const chosen = w.chosen;
     const changeable = w.state.kind === 'setup';
-    const choice = (what: 'stickers' | 'friends', title: string) => {
+    const choice = (what: 'stickers' | 'friends' | 'saved', title: string) => {
       const frame = chosen[what] ? 'bg-accent-soft ring-2 ring-accent' : 'bg-white ring-1 ring-line-strong';
       return html`<label class="flex cursor-pointer items-center gap-4 rounded-xl px-5 py-[18px] ring-inset ${frame}">
         <input
@@ -248,13 +249,14 @@ export class MigrationApp extends LightElement {
       <fieldset class="flex min-w-0 flex-col gap-3">
         <legend class="mb-3 text-sm font-semibold">From Telegram</legend>
         ${choice('stickers', 'Sticker packs')} ${choice('friends', 'Find your Telegram friends on Signal')}
+        ${choice('saved', 'Saved Messages')}
       </fieldset>
       ${stickyFooter(
         html`<span></span>
           <button
             type="button"
             class=${primaryButton}
-            ?disabled=${!changeable || !(chosen.stickers || chosen.friends)}
+            ?disabled=${!changeable || !(chosen.stickers || chosen.friends || chosen.saved)}
             @click=${() => w.goTo(this.beside('signal', 1))}
           >
             Start
@@ -367,8 +369,20 @@ export class MigrationApp extends LightElement {
             w.tickFriends(event.detail.userIds, event.detail.ticked)}
           @try-again=${() => w.tryAgain()}
           @back=${() => w.goTo(this.beside('friends', -1))}
-          @next=${() => w.goTo('review')}
+          @next=${() => w.goTo(this.beside('friends', 1))}
         ></friends-step>`;
+      case 'saved':
+        return html`<saved-step
+          class="contents"
+          .saved=${w.saved}
+          .from=${w.savedFrom}
+          .copy=${w.savedCopy}
+          .position=${position}
+          @copy-from=${(event: CustomEvent<{ from: number | null }>) => w.copySavedFrom(event.detail.from)}
+          @try-again=${() => w.tryAgain()}
+          @back=${() => w.goTo(this.beside('saved', -1))}
+          @next=${() => w.goTo('review')}
+        ></saved-step>`;
       case 'review':
         return html`<sticker-review-step
           class="contents"
@@ -376,6 +390,7 @@ export class MigrationApp extends LightElement {
           .position=${position}
           .stickers=${w.chosen.stickers}
           .friends=${w.chosen.friends ? w.friendsToAdd : null}
+          .saved=${w.chosen.saved ? (w.savedCopy?.toCopy ?? 0) : null}
           .ready=${w.ready}
           @back=${() => w.goTo(this.beside('review', -1))}
           @start=${() => w.startMigration()}
@@ -387,6 +402,7 @@ export class MigrationApp extends LightElement {
           .position=${position}
           .stickers=${w.chosen.stickers}
           .friends=${w.chosen.friends ? { toAdd: w.friendsToAdd, added: w.friendsAdded } : null}
+          .saved=${w.chosen.saved ? (w.savedCopy ?? 'reading') : null}
           .failed=${w.runFailed}
           .finished=${w.state.kind === 'done'}
           .ending=${w.state.kind === 'ending'}
