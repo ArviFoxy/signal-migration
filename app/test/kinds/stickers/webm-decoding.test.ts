@@ -9,7 +9,7 @@
 import fs from 'node:fs';
 import createWebmDecoder, { type WebmDecoderModule } from 'webm-decoder';
 import { beforeAll, expect, it } from 'vitest';
-import { probeWebm, renderWebm } from '../../../src/kinds/stickers/webm-decoding';
+import { probeWebm, renderWebm, WebmDecodeError } from '../../../src/kinds/stickers/webm-decoding';
 
 const file = new Uint8Array(fs.readFileSync(new URL('../../fixtures/stickers/moving-square.webm', import.meta.url)));
 let decoder: WebmDecoderModule;
@@ -209,8 +209,85 @@ it('reuses cached resize taps accurately across multiple downscaled frames', () 
   });
 });
 
-// Detects: invalid render dimensions or frame rates bypassing validation in webm_render.
-it('rejects invalid render dimensions and frame rates', () => {
+// Detects: invalid render dimensions, frame rates, empty inputs, or >32-bit output-size requests reaching _malloc
+// or C unchecked.
+it('rejects invalid render dimensions, frame rates, empty files, and oversized outputs', () => {
+  expect(() => probeWebm(decoder, new Uint8Array())).toThrow('invalid video size');
   expect(() => renderWebm(decoder, file, 0, 10, 1)).toThrow('invalid render parameters');
+  expect(() => renderWebm(decoder, file, 4097, 10, 1)).toThrow('invalid render parameters');
   expect(() => renderWebm(decoder, file, 32, 0, 1)).toThrow('invalid render parameters');
+  expect(() => renderWebm(decoder, file, 32, Number.NaN, 1)).toThrow('invalid render parameters');
+  expect(() => renderWebm(decoder, file, 32, 10, 0)).toThrow('invalid render parameters');
+  // 512 x 512 x 4 x 4097 = 4 GiB + 1 MiB would wrap a 32-bit _malloc size without validation.
+  expect(() => renderWebm(decoder, file, 512, 10, 4097)).toThrow('invalid render parameters');
+  // Also exercise C-level validation directly in case a caller bypasses the TypeScript wrapper.
+  const input = decoder._malloc(file.length) >>> 0;
+  const output = decoder._malloc(32 * 32 * 4) >>> 0;
+  try {
+    decoder.HEAPU8.set(file, input);
+    expect(decoder._webm_render(input, file.length, 512, 10, 4097, output)).toBeLessThan(0);
+    // Overlapping input and output buffers must be rejected before decoding overwrites input.
+    expect(decoder._webm_render(input, file.length, 32, 10, 1, input)).toBeLessThan(0);
+    expect(decoder._webm_render(input, file.length, 32, 10, 1, 0)).toBeLessThan(0);
+    expect(decoder._webm_render(0, file.length, 32, 10, 1, output)).toBeLessThan(0);
+    expect(decoder._webm_probe(input, file.length, 0)).toBeLessThan(0);
+    expect(decoder._webm_probe(0, file.length, output)).toBeLessThan(0);
+  } finally {
+    decoder._free(output);
+    decoder._free(input);
+  }
+});
+
+// Detects: a crafted VP9 bitstream declaring oversized dimensions inside a small-dimension WebM container bypassing
+// container checks and triggering multi-gigabyte allocations inside libvpx.
+it('rejects oversized VP9 bitstream dimensions in both video and alpha streams', () => {
+  // Find every VP9 keyframe sync code (0x49 0x83 0x42): first is video, second is alpha.
+  const syncOffsets: number[] = [];
+  for (let i = 0; i < file.length - 8; i++) {
+    if (file[i] === 0x49 && file[i + 1] === 0x83 && file[i + 2] === 0x42) syncOffsets.push(i);
+  }
+  expect(syncOffsets.length).toBeGreaterThanOrEqual(2);
+  for (const sync of syncOffsets.slice(0, 2)) {
+    const crafted = file.slice();
+    // Patch the 16-bit frame_width_minus_1 right after the 4-bit color_config to 0xffff (65536 px).
+    crafted[sync + 3] = (crafted[sync + 3] & 0xf0) | 0x0f;
+    crafted[sync + 4] = 0xff;
+    crafted[sync + 5] = (crafted[sync + 5] & 0x0f) | 0xf0;
+    expect(() => probeWebm(decoder, crafted)).toThrow(WebmDecodeError);
+    expect(() => renderWebm(decoder, crafted, 32, 10, 1)).toThrow(WebmDecodeError);
+  }
+  // Decoder memory and state stay healthy after rejecting crafted bitstreams.
+  expect(probeWebm(decoder, file)).toEqual({ width: 64, height: 48, duration: 1, frameRate: 10 });
+});
+
+// Detects: truncated or corrupted WebM containers crashing or poisoning the WebAssembly decoder instead of throwing
+// a clean WebmDecodeError.
+it('handles truncated and mutated WebM inputs without trapping or poisoning the decoder', () => {
+  const truncations = [1, 4, 16, 48, 128, 300, 400, 455, 615, Math.floor(file.length / 2), file.length - 1];
+  for (const length of truncations) {
+    try {
+      probeWebm(decoder, file.subarray(0, length));
+    } catch (error) {
+      expect(error).toBeInstanceOf(WebmDecodeError);
+    }
+  }
+  // Deterministic mutations spread across EBML header, track metadata, clusters, and VP9 frames.
+  let state = 0x5eed1234;
+  const next = () => ((state = (Math.imul(state, 1664525) + 1013904223) >>> 0), state);
+  for (let trial = 0; trial < 40; trial++) {
+    const mutated = file.slice();
+    const edits = 1 + (next() % 4);
+    for (let e = 0; e < edits; e++) {
+      const at = next() % mutated.length;
+      mutated[at] ^= 1 + (next() % 255);
+    }
+    for (const run of [() => probeWebm(decoder, mutated), () => renderWebm(decoder, mutated, 32, 10, 2)]) {
+      try {
+        run();
+      } catch (error) {
+        expect(error).toBeInstanceOf(WebmDecodeError);
+      }
+    }
+  }
+  expect(probeWebm(decoder, file)).toEqual({ width: 64, height: 48, duration: 1, frameRate: 10 });
 });

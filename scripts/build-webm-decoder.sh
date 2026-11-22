@@ -35,11 +35,12 @@ source "$EMSDK/emsdk_env.sh" >/dev/null 2>&1
 
 jobs=$(nproc)
 
-if [ ! -f "$prefix/lib/libvpx.a" ]; then
+if [ ! -f "$prefix/lib/libvpx.a" ] || ! grep -q "DECODE_WIDTH_LIMIT 4096" "$src/libvpx/vpx_config.h" 2>/dev/null; then
   (
     cd "$src/libvpx"
+    [ ! -f Makefile ] || make distclean >/dev/null 2>&1 || true
     emconfigure ./configure \
-      --prefix="$prefix" --target=generic-gnu \
+      --prefix="$prefix" --target=generic-gnu --size-limit=4096x4096 \
       --disable-vp8 --disable-vp9-encoder --disable-multithread --disable-runtime-cpu-detect \
       --disable-examples --disable-tools --disable-docs --disable-unit-tests --disable-install-bins \
       --enable-static --disable-shared --extra-cflags=-O3
@@ -66,10 +67,11 @@ if [ ! -f "$prefix/lib/libavcodec.a" ]; then
   )
 fi
 
-emcc -O3 "$repo/app/src/kinds/stickers/webm-decoder.c" \
-  -I"$prefix/include" \
+emcc -O3 -Wall -Wextra -Wshadow -Wformat=2 -Wstrict-prototypes -Werror "$repo/app/src/kinds/stickers/webm-decoder.c" \
+  -isystem "$prefix/include" \
   "$prefix/lib/libavformat.a" "$prefix/lib/libavcodec.a" "$prefix/lib/libswscale.a" "$prefix/lib/libavutil.a" \
   "$prefix/lib/libvpx.a" \
+  -Wl,--stack-first -sSTACK_SIZE=524288 -sMAXIMUM_MEMORY=1073741824 \
   -sMODULARIZE=1 -sEXPORT_ES6=1 -sEXPORT_NAME=createWebmDecoder -sENVIRONMENT=web,worker,node \
   -sALLOW_MEMORY_GROWTH=1 -sFILESYSTEM=0 \
   -sEXPORTED_FUNCTIONS=_malloc,_free,_webm_probe,_webm_render,_webm_error \
