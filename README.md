@@ -1,8 +1,9 @@
 # Telegram to Signal Migration 🔒🦊
 
 A web app for moving data from Telegram to Signal: sticker packs, Telegram friends who are on Signal, and Saved
-Messages (copied into Signal's Note to Self). Everything runs in the browser. The server only hosts the static files,
-relays encrypted traffic to Signal, and keeps a shared index of uploaded sticker packs.
+Messages (copied into Signal's Note to Self). Everything runs in the browser. The static frontend can be built and
+hosted on GitHub Pages with signed build provenance, while the Rust server relays encrypted traffic to Signal, keeps a
+shared index of uploaded sticker packs, and optionally serves the static files itself.
 
 ## Parts
 
@@ -21,7 +22,8 @@ relays encrypted traffic to Signal, and keeps a shared index of uploaded sticker
 browser ──── WebSocket, MTProto ─────────────────────────────▶ Telegram (*.web.telegram.org)
 browser ──── WebSocket ──▶ server ──── TCP ─────────────────▶ Signal (chat, storage, cdn, cdsi hosts)
              └──────────── TLS between the browser and Signal ───┘
-browser ──── HTTPS ──────▶ server (app files, sticker pack index)
+browser ──── HTTPS ──────▶ GitHub Pages (static app files, Sigstore attestation bundle)
+browser ──── HTTPS ──────▶ server (/v1/config, sticker pack index; static files in self-hosted mode)
 browser ──── HTTPS ──────────────────────────────────────────▶ Signal's public CDN (cdn-ca.signal.org)
              server ──── HTTPS ─────────────────────────────▶ Signal's public CDN (cdn-ca.signal.org)
 ```
@@ -176,6 +178,32 @@ While a migration is in progress (until it finishes or the user clears it), the 
 
 When the migration finishes, the app unlinks the Signal device, signs out of Telegram, and deletes all of it.
 
+## Verified builds
+
+Publishing a `v*` release triggers `.github/workflows/release.yml`, which builds the web app fresh from source on a
+GitHub-hosted runner (without reusing cached build outputs), signs a single SLSA v1.0 build provenance attestation
+covering every deployed file via GitHub Artifact Attestations (`actions/attest`), and deploys the static files and
+Sigstore bundle (`attestation.sigstore.json`) to GitHub Pages. Hosting the frontend on GitHub Pages separates code
+delivery from the relay/index server.
+
+On startup, the page verifies `attestation.sigstore.json` in the browser (`app/src/attestation/`) against the pinned
+Sigstore Public Good root (`app/src/attestation/trusted-root.json`): the Fulcio X.509 certificate chain and Certificate
+Transparency SCT, the Rekor transparency log inclusion proof and checkpoint, the GitHub Actions OIDC identity
+(repository, `github-hosted` runner, `release` trigger, `refs/tags/v*`, and `.github/workflows/release.yml`), and the
+DSSE signature over the in-toto statement. It then checks the SHA-256 digests of `index.html` and the loaded scripts and
+stylesheets against the signed subject list, and checks lazy WebAssembly modules and workers before instantiating them.
+When verified, the sidebar shows a green shield linking directly to GitHub's attestation page.
+
+An in-page check detects unattested copies, cache skew, and tampered lazy assets, but cannot defend against a compromise
+of GitHub Pages itself (malicious JavaScript served by the page host could draw a fake badge). Because every deployed
+file is listed directly as an attestation subject, any file served by the site can be verified independently outside the
+browser with the GitHub CLI:
+
+```sh
+curl -fsSLO https://arvifoxy.github.io/signal-migration/index.html
+gh attestation verify index.html --repo ArviFoxy/signal-migration
+```
+
 ## Build
 
 You need Node.js, Rust (`rustup` picks the version from `rust-toolchain.toml`), `wasm-bindgen-cli` 0.2.130, CMake, and
@@ -193,7 +221,15 @@ cd ../crates/server && cargo build --release
 
 Dependabot (`.github/dependabot.yml`) checks weekly for updates to npm and Cargo packages, submodules, and GitHub
 Actions. A weekly workflow also runs `scripts/check-pinned-versions.sh` to check the versions pinned in
-`scripts/build-webm-decoder.sh` and `scripts/build-boringssl-wasm.sh`, opening an issue when any fall behind.
+`scripts/build-webm-decoder.sh`, `scripts/build-boringssl-wasm.sh`, and `app/src/attestation/trusted-root.json`, opening
+an issue when any fall behind. `scripts/update-sigstore-root.mjs` refreshes the pinned Sigstore root via TUF.
+
+To build a static frontend that talks to a separate backend origin (as `.github/workflows/release.yml` does for GitHub
+Pages), pass `BACKEND_ORIGIN` and `--no-compress`:
+
+```sh
+cd app && BACKEND_ORIGIN=https://signal.vixhole.fun npm run build -- --no-compress
+```
 
 ## Run
 
@@ -206,7 +242,9 @@ crates/server/target/release/signal-migration-server
 | Variable | Meaning |
 | --- | --- |
 | `HOST`, `PORT` | Where the server listens (default `127.0.0.1:8080`). |
-| `STATIC_DIR` | Path to the built app (`app/dist`). |
+| `STATIC_DIR` | Optional path to the built app (`app/dist`). Omit when hosting the frontend elsewhere (such as GitHub Pages). |
+| `FRONTEND_REDIRECT_URL` | Optional URL that `GET /` redirects to when `STATIC_DIR` is unset. |
+| `ALLOWED_ORIGINS` | Optional comma-separated list of browser origins (e.g. `https://arvifoxy.github.io`) allowed for CORS on `/v1/*` and WebSocket `Origin` checks on `/tunnel/{host}`. |
 | `INDEX_FILE` | Path to the sticker pack index. Keep it on a disk that gets backed up. |
 | `TLS_CERT`, `TLS_KEY` | PEM certificate and key files for HTTPS. Browsers only allow the app over HTTPS or `localhost`. |
 | `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` | Telegram API credentials from [my.telegram.org](https://my.telegram.org). |

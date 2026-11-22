@@ -77,14 +77,23 @@ COPY --from=boringssl-wasm-build /src/build/boringssl-wasm/sysroot /sysroot
 COPY --from=boringssl-wasm-build /src/build/boringssl-wasm/libc /libc
 
 # The web app, with the three above, and the server.
-FROM rust AS build
+FROM rust AS app-build
+ARG BACKEND_ORIGIN=""
+ARG COMPRESS=1
 COPY . .
 COPY --from=tdweb / build/tdweb/dist/
 COPY --from=webm-decoder / build/webm-decoder/
 COPY --from=boringssl-wasm / build/boringssl-wasm/
 RUN --mount=type=cache,target=/root/.npm \
     --mount=type=cache,target=/root/.cargo/registry \
-    cd app && npm ci && npm run build
+    cd app && npm ci \
+    && if [ "$COMPRESS" = "0" ]; then BACKEND_ORIGIN="$BACKEND_ORIGIN" npm run build -- --no-compress; \
+       else BACKEND_ORIGIN="$BACKEND_ORIGIN" npm run build; fi
+
+FROM scratch AS pages
+COPY --from=app-build /src/app/dist /
+
+FROM app-build AS build
 RUN --mount=type=cache,target=/root/.cargo/registry \
     cd crates/server && cargo build --release --locked
 
