@@ -531,3 +531,50 @@ describe('choices', () => {
     expect(page.entry('Huge').selected).toBe(false);
   });
 });
+
+describe('cancellation', () => {
+  // Detects: cancelling a migration while a pack is mid-download or mid-conversion leaving that pack's work running
+  // in the background and still uploading and installing it after cancellation.
+  it('stops an in-flight pack from uploading or installing after cancellation', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const page = alice.openPage();
+    await page.readTelegram();
+    await page.linkSignal();
+
+    let pauseSecondPack!: () => void;
+    let secondPackPaused!: () => void;
+    const paused = new Promise<void>((resolve) => (secondPackPaused = resolve));
+    let packBStarted = false;
+    const slowTelegram = {
+      readPacks: (onProgress: (done: number, total: number) => void) => alice.stickers.readPacks(onProgress),
+      async readFile(fileId: number) {
+        const bytes = await alice.stickers.readFile(fileId);
+        if (!packBStarted && new TextDecoder().decode(bytes).includes(' of B ')) {
+          packBStarted = true;
+          secondPackPaused();
+          await new Promise<void>((resolve) => (pauseSecondPack = resolve));
+        }
+        return bytes;
+      },
+    };
+
+    const controller = new AbortController();
+    const running = page.migration.run(page.account!, slowTelegram, controller.signal);
+    await paused;
+    controller.abort();
+    await expect(running).rejects.toThrow();
+
+    // Even after the in-flight Telegram download resolves later, pack B must not upload or install.
+    pauseSecondPack();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(await alice.installedTitles()).toEqual(['A']);
+    expect(page.entry('B').state).toBe('to-upload');
+
+    // A later run picks up the cancelled pack cleanly.
+    await page.migration.run(page.account!, alice.stickers);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(2);
+    expect(await alice.installedTitles()).toEqual(['A', 'B']);
+  });
+});

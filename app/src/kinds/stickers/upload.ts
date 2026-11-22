@@ -125,20 +125,27 @@ export async function uploadStickerPack(
   packKey: Uint8Array,
   onProgress: (done: number, total: number) => void = () => undefined,
   https: HttpsRequest = httpsRequest,
+  cancel?: AbortSignal,
 ): Promise<Uint8Array> {
   if (content.stickers.length === 0 || content.stickers.length > MAX_STICKERS)
     throw new Error(`a Signal sticker pack holds 1 to ${MAX_STICKERS} stickers, not ${content.stickers.length}`);
+  cancel?.throwIfAborted();
   await loadSignalWasm();
+  cancel?.throwIfAborted();
   const form = await requestUploadForm(chat, content.stickers.length);
+  cancel?.throwIfAborted();
   const total = content.stickers.length + 1;
   let done = 0;
   await postToCdn(https, form.manifest, encryptStickerFile(manifestFor(content), packKey));
+  cancel?.throwIfAborted();
   onProgress(++done, total);
   let next = 0;
   const uploadNext = async () => {
     while (next < content.stickers.length) {
+      cancel?.throwIfAborted();
       const index = next++;
       await postToCdn(https, form.stickers[index], encryptStickerFile(content.stickers[index].image, packKey));
+      cancel?.throwIfAborted();
       onProgress(++done, total);
     }
   };
