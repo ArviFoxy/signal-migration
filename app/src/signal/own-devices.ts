@@ -13,16 +13,11 @@ import {
   SyncMessage_FetchLatest_Type,
   SyncMessage_StickerPackOperation_Type,
 } from '../gen/SignalService_pb';
+import { fromBase64, sameBytes, toBase64 } from '../core/bytes';
 import { randomBytes } from '../core/random';
 import { OwnDeviceSessions, randomInt } from '../wasm/signal_migration_wasm';
 import type { ChatChannel } from './transport';
 
-const fromBase64 = (text: string) => Uint8Array.from(atob(text), (char) => char.charCodeAt(0));
-function toBase64(bytes: Uint8Array): string {
-  let text = '';
-  for (const byte of bytes) text += String.fromCharCode(byte);
-  return btoa(text);
-}
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const parse = <T>(body: Uint8Array) => JSON.parse(new TextDecoder().decode(body)) as T;
 
@@ -99,7 +94,7 @@ export type SenderIdentity = {
 
 /** Sends messages to the account's other devices, keeping the sessions with them for as long as it lives. */
 export class OwnDevices {
-  #sessions: OwnDeviceSessions;
+  #sessions: OwnDeviceSessions | null;
   /** The other devices with a session. */
   #devices = new Set<number>();
   #bundlesRead = false;
@@ -114,6 +109,18 @@ export class OwnDevices {
     );
   }
 
+  /** Frees the WebAssembly sessions and the copy of the account identity key they hold. */
+  free(): void {
+    this.#sessions?.free();
+    this.#sessions = null;
+    this.#devices.clear();
+  }
+
+  #activeSessions(): OwnDeviceSessions {
+    if (!this.#sessions) throw new Error('the device sessions were already closed');
+    return this.#sessions;
+  }
+
   /** Starts sessions from the prekey bundles of the account's devices: all of them (`*`), or one. */
   async #startSessions(chat: ChatChannel, devices: '*' | number): Promise<void> {
     const response = await chat.request('GET', `/v2/keys/${this.sender.aci}/${devices}`);
@@ -123,13 +130,12 @@ export class OwnDevices {
     // Every device of the account shares the account's identity key. A bundle with another key would start a
     // session with someone else, who could then read the packs' keys in the messages.
     const identityKey = fromBase64(bundle.identityKey);
-    const own = this.sender.identity.publicKey;
-    if (identityKey.length !== own.length || identityKey.some((byte, i) => byte !== own[i]))
+    if (!sameBytes(identityKey, this.sender.identity.publicKey))
       throw new Error("Signal answered with an identity key that is not this account's for your other devices");
     for (const device of bundle.devices) {
       if (device.deviceId === this.sender.deviceId) continue;
       const { signedPreKey, pqPreKey, preKey } = device;
-      this.#sessions.startSession(
+      this.#activeSessions().startSession(
         device.deviceId,
         device.registrationId,
         identityKey,
@@ -163,7 +169,7 @@ export class OwnDevices {
     const padded = padMessageBody(content);
     for (let attempt = 0; attempt < 4; attempt++) {
       const messages = [...this.#devices].map((deviceId) => {
-        const encrypted = this.#sessions.encrypt(deviceId, padded);
+        const encrypted = this.#activeSessions().encrypt(deviceId, padded);
         const message = {
           type: encrypted.envelopeType,
           destinationDeviceId: deviceId,

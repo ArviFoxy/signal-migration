@@ -6,7 +6,10 @@ pub mod relay;
 
 use std::path::PathBuf;
 
-use axum::extract::State;
+use axum::extract::{Request, State};
+use axum::http::{HeaderValue, header};
+use axum::middleware::{self, Next};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde::Serialize;
@@ -40,10 +43,20 @@ async fn client_config(State(config): State<ClientConfig>) -> Json<ClientConfig>
     Json(config)
 }
 
-/// The demo: only the built demo's files (app/dist-demo). No tunnel to Signal, no sticker pack index and no
-/// configuration, so that nothing the demo does can reach a real service.
-pub fn demo_router(static_dir: PathBuf) -> Router {
-    Router::new().fallback_service(ServeDir::new(static_dir).precompressed_br().precompressed_gzip())
+/// Unhashed app assets (index.html, main.js, styles.css, *.wasm) must revalidate on deploy so a browser never pairs
+/// a fresh JS bundle with a stale WebAssembly module. Content-hashed font assets are immutable.
+async fn cache_headers(request: Request, next: Next) -> Response {
+    let is_hashed_font = request.uri().path().starts_with("/fonts/");
+    let mut response = next.run(request).await;
+    if !response.headers().contains_key(header::CACHE_CONTROL) {
+        let value = if is_hashed_font {
+            HeaderValue::from_static("public, max-age=31536000, immutable")
+        } else {
+            HeaderValue::from_static("no-cache")
+        };
+        response.headers_mut().insert(header::CACHE_CONTROL, value);
+    }
+    response
 }
 
 pub fn router(config: Config) -> Router {
@@ -62,4 +75,5 @@ pub fn router(config: Config) -> Router {
         .merge(config_routes);
     // Built files have brotli and gzip copies next to them (app/build.mjs); a browser that accepts one gets it.
     app.fallback_service(ServeDir::new(config.static_dir).precompressed_br().precompressed_gzip())
+        .layer(middleware::from_fn(cache_headers))
 }

@@ -6,7 +6,9 @@
 // file itself or a conversion that shows the same.
 
 import { fromBinary } from '@bufbuild/protobuf';
+import { sameBytes } from '../../core/bytes';
 import { StickerPackSchema } from '../../gen/Stickers_pb';
+import { loadSignalWasm } from '../../signal/wasm';
 import { decryptStickerFile } from '../../wasm/signal_migration_wasm';
 import { isPlainPng } from './plain-png';
 import { isPlainWebp } from './plain-webp';
@@ -39,9 +41,6 @@ function decrypted(file: Uint8Array, packKey: Uint8Array): Uint8Array | null {
     return null;
   }
 }
-
-const sameBytes = (one: Uint8Array, other: Uint8Array) =>
-  one.length === other.length && one.every((byte, i) => byte === other[i]);
 
 /** Whether the decrypted manifest is the one this app writes for `original` (upload.ts manifestFor). */
 export function manifestMatches(manifest: Uint8Array, original: OriginalPack): boolean {
@@ -92,6 +91,7 @@ export async function isFaithfulCopy(
   onProgress: (done: number, total: number) => void = () => undefined,
 ): Promise<boolean> {
   if (original.stickers.length === 0) return false;
+  await loadSignalWasm();
   const encryptedManifest = await files.manifest(packId);
   const manifest = encryptedManifest && decrypted(encryptedManifest, packKey);
   if (!manifest || !manifestMatches(manifest, original)) return false;

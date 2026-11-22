@@ -134,6 +134,8 @@ export class SignalConnection implements SignalAccount {
   #markRemoved(): void {
     if (this.#removed) return;
     this.#removed = true;
+    this.#ownDevices?.free();
+    this.#ownDevices = null;
     this.#account.storageServiceKey.fill(0);
     this.#account.identity?.privateKey.fill(0);
     this.#account.credentials.password = '';

@@ -5,6 +5,7 @@
 // Files are streamed through AttachmentEncryptor in WebAssembly and uploaded in 2 MiB chunks so large attachments
 // (up to Signal's 100 MiB ciphertext limit) never need to be buffered in memory at once.
 
+import { toBase64 } from '../core/bytes';
 import { AttachmentEncryptor } from '../wasm/signal_migration_wasm';
 import { type ChatChannel, chatHeader, type HttpResponse, type HttpsRequest, type SignalAccount } from './transport';
 import { loadSignalWasm } from './wasm';
@@ -93,12 +94,6 @@ type AttachmentUploadForm = {
   headers: Record<string, string>;
   signedUploadLocation: string;
 };
-
-function toBase64(bytes: Uint8Array): string {
-  let text = '';
-  for (const byte of bytes) text += String.fromCharCode(byte);
-  return btoa(text);
-}
 
 function abortableWait(ms: number, cancel: AbortSignal): Promise<void> {
   if (cancel.aborted) return Promise.reject(new DOMException('Aborted', 'AbortError'));

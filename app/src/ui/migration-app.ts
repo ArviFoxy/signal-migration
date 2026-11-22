@@ -12,9 +12,7 @@ import type { TelegramState } from '../app/machine/telegram';
 import type { Step, Workflow } from '../app/workflow';
 import '../kinds/friends/ui/friends-step';
 import '../kinds/saved/ui/saved-step';
-import '../kinds/stickers/ui/migrate-step';
 import '../kinds/stickers/ui/packs-step';
-import '../kinds/stickers/ui/review-step';
 import type { Connection, ConnectionState } from './connections-panel';
 import './connections-panel';
 import {
@@ -28,6 +26,8 @@ import {
   stepsFor,
   stickyFooter,
 } from './layout';
+import './migrate-step';
+import './review-step';
 import './signal-step';
 import './telegram-step';
 
@@ -350,9 +350,10 @@ export class MigrationApp extends LightElement {
       case 'packs':
         return html`<sticker-packs-step
           class="contents"
+          .packs=${w.packs}
           .migration=${w.stickers}
           .position=${position}
-          .canTryAgain=${w.canTryAgain}
+          .allowEmpty=${w.chosen.friends || w.chosen.saved}
           @try-again=${() => w.tryAgain()}
           @select=${(event: CustomEvent<{ entries: never[]; selected: boolean }>) =>
             w.setSelected(event.detail.entries, event.detail.selected)}
@@ -384,7 +385,7 @@ export class MigrationApp extends LightElement {
           @next=${() => w.goTo('review')}
         ></saved-step>`;
       case 'review':
-        return html`<sticker-review-step
+        return html`<review-step
           class="contents"
           .migration=${w.stickers}
           .position=${position}
@@ -394,23 +395,21 @@ export class MigrationApp extends LightElement {
           .ready=${w.ready}
           @back=${() => w.goTo(this.beside('review', -1))}
           @start=${() => w.startMigration()}
-        ></sticker-review-step>`;
+        ></review-step>`;
       case 'migrate':
-        return html`<sticker-migrate-step
+        return html`<migrate-step
           class="contents"
           .migration=${w.stickers}
           .position=${position}
           .stickers=${w.chosen.stickers}
           .friends=${w.chosen.friends ? { toAdd: w.friendsToAdd, added: w.friendsAdded } : null}
           .saved=${w.chosen.saved ? (w.savedCopy ?? 'reading') : null}
-          .failed=${w.runFailed}
-          .finished=${w.state.kind === 'done'}
-          .ending=${w.state.kind === 'ending'}
+          .run=${w.migrationRun}
           @retry=${() => w.tryAgain()}
           @finish=${() => w.finish()}
           @back-to-start=${() => w.goTo('start')}
           @restart=${() => w.startOver()}
-        ></sticker-migrate-step>`;
+        ></migrate-step>`;
     }
   }
 

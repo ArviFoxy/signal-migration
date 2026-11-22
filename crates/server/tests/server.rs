@@ -11,7 +11,7 @@ use signal_migration_server::index::{
     AddressLimiter, ENTRY_LEN, Index, OnSignal, SignalPacks, client_address, signal_cdn,
 };
 use signal_migration_server::relay::RelayTargets;
-use signal_migration_server::{ClientConfig, Config, TelegramApp, demo_router, router};
+use signal_migration_server::{ClientConfig, Config, TelegramApp, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -389,32 +389,120 @@ async fn compressed_copy_is_sent_to_a_browser_that_accepts_it() {
     assert_eq!(plain.bytes().await.unwrap().as_ref(), b"plain");
 }
 
-/// Detects: the demo server relaying to Signal, serving the index or a configuration, which would let the demo reach
-/// real services.
+/// Detects: unhashed app bundles or WASM modules being heuristically cached across deploys, or hashed fonts not
+/// being marked immutable.
 #[tokio::test]
-async fn demo_server_serves_only_files() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("index.html"), b"demo").unwrap();
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let app = demo_router(dir.path().to_path_buf());
-    tokio::spawn(async move {
-        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
-            .await
-            .unwrap()
-    });
+async fn static_assets_carry_appropriate_cache_control() {
+    let server = start(RelayTargets::signal()).await;
+    let static_dir = server.index_path.parent().unwrap();
+    std::fs::write(static_dir.join("main.js"), b"console.log(1)").unwrap();
+    std::fs::create_dir_all(static_dir.join("fonts")).unwrap();
+    std::fs::write(static_dir.join("fonts/inter-abc123.woff2"), b"font").unwrap();
     let client = reqwest::Client::new();
-    let page = client.get(format!("http://{address}/")).send().await.unwrap();
-    assert_eq!(page.bytes().await.unwrap().as_ref(), b"demo");
-    for path in ["/tunnel/chat.signal.org", "/v1/config", "/v1/sticker-packs/index"] {
-        let status = client
-            .get(format!("http://{address}{path}"))
-            .send()
-            .await
-            .unwrap()
-            .status();
-        assert_eq!(status, 404, "{path}");
+
+    let js = client
+        .get(format!("http://{}/main.js", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(js.headers()["cache-control"], "no-cache");
+
+    let font = client
+        .get(format!("http://{}/fonts/inter-abc123.woff2", server.base))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(font.headers()["cache-control"], "public, max-age=31536000, immutable");
+}
+
+/// Detects: a trailing partial write leaving the index file misaligned so later appends corrupt every entry after it.
+#[tokio::test]
+async fn trailing_partial_entry_is_truncated_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("index.bin");
+    let first = entry_for(1, 1);
+    let second = entry_for(2, 2);
+    let mut corrupted = first.to_vec();
+    corrupted.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0x11]); // 5-byte trailing partial write
+    std::fs::write(&path, &corrupted).unwrap();
+
+    let signal = FakeSignal::default();
+    let index = Index::open(path.clone(), signal.packs()).await.unwrap();
+    assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, ENTRY_LEN);
+
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    let config = Config {
+        static_dir: dir.path().to_path_buf(),
+        index,
+        relay_targets: RelayTargets::signal(),
+        client: ClientConfig { telegram: None },
+    };
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let server = TestServer {
+        base,
+        index_path: path.clone(),
+        signal: signal.clone(),
+        _dir: dir,
+    };
+    assert_eq!(server.add(second.clone()).await, 201);
+    assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, 2 * ENTRY_LEN);
+    // Reopen to confirm the second entry reads cleanly at the aligned 48-byte offset.
+    let reopened = Index::open(path, signal.packs()).await.unwrap();
+    let mut expected = first.to_vec();
+    expected.extend_from_slice(&second);
+    let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base2 = listener2.local_addr().unwrap().to_string();
+    let config2 = Config {
+        static_dir: std::env::temp_dir(),
+        index: reopened,
+        relay_targets: RelayTargets::signal(),
+        client: ClientConfig { telegram: None },
+    };
+    tokio::spawn(async move {
+        axum::serve(
+            listener2,
+            router(config2).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let bytes = reqwest::Client::new()
+        .get(format!("http://{base2}/v1/sticker-packs/index?from=0"))
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    assert_eq!(bytes.as_ref(), expected.as_slice());
+}
+
+/// Detects: unbounded memory growth in AddressLimiter when many unique client IPs make requests over time.
+#[test]
+fn address_limiter_prunes_refilled_buckets_and_bounds_memory() {
+    let mut limiter = AddressLimiter::with_max_addresses(2, Duration::from_secs(1), 4);
+    let t0 = Instant::now();
+    for i in 1..=4u8 {
+        assert!(limiter.allow(std::net::IpAddr::from([10, 0, 0, i]), t0));
     }
+    assert_eq!(limiter.tracked_addresses(), 4);
+    // After full refill, a new address prunes the refilled buckets.
+    let t1 = t0 + Duration::from_secs(5);
+    assert!(limiter.allow(std::net::IpAddr::from([10, 0, 0, 99]), t1));
+    assert_eq!(limiter.tracked_addresses(), 1);
+    // Even without waiting for refill, distinct addresses never exceed max_addresses.
+    for i in 10..30u8 {
+        assert!(limiter.allow(std::net::IpAddr::from([10, 0, 1, i]), t1));
+    }
+    assert!(limiter.tracked_addresses() <= 4);
 }
 
 /// Detects: entries for packs that nobody uploaded. Without this rule anyone fills the index for free, and every

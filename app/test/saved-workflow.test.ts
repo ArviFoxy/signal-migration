@@ -46,8 +46,7 @@ const MESSAGES: SavedMessage[] = [
     kind: 'photo',
     body: 'at the lake',
     media: {
-      fileId: 301,
-      remoteId: 'r-301',
+      file: { run: 1, fileId: 301, remoteId: 'r-301' },
       size: PHOTO_BYTES.length,
       contentType: 'image/jpeg',
       width: 1280,
@@ -58,8 +57,7 @@ const MESSAGES: SavedMessage[] = [
     kind: 'file',
     body: '',
     media: {
-      fileId: 401,
-      remoteId: 'r-401',
+      file: { run: 1, fileId: 401, remoteId: 'r-401' },
       size: PDF_BYTES.length,
       contentType: 'application/pdf',
       fileName: 'receipt.pdf',
@@ -73,8 +71,7 @@ const MESSAGES: SavedMessage[] = [
     kind: 'file',
     body: '',
     media: {
-      fileId: 901,
-      remoteId: 'r-901',
+      file: { run: 1, fileId: 901, remoteId: 'r-901' },
       size: 110 * 1024 * 1024,
       contentType: 'application/zip',
       fileName: 'too-big.zip',
@@ -84,8 +81,8 @@ const MESSAGES: SavedMessage[] = [
 const saved: SavedSource = {
   readMessages: () => Promise.resolve(MESSAGES),
   async withMedia(media, use) {
-    const bytes = MEDIA_FILES.get(media.fileId);
-    if (!bytes) throw new Error(`missing simulated file ${media.fileId}`);
+    const bytes = MEDIA_FILES.get(media.file.fileId);
+    if (!bytes) throw new Error(`missing simulated file ${media.file.fileId}`);
     return use(bytes.length, async (onChunk) => {
       await onChunk(bytes);
     });
@@ -255,26 +252,42 @@ describe('copying Saved Messages', () => {
         kind: 'photo',
         body: 'Vacation album',
         albumId: '999999',
-        media: { fileId: 1, remoteId: 'r1', size: a1.length, contentType: 'image/jpeg', width: 800, height: 600 },
+        media: {
+          file: { run: 1, fileId: 1, remoteId: 'r1' },
+          size: a1.length,
+          contentType: 'image/jpeg',
+          width: 800,
+          height: 600,
+        },
       }),
       message(2, {
         date: FIRST_DAY,
         kind: 'photo',
         body: '',
         albumId: '999999',
-        media: { fileId: 2, remoteId: 'r2', size: a2.length, contentType: 'image/jpeg', width: 800, height: 600 },
+        media: {
+          file: { run: 1, fileId: 2, remoteId: 'r2' },
+          size: a2.length,
+          contentType: 'image/jpeg',
+          width: 800,
+          height: 600,
+        },
       }),
       message(3, {
         kind: 'gif',
         body: '',
-        media: { fileId: 3, remoteId: 'r3', size: gifBytes.length, contentType: 'video/mp4', gif: true },
+        media: {
+          file: { run: 1, fileId: 3, remoteId: 'r3' },
+          size: gifBytes.length,
+          contentType: 'video/mp4',
+          gif: true,
+        },
       }),
       message(4, {
         kind: 'voice-note',
         body: '',
         media: {
-          fileId: 4,
-          remoteId: 'r4',
+          file: { run: 1, fileId: 4, remoteId: 'r4' },
           size: voiceBytes.length,
           contentType: 'audio/ogg',
           duration: 12,
@@ -285,7 +298,7 @@ describe('copying Saved Messages', () => {
     const albumSource: SavedSource = {
       readMessages: () => Promise.resolve(albumMessages),
       withMedia: (media, use) => {
-        const bytes = files.get(media.fileId)!;
+        const bytes = files.get(media.file.fileId)!;
         return use(bytes.length, (onChunk) => onChunk(bytes));
       },
     };

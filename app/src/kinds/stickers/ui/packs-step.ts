@@ -1,9 +1,10 @@
-// Step 3: the user's Telegram sticker packs, laid out for 100+ packs. The list shows as soon as it is read; previews
-// fill in and each pack is looked up in the sticker pack index while the user chooses. The filters stay at the top
-// of the window and the actions at the bottom while the grid scrolls.
+// The sticker packs step: the user's Telegram sticker packs, laid out for 100+ packs. The list shows as soon as it is
+// read; previews fill in and each pack is looked up in the sticker pack index while the user chooses. The filters stay
+// at the top of the window and the actions at the bottom while the grid scrolls.
 
-import { html, nothing } from 'lit';
+import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
+import type { PacksState } from '../../../app/workflow';
 import {
   icons,
   primaryButton,
@@ -13,24 +14,12 @@ import {
   stickyBar,
   stickyFooter,
 } from '../../../ui/layout';
+import { ObjectUrlPool } from '../../../ui/object-urls';
 import type { PackEntry } from '../migration';
 import { MAX_STICKERS } from '../upload';
 import { isOnSignal, MigrationView, packDescription } from './view';
 
 type Filter = 'all' | 'mine' | 'others' | 'upload';
-
-/** Object URLs of each pack's preview images, made once per pack. */
-const previewUrls = new WeakMap<PackEntry, string[]>();
-function previews(entry: PackEntry): string[] {
-  let urls = previewUrls.get(entry);
-  if (!urls && entry.thumbnails.length > 0) {
-    urls = entry.thumbnails.map((thumbnail) =>
-      URL.createObjectURL(new Blob([thumbnail.data as Uint8Array<ArrayBuffer>], { type: thumbnail.mimeType })),
-    );
-    previewUrls.set(entry, urls);
-  }
-  return urls ?? [];
-}
 
 /** A pack's state in a few words, with a dot in its colour. */
 function packStatus(entry: PackEntry) {
@@ -49,10 +38,32 @@ function packStatus(entry: PackEntry) {
 
 @customElement('sticker-packs-step')
 export class StickerPacksStep extends MigrationView {
-  /** Reading the packs failed, and can be tried again. */
-  @property({ attribute: false }) canTryAgain = false;
+  /** The explicit reading state of the user's sticker packs so an empty pack list is distinct from still reading. */
+  @property({ attribute: false }) packs: PacksState = { kind: 'none' };
+  /** Whether the user can continue with no packs selected (e.g. when friends or saved messages are also chosen). */
+  @property({ attribute: false }) allowEmpty = false;
   @state() private filter: Filter = 'all';
   @state() private search = '';
+  #previewUrls = new ObjectUrlPool<PackEntry>();
+
+  protected override willUpdate(changed: PropertyValues<this>): void {
+    super.willUpdate(changed);
+    if (changed.has('migration')) this.#previewUrls.revokeAll();
+  }
+
+  override disconnectedCallback(): void {
+    this.#previewUrls.revokeAll();
+    super.disconnectedCallback();
+  }
+
+  private previews(entry: PackEntry): string[] {
+    if (entry.thumbnails.length === 0) return [];
+    return this.#previewUrls.get(entry, () =>
+      entry.thumbnails.map((thumbnail) =>
+        URL.createObjectURL(new Blob([thumbnail.data as Uint8Array<ArrayBuffer>], { type: thumbnail.mimeType })),
+      ),
+    );
+  }
 
   private visible(): PackEntry[] {
     const query = this.search.trim().toLowerCase();
@@ -72,7 +83,7 @@ export class StickerPacksStep extends MigrationView {
     const tooLarge = entry.pack.stickers.length > MAX_STICKERS;
     // A pack that is in the user's Signal has nothing left to choose: its box is ticked and cannot be changed.
     const mine = entry.state === 'in-signal';
-    const urls = previews(entry);
+    const urls = this.previews(entry);
     return html`<li>
       <label
         class="flex h-full flex-col gap-2 rounded-xl p-2.5 ring-1 ring-card-line ring-inset ${
@@ -119,9 +130,45 @@ export class StickerPacksStep extends MigrationView {
   }
 
   render() {
-    const entries = this.migration?.entries ?? [];
+    const packs = this.packs;
     const readProgress = this.migration?.readProgress ?? null;
-    const reading = entries.length === 0;
+    if (packs.kind === 'none' || packs.kind === 'reading') {
+      return html`${stepHeader(this.position, 'Sticker packs', 'Reading your packs from Telegram…')}
+      ${
+        readProgress
+          ? html`<div class="flex flex-col gap-2">
+              <div class="flex justify-between text-sm">
+                <span>Read</span><span class="text-muted">${readProgress.done} of ${readProgress.total} packs</span>
+              </div>
+              ${progressBar('Packs read', readProgress.done, readProgress.total)}
+            </div>`
+          : nothing
+      }
+      ${stickyFooter(
+        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>`,
+      )}`;
+    }
+    if (packs.kind === 'failed') {
+      return html`${stepHeader(this.position, 'Sticker packs', 'Choose the packs to add to your Signal.')}
+      ${stickyFooter(
+        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
+          <button type="button" class=${primaryButton} @click=${() => this.emit('try-again')}>Try again</button>`,
+      )}`;
+    }
+
+    const entries = packs.migration.entries;
+    if (entries.length === 0) {
+      return html`${stepHeader(this.position, 'Sticker packs', 'Choose the packs to add to your Signal.')}
+        <p class="text-sm text-muted">You have no sticker packs installed in Telegram.</p>
+        ${stickyFooter(
+          html`<span class="text-sm text-muted">No packs to add</span>
+            <span class="flex gap-3">
+              <button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
+              <button type="button" class=${primaryButton} @click=${() => this.emit('next')}>Continue</button>
+            </span>`,
+        )}`;
+    }
+
     const checking = entries.filter((entry) => entry.state === 'checking').length;
     const mine = entries.filter((entry) => entry.state === 'in-signal').length;
     const byOthers = entries.filter((entry) => entry.state === 'available').length;
@@ -142,28 +189,6 @@ export class StickerPacksStep extends MigrationView {
       (entry) => entry.state !== 'in-signal' && entry.pack.stickers.length <= MAX_STICKERS,
     );
     const allVisibleSelected = visible.length > 0 && choosable.every((entry) => entry.selected);
-    if (reading) {
-      return html`${stepHeader(this.position, 'Sticker packs', 'Reading your packs from Telegram…')}
-      ${
-        readProgress
-          ? html`<div class="flex flex-col gap-2">
-              <div class="flex justify-between text-sm">
-                <span>Read</span><span class="text-muted">${readProgress.done} of ${readProgress.total} packs</span>
-              </div>
-              ${progressBar('Packs read', readProgress.done, readProgress.total)}
-            </div>`
-          : nothing
-      }
-      ${stickyFooter(
-        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button> ${
-            this.canTryAgain
-              ? html`<button type="button" class=${primaryButton} @click=${() => this.emit('try-again')}>
-                  Try again
-                </button>`
-              : nothing
-          }`,
-      )}`;
-    }
     return html`${stepHeader(this.position, 'Sticker packs', 'Choose the packs to add to your Signal.')}
     ${stickyBar(
       html`<div class="flex flex-wrap items-center justify-between gap-3">
@@ -233,7 +258,12 @@ export class StickerPacksStep extends MigrationView {
         </span>
         <span class="flex gap-3">
           <button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
-          <button type="button" class=${primaryButton} ?disabled=${selected === 0} @click=${() => this.emit('next')}>
+          <button
+            type="button"
+            class=${primaryButton}
+            ?disabled=${selected === 0 && !this.allowEmpty}
+            @click=${() => this.emit('next')}
+          >
             Continue
           </button>
         </span>`,

@@ -1,5 +1,5 @@
-// Step 4: linking this page as a device of the user's Signal account, by a QR code scanned in Signal on the phone.
-// It shows the link machine's state (app/signal-link.ts); the workflow starts linking while this step shows.
+// Linking this browser as a temporary device of the user's Signal account, by a QR code scanned in Signal on the phone.
+// It shows the link machine's state (app/machine/signal); the workflow starts linking while this step shows.
 
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';

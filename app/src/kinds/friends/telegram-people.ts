@@ -2,7 +2,14 @@
 // and the user's contact list. Telegram has no list of friends, so these are the people a user can mean.
 
 import type * as Td from 'tdlib-types';
-import { type TelegramClient, TelegramError, untilNotRestarted } from '../../telegram/client';
+import {
+  fileRef,
+  type TelegramClient,
+  TelegramError,
+  type TelegramFileRef,
+  TelegramRestartedError,
+  untilNotRestarted,
+} from '../../telegram/client';
 import { patiently, TOO_FAST } from '../../telegram/patiently';
 
 export type Person = {
@@ -12,8 +19,8 @@ export type Person = {
   familyName: string;
   /** A plus sign and digits, when Telegram shows the user this person's phone number. */
   phoneNumber: string | null;
-  /** The number of the small profile picture among the files of Telegram's library, when there is a picture. */
-  photoFileId?: number;
+  /** Run-tagged reference to the small profile picture, when there is one. */
+  photo?: TelegramFileRef;
   /** A very small and blurred copy of the picture, as base64 of a JPEG file, which Telegram sends along with the person. */
   photoPreview?: string;
 };
@@ -30,8 +37,8 @@ export type ChatEntry =
       memberIds: number[];
       /** How many people the group has. A list made from this one can keep fewer of them in `memberIds`. */
       memberCount: number;
-      /** The number of the group's small picture among the files of Telegram's library, when there is one. */
-      photoFileId?: number;
+      /** Run-tagged reference to the group's small picture, when there is one. */
+      photo?: TelegramFileRef;
       /** A very small and blurred copy of the picture, as base64 of a JPEG file. */
       photoPreview?: string;
     };
@@ -69,8 +76,8 @@ export type ReadingProgress = {
 /** Where the people come from: the user's account in the app, simulated data in tests. */
 export interface PeopleSource {
   readPeople(onProgress: (progress: ReadingProgress) => void): Promise<TelegramPeople>;
-  /** The bytes of a picture, by the file number a person or a group carries. */
-  readPhoto(fileId: number): Promise<Uint8Array>;
+  /** The bytes of a picture, by the run-tagged reference a person or a group carries. */
+  readPhoto(photo: TelegramFileRef): Promise<Uint8Array>;
 }
 
 /** How many chats Telegram is asked to load, and how many members of a large group it gives, in one request. */
@@ -94,23 +101,59 @@ const MAIN_LIST = { _: 'chatListMain' } as const;
  * estimated.
  */
 export function peopleOf(
-  client: Pick<TelegramClient, 'invoke' | 'readFile'>,
+  client: Pick<TelegramClient, 'invoke' | 'run' | 'readFileRef'>,
   now: () => number = () => performance.now(),
 ): PeopleSource {
+  const rawInvoke = ((query: { _: string }) => patiently(() => client.invoke(query as never))) as Td.Invoke;
   const invoke = ((query: { _: string }) =>
     patiently(() => untilNotRestarted(() => client.invoke(query as never)))) as Td.Invoke;
 
-  /** The IDs of all chats in the main list, in its order. */
-  async function chatIds(): Promise<number[]> {
-    for (;;) {
-      try {
-        await invoke({ _: 'loadChats', chat_list: MAIN_LIST, limit: CHATS_PER_REQUEST });
-      } catch (error) {
-        if (error instanceof TelegramError && error.code === ALL_LOADED) break;
-        throw error;
+  let chatsLoadedInRun = -1;
+  let loadingChats: { run: number; promise: Promise<void> } | null = null;
+
+  /**
+   * With `use_chat_info_database: false`, each fresh TDLib run starts with an empty chat list in memory. Loading
+   * chats once per run lets `getChats`, `getChat`, and `getSupergroup` survive a mid-read TDLib restart.
+   */
+  const ensureChatsLoaded = (): Promise<void> => {
+    const run = client.run;
+    if (chatsLoadedInRun === run) return Promise.resolve();
+    if (loadingChats?.run === run) return loadingChats.promise;
+    const promise = (async () => {
+      for (;;) {
+        try {
+          await rawInvoke({ _: 'loadChats', chat_list: MAIN_LIST, limit: CHATS_PER_REQUEST });
+        } catch (error) {
+          if (error instanceof TelegramError && error.code === ALL_LOADED) break;
+          throw error;
+        }
+        if (client.run !== run) throw new TelegramRestartedError();
       }
-    }
-    return (await invoke({ _: 'getChats', chat_list: MAIN_LIST, limit: EVERY_CHAT })).chat_ids;
+      if (client.run !== run) throw new TelegramRestartedError();
+      chatsLoadedInRun = run;
+    })();
+    loadingChats = { run, promise };
+    const clear = () => {
+      if (loadingChats?.promise === promise) loadingChats = null;
+    };
+    promise.then(clear, clear);
+    return promise;
+  };
+
+  /** Runs an operation that requires the chat list to be loaded in the current TDLib run. */
+  const withChats = <T>(operation: () => Promise<T>): Promise<T> =>
+    patiently(() =>
+      untilNotRestarted(async () => {
+        await ensureChatsLoaded();
+        return operation();
+      }),
+    );
+
+  /** The IDs of all chats in the main list, in its order. */
+  function chatIds(): Promise<number[]> {
+    return withChats(
+      async () => (await rawInvoke({ _: 'getChats', chat_list: MAIN_LIST, limit: EVERY_CHAT })).chat_ids,
+    );
   }
 
   /** The members of a group that are accounts of people: no bots, no deleted accounts, no channels writing as members. */
@@ -127,22 +170,26 @@ export function peopleOf(
     take: (userIds: number[], part: number) => Promise<void>,
   ): Promise<void> {
     if (type._ === 'chatTypeBasicGroup') {
-      const info = await invoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id });
+      const info = await withChats(() =>
+        rawInvoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id }),
+      );
       return take(userIdsOf(info.members), 1);
     }
     // What TDLib already knows of the group answers without a request to Telegram's servers. The size is 0 there
     // when TDLib does not know it.
-    const known = await invoke({ _: 'getSupergroup', supergroup_id: type.supergroup_id });
+    const known = await withChats(() => rawInvoke({ _: 'getSupergroup', supergroup_id: type.supergroup_id }));
     if (known.member_count > GROUP_SIZE_LIMIT) return;
     // Every answer names the size of the group, so the first one says whether the group is read at all.
     for (let offset = 0; ; offset += MEMBERS_PER_REQUEST) {
-      const page = await invoke({
-        _: 'getSupergroupMembers',
-        supergroup_id: type.supergroup_id,
-        filter: { _: 'supergroupMembersFilterRecent' },
-        offset,
-        limit: MEMBERS_PER_REQUEST,
-      });
+      const page = await withChats(() =>
+        rawInvoke({
+          _: 'getSupergroupMembers',
+          supergroup_id: type.supergroup_id,
+          filter: { _: 'supergroupMembersFilterRecent' },
+          offset,
+          limit: MEMBERS_PER_REQUEST,
+        }),
+      );
       if (page.total_count > GROUP_SIZE_LIMIT) return;
       const arrived = offset + MEMBERS_PER_REQUEST;
       const last = page.members.length === 0 || arrived >= page.total_count;
@@ -152,7 +199,7 @@ export function peopleOf(
   }
 
   return {
-    readPhoto: (fileId) => client.readFile(fileId),
+    readPhoto: (photo) => patiently(() => client.readFileRef(photo)),
     async readPeople(onProgress) {
       const self = (await invoke({ _: 'getMe' })).id;
       const people = new Map<number, Person>();
@@ -162,7 +209,15 @@ export function peopleOf(
         if (people.has(userId)) return true;
         // The library answers from the records that came with the chats and the member lists. An account it holds
         // no record of is passed over.
-        const user = await invoke({ _: 'getUser', user_id: userId }).catch((error: unknown) => {
+        let run = 0;
+        const user = await patiently(() =>
+          untilNotRestarted(async () => {
+            const before = client.run;
+            const found = await rawInvoke({ _: 'getUser', user_id: userId });
+            run = client.run === before ? before : 0;
+            return found;
+          }),
+        ).catch((error: unknown) => {
           if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
           throw error;
         });
@@ -172,7 +227,7 @@ export function peopleOf(
           givenName: user.first_name,
           familyName: user.last_name,
           phoneNumber: user.phone_number ? `+${user.phone_number}` : null,
-          ...(user.profile_photo ? { photoFileId: user.profile_photo.small.id } : {}),
+          ...(user.profile_photo ? { photo: fileRef(user.profile_photo.small, run) } : {}),
           ...(user.profile_photo?.minithumbnail ? { photoPreview: user.profile_photo.minithumbnail.data } : {}),
         });
         return true;
@@ -186,11 +241,17 @@ export function peopleOf(
         chatId: number;
         title: string;
         type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup;
-        photoFileId: number | undefined;
+        photo: TelegramFileRef | undefined;
         photoPreview: string | undefined;
       }[] = [];
       for (const [index, chatId] of ids.entries()) {
-        const chat = await invoke({ _: 'getChat', chat_id: chatId });
+        let run = 0;
+        const chat = await withChats(async () => {
+          const before = client.run;
+          const result = await rawInvoke({ _: 'getChat', chat_id: chatId });
+          run = client.run === before ? before : 0;
+          return result;
+        });
         const type = chat.type;
         if (type._ === 'chatTypePrivate') {
           if (await isPerson(type.user_id)) entries[index] = { kind: 'person', userId: type.user_id };
@@ -200,7 +261,7 @@ export function peopleOf(
             chatId,
             title: chat.title,
             type,
-            photoFileId: chat.photo?.small.id,
+            photo: chat.photo ? fileRef(chat.photo.small, run) : undefined,
             photoPreview: chat.photo?.minithumbnail?.data,
           });
         }
@@ -250,7 +311,7 @@ export function peopleOf(
             title: group.title,
             memberIds: present,
             memberCount: present.length,
-            ...(group.photoFileId === undefined ? {} : { photoFileId: group.photoFileId }),
+            ...(group.photo === undefined ? {} : { photo: group.photo }),
             ...(group.photoPreview === undefined ? {} : { photoPreview: group.photoPreview }),
           };
         partsArrived.delete(group.chatId);

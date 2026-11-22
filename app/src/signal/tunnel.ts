@@ -3,6 +3,8 @@
 // TLS to the Signal host runs in this page (rustls in WebAssembly) and trusts only Signal's root certificates, so
 // the relay forwards ciphertext it cannot read or alter.
 
+import { errorMessage } from '../core/errors';
+
 /** The ciphertext side of a TLS connection object from the WebAssembly module. */
 export interface EncryptedEndpoint {
   receiveEncrypted(data: Uint8Array): void;
@@ -30,15 +32,13 @@ export class RelayLink {
     this.#socket.binaryType = 'arraybuffer';
     this.#socket.onopen = () => this.flush();
     this.#socket.onmessage = (event) => {
+      if (this.#closed) return;
       try {
         endpoint.receiveEncrypted(new Uint8Array(event.data as ArrayBuffer));
         this.flush();
         onReceive();
       } catch (error) {
-        this.#shutdown(
-          `connection to ${host} failed: ${error instanceof Error ? error.message : String(error)}`,
-          onClose,
-        );
+        this.#shutdown(`connection to ${host} failed: ${errorMessage(error)}`, onClose);
       }
     };
     this.#socket.onclose = () => this.#shutdown(`relay to ${host} closed`, onClose);
@@ -46,22 +46,28 @@ export class RelayLink {
 
   /** Sends whatever ciphertext the endpoint has produced. */
   flush(): void {
+    if (this.#closed) return;
     const encrypted = this.#endpoint.takeEncrypted();
     if (encrypted.length > 0 && this.#socket.readyState === WebSocket.OPEN) this.#socket.send(encrypted);
   }
 
-  close(): void {
-    this.flush();
+  #detachAndClose(): void {
     this.#closed = true;
+    this.#socket.onopen = null;
+    this.#socket.onmessage = null;
     this.#socket.onclose = null;
     this.#socket.close();
   }
 
+  close(): void {
+    if (this.#closed) return;
+    this.flush();
+    this.#detachAndClose();
+  }
+
   #shutdown(reason: string, onClose: (reason: string) => void): void {
     if (this.#closed) return;
-    this.#closed = true;
-    this.#socket.onclose = null;
-    this.#socket.close();
+    this.#detachAndClose();
     onClose(reason);
   }
 }

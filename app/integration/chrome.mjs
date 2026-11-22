@@ -47,13 +47,30 @@ export async function launchChrome() {
     onEvent: (listener) => listeners.add(listener),
     /** Opens a tab; see `openTab`. */
     openTab: () => openTab(send, (listener) => listeners.add(listener)),
-    // Chrome writes to its profile while it shuts down, so the profile is removed only after it has exited.
+    // Chrome and its helper processes can still write to the profile while shutting down, so the profile is removed
+    // only after Chrome has exited, retrying if a helper is still finishing up.
     async close() {
-      await new Promise((resolve) => {
-        chrome.once('exit', resolve);
-        chrome.kill();
-      });
-      fs.rmSync(profile, { recursive: true, force: true });
+      if (chrome.exitCode === null && chrome.signalCode === null) {
+        await new Promise((resolve) => {
+          const finish = () => {
+            clearTimeout(forceKill);
+            resolve();
+          };
+          chrome.once('exit', finish);
+          const forceKill = setTimeout(() => chrome.kill(), 2000);
+          if (socket.readyState === WebSocket.OPEN) {
+            try {
+              socket.send(JSON.stringify({ id: ++lastId, method: 'Browser.close', params: {} }));
+            } catch {
+              chrome.kill();
+            }
+          } else {
+            chrome.kill();
+          }
+        });
+      }
+      socket.close();
+      await fs.promises.rm(profile, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
     },
   };
 }

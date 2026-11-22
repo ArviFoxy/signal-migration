@@ -63,12 +63,14 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
     }, REQUEST_TIME_LIMIT_S * 1000);
     const channel: MessageChannel = {
       send: (bytes) => {
+        if (closed) throw new SocketClosedError(1000);
         socket.send(bytes);
         link.flush();
       },
       close: (code = 1000) => {
         if (closed) return;
         closed = true;
+        clearTimeout(openTimer);
         socket.close(code);
         link.close();
         socket.free();
@@ -78,7 +80,10 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
       },
       set onMessage(handler) {
         onMessage = handler;
-        for (const message of early.splice(0)) handler(message);
+        for (const message of early.splice(0)) {
+          if (closed) break;
+          handler(message);
+        }
       },
       get onClose() {
         return onClose ?? (() => undefined);
@@ -106,12 +111,18 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
       host,
       socket,
       () => {
+        if (closed) return;
         if (!opened && socket.isOpen) {
           opened = true;
           clearTimeout(openTimer);
           resolve(channel);
         }
-        for (const message of socket.takeMessages() as Uint8Array[]) deliver(message);
+        for (const message of socket.takeMessages() as Uint8Array[]) {
+          if (closed) return;
+          deliver(message);
+        }
+        // A message handler may have called `channel.close()` synchronously, freeing `socket`.
+        if (closed) return;
         const code = socket.closeCode;
         if (code !== undefined) finish(code, socket.closeReason || 'closed by the server');
       },
@@ -198,6 +209,8 @@ export class SignalSocket {
   close(): void {
     this.#closedByUs = true;
     clearInterval(this.#keepalive);
+    for (const { reject } of this.#pending.values()) reject(new SocketClosedError(1000));
+    this.#pending.clear();
     this.#channel.close();
   }
 

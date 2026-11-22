@@ -11,7 +11,9 @@
 // and the Signal account, so a migration that stopped (closed page, rate limit) continues where it was.
 // The services it uses (clock, conversion, index) are passed in, so that tests can run it against simulations.
 
+import { sameBytes, toHex } from '../../core/bytes';
 import type { Clock } from '../../core/clock';
+import { errorMessage } from '../../core/errors';
 import type { StoredStickerPack } from '../../signal/storage';
 import type { SignalAccount } from '../../signal/transport';
 import type { ConvertedSticker, ConvertSticker } from './convert';
@@ -19,7 +21,7 @@ import { DownloadStalledError } from '../../telegram/download';
 import { contentPackKey, type PackIdentity, packIdentity } from './identity';
 import { assignPositions, insertPacks } from './order';
 import type { PictureComparison } from './compare-pack';
-import { type PackIndex, toHex } from './pack-index';
+import type { PackIndex } from './pack-index';
 import type { TelegramPack, TelegramSource } from './telegram-packs';
 import { MAX_STICKERS, RateLimitedError, type StickerFile, uploadStickerPack } from './upload';
 
@@ -102,9 +104,6 @@ const INDEX_BUSY_WAIT_MS = 60_000;
 const INDEX_ATTEMPTS = 10;
 const STORAGE_WRITE_ATTEMPTS = 5;
 
-const sameBytes = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((byte, i) => byte === b[i]);
-const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
-
 /** Signal's display order: by position, then by pack ID as a hex string. */
 function signalOrder(a: StoredStickerPack, b: StoredStickerPack): number {
   return a.position - b.position || (toHex(a.packId) < toHex(b.packId) ? -1 : 1);
@@ -123,10 +122,18 @@ function untilCancelled<T>(work: Promise<T>, cancel: AbortSignal): Promise<T> {
   });
 }
 
-async function forEachConcurrently<T>(items: T[], limit: number, action: (item: T) => Promise<void>): Promise<void> {
+async function forEachConcurrently<T>(
+  items: T[],
+  limit: number,
+  action: (item: T) => Promise<void>,
+  cancel?: AbortSignal,
+): Promise<void> {
   let next = 0;
   const work = async () => {
-    while (next < items.length) await action(items[next++]);
+    while (next < items.length) {
+      cancel?.throwIfAborted();
+      await action(items[next++]);
+    }
   };
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, work));
 }
@@ -219,7 +226,6 @@ export class StickerMigration extends EventTarget {
     return { done: planned.filter((entry) => entry.state === 'in-signal').length, total: planned.length };
   }
 
-  /** Packs to upload, in the order they are uploaded. */
   /** Whether the pack was on Signal already when the migration started (installed, not uploaded). */
   wasOnSignal(entry: PackEntry): boolean {
     return this.#plannedInstalls.has(entry);
@@ -230,6 +236,7 @@ export class StickerMigration extends EventTarget {
     return this.selected.find((entry) => entry.state !== 'in-signal' && entry.state !== 'failed') ?? null;
   }
 
+  /** Packs to upload, in the order they are uploaded. */
   get uploadQueue(): PackEntry[] {
     return [...this.#plannedUploads];
   }
@@ -271,10 +278,9 @@ export class StickerMigration extends EventTarget {
   lookUpInIndex(): Promise<void> {
     this.#lookup ??= (async () => {
       await this.#services.index.refresh();
-      await forEachConcurrently(this.entries, CONCURRENT_VERIFICATIONS, async (entry) => {
+      for (const entry of this.entries) {
         entry.state = this.#services.index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
-        this.#changed();
-      });
+      }
       this.lookedUp = true;
       this.#changed();
     })();
@@ -362,7 +368,7 @@ export class StickerMigration extends EventTarget {
       for (const entry of batch) this.#unannounced.delete(entry);
       this.announceError = null;
     } catch (error) {
-      this.announceError = message(error);
+      this.announceError = errorMessage(error);
     }
     this.#changed();
   }
@@ -380,13 +386,16 @@ export class StickerMigration extends EventTarget {
    * devices can change the storage meanwhile; the write then fails with a conflict and is computed again.
    * A record left by uninstalling the same pack earlier is replaced rather than kept beside the new one.
    */
-  async #install(signal: SignalAccount, adding: PackEntry[]): Promise<void> {
+  async #install(signal: SignalAccount, adding: PackEntry[], cancel: AbortSignal): Promise<void> {
     const rankByKey = new Map(
       this.entries.flatMap((entry) => (entry.packKey ? [[toHex(entry.packKey), entry.rank] as const] : [])),
     );
     for (let attempt = 0; attempt < STORAGE_WRITE_ATTEMPTS; attempt++) {
+      cancel.throwIfAborted();
       const storage = await signal.storage();
+      cancel.throwIfAborted();
       const snapshot = await storage.readStickerPacks();
+      cancel.throwIfAborted();
       const installed = new Set(snapshot.packs.map((stored) => toHex(stored.packKey)));
       const missing = adding.filter((entry) => !installed.has(toHex(entry.packKey!)));
       if (missing.length === 0) return;
@@ -418,13 +427,14 @@ export class StickerMigration extends EventTarget {
     throw new Error('the Signal account kept changing while installing packs; try again');
   }
 
-  async #addToIndex(entry: PackEntry): Promise<void> {
+  async #addToIndex(entry: PackEntry, cancel: AbortSignal): Promise<void> {
     for (let attempt = 0; attempt < INDEX_ATTEMPTS; attempt++) {
+      cancel.throwIfAborted();
       if ((await this.#services.index.add(entry.identity.lookupKey, entry.packId!)) === 'added') {
         this.addedToIndex++;
         return;
       }
-      await this.#services.clock.sleep(INDEX_BUSY_WAIT_MS);
+      await untilCancelled(this.#services.clock.sleep(INDEX_BUSY_WAIT_MS), cancel);
     }
     throw new IndexUnavailableError();
   }
@@ -433,8 +443,9 @@ export class StickerMigration extends EventTarget {
    * Downloads a pack's stickers from Telegram and computes its pack key from them. The files wait in memory for
    * the conversion.
    */
-  async #download(telegram: TelegramSource, entry: PackEntry): Promise<void> {
+  async #download(telegram: TelegramSource, entry: PackEntry, cancel: AbortSignal): Promise<void> {
     if (this.#originals.has(entry) || this.#converted.has(entry)) return;
+    cancel.throwIfAborted();
     const stickers = entry.pack.stickers;
     let done = 0;
     Object.assign(entry, { state: 'downloading', progress: { done, total: stickers.length } });
@@ -449,25 +460,33 @@ export class StickerMigration extends EventTarget {
             if (!(error instanceof DownloadStalledError)) throw error;
             throw new Error(`sticker ${i + 1}: ${error.message}`, { cause: error });
           });
+          cancel.throwIfAborted();
           entry.progress = { done: ++done, total: stickers.length };
           this.#changed();
         },
+        cancel,
       );
     } catch (error) {
+      if (cancel.aborted) throw error;
       if ((error as Error).cause instanceof DownloadStalledError) throw error;
-      throw new Error(`downloading from Telegram failed: ${message(error)}`);
+      throw new Error(`downloading from Telegram failed: ${errorMessage(error)}`);
     }
-    entry.packKey = await contentPackKey({
+    cancel.throwIfAborted();
+    const packKey = await contentPackKey({
       title: entry.pack.title,
       stickers: files.map((file, i) => ({ file, emoji: stickers[i].emoji })),
     });
+    cancel.throwIfAborted();
+    entry.packKey = packKey;
     this.#originals.set(entry, files);
   }
 
   /** Downloads a pack's stickers and converts them; the result waits in memory for the upload. */
-  async #prepare(telegram: TelegramSource, entry: PackEntry): Promise<void> {
+  async #prepare(telegram: TelegramSource, entry: PackEntry, cancel: AbortSignal): Promise<void> {
     if (this.#converted.has(entry)) return;
-    await this.#download(telegram, entry);
+    cancel.throwIfAborted();
+    await this.#download(telegram, entry, cancel);
+    cancel.throwIfAborted();
     const stickers = entry.pack.stickers;
     const step = async <T>(
       state: PackState,
@@ -483,9 +502,11 @@ export class StickerMigration extends EventTarget {
         concurrency,
         async (i) => {
           results[i] = await work(i);
+          cancel.throwIfAborted();
           entry.progress = { done: ++done, total: stickers.length };
           this.#changed();
         },
+        cancel,
       );
       return results;
     };
@@ -494,10 +515,12 @@ export class StickerMigration extends EventTarget {
       'converting',
       (i) =>
         this.#services.convert(files[i], stickers[i].format).catch((error: unknown) => {
-          throw new Error(`sticker ${i + 1} (${stickers[i].format}): ${message(error)}`);
+          if (cancel.aborted) throw error;
+          throw new Error(`sticker ${i + 1} (${stickers[i].format}): ${errorMessage(error)}`);
         }),
       CONCURRENT_CONVERSIONS,
     );
+    cancel.throwIfAborted();
     entry.conversion = summarize(converted);
     this.#converted.set(
       entry,
@@ -511,11 +534,13 @@ export class StickerMigration extends EventTarget {
    * A copy of the pack that someone else uploaded and that this page compared with the downloaded stickers and
    * found faithful: its pack ID, or null. The index is read again first, for entries added since the last read.
    */
-  async #faithfulCopy(entry: PackEntry): Promise<Uint8Array | null> {
+  async #faithfulCopy(entry: PackEntry, cancel: AbortSignal): Promise<Uint8Array | null> {
+    cancel.throwIfAborted();
     const { index, pictures } = this.#services;
     Object.assign(entry, { state: 'checking', progress: null });
     this.#changed();
     await index.refresh();
+    cancel.throwIfAborted();
     const stickers = entry.pack.stickers;
     const original = {
       title: entry.pack.title,
@@ -527,12 +552,15 @@ export class StickerMigration extends EventTarget {
     };
     const pack = { lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original };
     try {
-      return await index.findFaithful(pack, pictures, (done, total) => {
+      const found = await index.findFaithful(pack, pictures, (done, total) => {
+        if (cancel.aborted) return;
         Object.assign(entry, { state: 'comparing', progress: { done, total } });
         this.#changed();
       });
+      cancel.throwIfAborted();
+      return found;
     } finally {
-      entry.progress = null;
+      if (!cancel.aborted) entry.progress = null;
     }
   }
 
@@ -541,18 +569,25 @@ export class StickerMigration extends EventTarget {
    * from Telegram, or else the page's own upload. The index is asked again right before the upload, for a copy
    * that someone uploaded meanwhile.
    */
-  async #chooseCopy(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
+  async #chooseCopy(
+    signal: SignalAccount,
+    telegram: TelegramSource,
+    entry: PackEntry,
+    cancel: AbortSignal,
+  ): Promise<void> {
     // The pack key comes from the stickers themselves, and a copy is compared with them, so they are downloaded
     // before the index is asked.
-    await this.#download(telegram, entry);
-    entry.packId = await this.#faithfulCopy(entry);
+    await this.#download(telegram, entry, cancel);
+    entry.packId = await this.#faithfulCopy(entry, cancel);
     if (!entry.packId) {
+      cancel.throwIfAborted();
       this.#plannedInstalls.delete(entry);
       this.#plannedUploads.add(entry);
-      await this.#prepare(telegram, entry);
-      entry.packId = await this.#faithfulCopy(entry);
+      await this.#prepare(telegram, entry, cancel);
+      entry.packId = await this.#faithfulCopy(entry, cancel);
     }
     if (!entry.packId) {
+      cancel.throwIfAborted();
       entry.state = 'uploading';
       this.#changed();
       const content = { title: entry.pack.title, stickers: this.#converted.get(entry)! };
@@ -562,10 +597,12 @@ export class StickerMigration extends EventTarget {
           content,
           entry.packKey!,
           (done, total) => {
+            if (cancel.aborted) return;
             entry.progress = { done, total };
             this.#changed();
           },
           signal.https,
+          cancel,
         ),
       );
       this.uploaded++;
@@ -580,15 +617,23 @@ export class StickerMigration extends EventTarget {
   }
 
   /** Migrates one pack that is not installed: chooses its copy on Signal, lists an own upload, and installs it. */
-  async #migrateOne(signal: SignalAccount, telegram: TelegramSource, entry: PackEntry): Promise<void> {
-    if (!this.#copyChosen.has(entry)) await this.#chooseCopy(signal, telegram, entry);
+  async #migrateOne(
+    signal: SignalAccount,
+    telegram: TelegramSource,
+    entry: PackEntry,
+    cancel: AbortSignal,
+  ): Promise<void> {
+    cancel.throwIfAborted();
+    if (!this.#copyChosen.has(entry)) await this.#chooseCopy(signal, telegram, entry, cancel);
+    cancel.throwIfAborted();
     if (this.#notListed.has(entry)) {
-      await this.#addToIndex(entry);
+      await this.#addToIndex(entry, cancel);
       this.#notListed.delete(entry);
     }
+    cancel.throwIfAborted();
     entry.state = 'installing';
     this.#changed();
-    await this.#install(signal, [entry]);
+    await this.#install(signal, [entry], cancel);
     Object.assign(entry, { state: 'in-signal', progress: null, error: null });
   }
 
@@ -605,6 +650,7 @@ export class StickerMigration extends EventTarget {
     Object.assign(this, { phase: 'running', stopReason: null });
     this.#changed();
     // Packs installed before this run (an earlier visit, or by the user) may not have reached the other devices.
+    cancel.throwIfAborted();
     await this.#announce(
       signal,
       this.selected.filter((entry) => entry.state === 'in-signal'),
@@ -623,11 +669,19 @@ export class StickerMigration extends EventTarget {
       const entry = queue.shift()!;
       entry.error = null;
       try {
-        await untilCancelled(this.#migrateOne(signal, telegram, entry), cancel);
+        await untilCancelled(this.#migrateOne(signal, telegram, entry, cancel), cancel);
+        cancel.throwIfAborted();
         await this.#announce(signal, [entry], false);
       } catch (error) {
         // A cancelled run leaves the pack as it was; the next run takes it up again.
-        if (cancel.aborted) throw error;
+        if (cancel.aborted) {
+          if (entry.state !== 'in-signal')
+            Object.assign(entry, {
+              state: this.#plannedInstalls.has(entry) ? 'available' : 'to-upload',
+              progress: null,
+            });
+          throw error;
+        }
         if (error instanceof RateLimitedError) {
           entry.state = 'to-upload';
           queue.unshift(entry);
@@ -640,30 +694,38 @@ export class StickerMigration extends EventTarget {
           this.#changed();
           // While waiting, the next pack is downloaded and converted. If that fails, it is tried again in its turn.
           const next = queue.find((other) => other !== entry && other.state === 'to-upload' && !other.prepared);
-          await untilCancelled(
-            Promise.all([
-              clock.sleep(this.uploadAllowedAt - clock.now()),
-              next &&
-                this.#prepare(telegram, next).then(
-                  () => {
-                    next.state = 'to-upload';
-                    this.#changed();
-                  },
-                  () => {
-                    Object.assign(next, { state: 'to-upload', progress: null });
-                    this.#changed();
-                  },
-                ),
-            ]),
-            cancel,
-          );
-          this.uploadAllowedAt = null;
+          try {
+            await untilCancelled(
+              Promise.all([
+                clock.sleep(this.uploadAllowedAt - clock.now()),
+                next &&
+                  this.#prepare(telegram, next, cancel).then(
+                    () => {
+                      if (cancel.aborted) return;
+                      next.state = 'to-upload';
+                      this.#changed();
+                    },
+                    () => {
+                      if (cancel.aborted) return;
+                      Object.assign(next, { state: 'to-upload', progress: null });
+                      this.#changed();
+                    },
+                  ),
+              ]),
+              cancel,
+            );
+          } finally {
+            this.uploadAllowedAt = null;
+            if (next && next.state !== 'to-upload' && next.state !== 'in-signal')
+              Object.assign(next, { state: 'to-upload', progress: null });
+          }
         } else {
-          Object.assign(entry, { state: 'failed', error: message(error), progress: null });
+          Object.assign(entry, { state: 'failed', error: errorMessage(error), progress: null });
         }
       }
       this.#changed();
     }
+    cancel.throwIfAborted();
     if (signal.isLinked) await this.#announce(signal, [], true);
     if (!signal.isLinked)
       Object.assign(this, { phase: 'stopped', stopReason: 'Signal was unlinked before the migration finished' });

@@ -1,7 +1,7 @@
 // Shared parts of the sticker pack steps: a base element that re-renders when the migration changes, and how packs
 // and their states are described.
 
-import { html, type PropertyValues, type TemplateResult } from 'lit';
+import type { PropertyValues } from 'lit';
 import { property } from 'lit/decorators.js';
 import { LightElement, type StepPosition } from '../../../ui/layout';
 import type { ConversionSummary, PackEntry, PackState, StickerMigration } from '../migration';
@@ -50,7 +50,10 @@ export function conversionDescription(conversion: ConversionSummary | null): str
       conversion.lowestFrameRate !== null &&
       conversion.lowestFrameRate < conversion.highestSourceFrameRate
     ) {
-      parts.push(`frame rate ${conversion.highestSourceFrameRate} → ${conversion.lowestFrameRate} fps`);
+      const formatRate = (rate: number) => String(Math.round(rate * 10) / 10);
+      const from = formatRate(conversion.highestSourceFrameRate);
+      const to = formatRate(conversion.lowestFrameRate);
+      if (from !== to) parts.push(`frame rate ${from} → ${to} fps`);
     }
     if (conversion.smallestSize !== null && conversion.smallestSize < 512)
       parts.push(`size 512 → ${conversion.smallestSize} px`);

@@ -1,6 +1,6 @@
-// Step 2: logging in to Telegram, by scanning a QR code with Telegram on the phone, or with the phone number, the
-// code Telegram sends and the Two-Step Verification password if the account has one. It shows the login machine's
-// state (app/machine/telegram) and sends it the user's input; the machine decides everything else.
+// Logging in to Telegram, by scanning a QR code with Telegram on the phone, or with the phone number, the code
+// Telegram sends and the Two-Step Verification password if the account has one. It shows the login machine's state
+// (app/machine/telegram) and sends it the user's input; the machine decides everything else.
 
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
@@ -223,8 +223,8 @@ export class TelegramStep extends LightElement {
           this.phoneForm(),
           [
             html`<p>
-              After the code that Telegram sends, the page asks for your Two-Step Verification password if your account
-              has one.
+              After the code that Telegram sends, your browser asks for your Two-Step Verification password if your
+              account has one.
             </p>`,
           ],
           html`<button type="button" class="${linkButton} self-start" @click=${() => login.useMethod('qr')}>

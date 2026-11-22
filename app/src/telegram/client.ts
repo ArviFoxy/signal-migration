@@ -20,6 +20,7 @@
 
 import tdweb, { type TdClient as TdClientType, type TdObject } from 'tdweb';
 import type * as Td from 'tdlib-types';
+import { errorMessage } from '../core/errors';
 import { randomHex } from '../core/random';
 import { NoAnswerError, REQUEST_TIME_LIMIT_S, withTimeLimit } from '../core/time-limit';
 import { downloadWithStallLimit } from './download';
@@ -192,6 +193,22 @@ export class TelegramRestartedError extends Error {
   }
 }
 
+/**
+ * A run-tagged handle to a Telegram file: its TDLib file number from one run plus the permanent remote ID that lets
+ * `TelegramClient.readFileRef` / `withFileRef` resolve a fresh number if TDLib restarts.
+ */
+export type TelegramFileRef = {
+  /** The TDLib run that produced `fileId`, or 0 when the run is unknown / stale. */
+  readonly run: number;
+  readonly fileId: number;
+  readonly remoteId: string;
+};
+
+/** Creates a run-tagged reference to a TDLib file object. */
+export function fileRef(file: Td.file, run: number): TelegramFileRef {
+  return { run, fileId: file.id, remoteId: file.remote?.id ?? '' };
+}
+
 /** The parts of tdweb's client that it does not declare: its worker and the file reader's database connection. */
 type TdwebInternals = { worker?: Worker; fileManager?: { idb?: Promise<IDBDatabase> } };
 
@@ -247,23 +264,34 @@ export class TelegramClient {
   ) {
     this.#stopped = new Promise<never>((_, reject) => (this.#stop = reject));
     this.#stopped.catch(() => undefined);
-    this.#usable = this.#startRun(0);
+    this.#usable = this.#beginRun(0);
   }
 
   get run(): number {
     return this.#run;
   }
 
+  /**
+   * Advances `#run` synchronously before async startup begins so any caller woken by a restart immediately observes
+   * the new run epoch and never reuses a file or chat handle from the previous run.
+   */
+  #beginRun(delayMs: number): Promise<void> {
+    const run = ++this.#run;
+    const usable = this.#startRun(run, delayMs);
+    usable.catch(() => undefined);
+    return usable;
+  }
+
   /** Writes our copy of the login back and starts TDLib; after a restart, waits until TDLib reports its state. */
-  async #startRun(delayMs: number): Promise<void> {
+  async #startRun(run: number, delayMs: number): Promise<void> {
     if (delayMs > 0) await wait(delayMs);
-    if (this.#isStopped) return;
+    if (this.#isStopped || run !== this.#run) return;
     // Without a copy (a new login, or one whose copy could not be read), TDLib's own database is used.
     if (await this.loginCopies.restore(this.instance).catch(() => false)) this.#hasLoginCopy = true;
-    if (this.#isStopped) return;
-    const run = ++this.#run;
-    this.#runEnded = new Promise<never>((_, reject) => (this.#endRun = reject));
-    this.#runEnded.catch(() => undefined);
+    if (this.#isStopped || run !== this.#run) return;
+    const runEnded = new Promise<never>((_, reject) => (this.#endRun = reject));
+    runEnded.catch(() => undefined);
+    this.#runEnded = runEnded;
     let markReported: () => void = () => undefined;
     const reported = new Promise<void>((resolve) => (markReported = resolve));
     this.#td = new TdClient({
@@ -273,14 +301,16 @@ export class TelegramClient {
       logVerbosityLevel: 1,
       onUpdate: (raw) => this.#onUpdate(run, fromTdweb(raw), markReported),
     });
-    if (run > 1) await Promise.race([reported, this.#stopped]);
+    // Wait until the restarted TDLib reports its state, stops for good, or crashes before reporting (so `#sendOnce`
+    // moves on to the next run's `#usable`).
+    if (run > 1) await Promise.race([reported, this.#stopped, runEnded.catch(() => undefined)]);
   }
 
   #onUpdate(run: number, update: { _: string }, markReported: () => void): void {
     if (run !== this.#run || this.#isStopped) return;
     if (update._ === 'updateFatalError') {
       const error = (update as { error?: unknown }).error;
-      this.#onFatal(error instanceof Error ? error.message : String(error));
+      this.#onFatal(errorMessage(error));
       return;
     }
     if (update._ !== 'updateAuthorizationState') return;
@@ -305,22 +335,24 @@ export class TelegramClient {
    */
   #onFatal(error: string): void {
     const restarted = this.#hasLoginCopy || this.#lastReported === 'authorizationStateReady';
+    const endRun = this.#endRun;
+    const td = this.#td;
+    this.#td = null;
     if (!restarted) {
       this.#isStopped = true;
       this.#stop(new Error('the Telegram connection was closed'));
-    }
-    this.#endRun(new TelegramRestartedError());
-    void this.#terminateWorker();
-    if (restarted) {
+    } else {
       const delay = RESTART_DELAYS_MS[Math.min(this.#failedRestarts++, RESTART_DELAYS_MS.length - 1)];
-      this.#usable = this.#startRun(delay);
+      this.#usable = this.#beginRun(delay);
     }
+    endRun(new TelegramRestartedError());
+    void this.#terminateWorker(td);
     this.onFatalError(error, restarted);
   }
 
-  /** Stops the current run's worker; resolves once its file reader's database connection is closed. */
-  async #terminateWorker(): Promise<void> {
-    const internals = this.#td as unknown as TdwebInternals | null;
+  /** Stops a run's worker; resolves once its file reader's database connection is closed. */
+  async #terminateWorker(td: TdClientType | null): Promise<void> {
+    const internals = td as unknown as TdwebInternals | null;
     internals?.worker?.terminate();
     (await internals?.fileManager?.idb?.catch(() => undefined))?.close();
   }
@@ -375,7 +407,8 @@ export class TelegramClient {
       // A stopped client comes first: its last run may have ended before TDLib started.
       await Promise.race([this.#stopped, usable]);
     } while (usable !== this.#usable);
-    return Promise.race([this.#stopped, this.#runEnded, this.#td!.send(query)]).catch((error: unknown) => {
+    if (this.#isStopped || !this.#td) throw new Error('the Telegram connection was closed');
+    return Promise.race([this.#stopped, this.#runEnded, this.#td.send(query)]).catch((error: unknown) => {
       const tdError = error as { '@type'?: string; code?: number; message?: string } | null;
       if (tdError?.['@type'] === 'error')
         throw new TelegramError(tdError.code ?? 0, tdError.message ?? 'unknown error');
@@ -444,6 +477,35 @@ export class TelegramClient {
     }
   }
 
+  async #resolveFileId(ref: TelegramFileRef): Promise<number> {
+    if (ref.run > 0 && ref.run === this.#run) return ref.fileId;
+    if (!ref.remoteId) throw new Error('the Telegram file cannot be read after Telegram restarted');
+    const before = this.#run;
+    const file = await this.invoke({ _: 'getRemoteFile', remote_file_id: ref.remoteId });
+    if (this.#run !== before) throw new TelegramRestartedError();
+    return file.id;
+  }
+
+  /**
+   * Downloads a file identified by a run-tagged reference and returns its bytes, re-resolving it via `getRemoteFile`
+   * if TDLib restarted since the reference was created, and retrying across restarts.
+   */
+  readFileRef(ref: TelegramFileRef): Promise<Uint8Array> {
+    return untilNotRestarted(async () => this.readFile(await this.#resolveFileId(ref)));
+  }
+
+  /**
+   * Downloads a file identified by a run-tagged reference and streams its bytes to `use`, re-resolving it via
+   * `getRemoteFile` if TDLib restarted since the reference was created, and retrying across restarts.
+   */
+  withFileRef<T>(
+    ref: TelegramFileRef,
+    use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
+    chunkBytes = 2 * 1024 * 1024,
+  ): Promise<T> {
+    return untilNotRestarted(async () => this.withDownloadedFile(await this.#resolveFileId(ref), use, chunkBytes));
+  }
+
   /**
    * Saves the login in this browser now: tdweb copies TDLib's database to IndexedDB (the "syncDatabase" request of
    * our tdweb patch), then the login file is copied into our own database.
@@ -467,15 +529,19 @@ export class TelegramClient {
   /** Stops TDLib's worker now and keeps the instance's databases, for TDLib to start on them again. */
   terminate(): void {
     this.#isStopped = true;
+    const td = this.#td;
+    this.#td = null;
     this.#stop(new Error('the Telegram connection was closed'));
-    void this.#terminateWorker();
+    void this.#terminateWorker(td);
   }
 
   /** Stops TDLib's worker now and deletes the instance's databases. Requests still waiting fail. */
   async dispose(): Promise<void> {
     this.#isStopped = true;
+    const td = this.#td;
+    this.#td = null;
     this.#stop(new Error('the Telegram connection was closed'));
-    await this.#terminateWorker();
+    await this.#terminateWorker(td);
     await deleteTelegramInstance(this.instance);
   }
 }
