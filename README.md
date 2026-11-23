@@ -180,11 +180,25 @@ When the migration finishes, the app unlinks the Signal device, signs out of Tel
 
 ## Verified builds
 
+The browser app does not assume the backend server is honest or uncompromised; it treats the server as a potential
+attacker with respect to confidentiality and integrity (excluding availability and the traffic metadata listed above). Even if the backend server is
+malicious, the browser app enforces its security boundaries itself: it connects to Telegram directly over MTProto, runs
+its own TLS session to Signal inside the relay pinned to Signal's root certificates, verifies Signal's contact
+discovery enclave attestation before encrypting phone numbers, and decrypts and visually compares every listed sticker
+pack copy against the original from Telegram before installing it. The server also supplies `/v1/config` (the Telegram
+client `api_id`, `api_hash`, and `testDc`), which can control which Telegram client app name appears in Active Sessions
+or direct logins to Telegram's test servers, but does not let the server read or intercept Telegram traffic or
+credentials.
+
+Because the browser code itself enforces these guarantees, the main way a malicious backend server could defeat them is
+by serving modified JavaScript or WebAssembly. Attesting the static frontend and hosting it on GitHub Pages removes the
+backend server from code delivery, so the backend server does not need to be attested for users to rely on those
+guarantees.
+
 Publishing a `v*` release triggers `.github/workflows/release.yml`, which builds the web app fresh from source on a
 GitHub-hosted runner (without reusing cached build outputs), signs a single SLSA v1.0 build provenance attestation
 covering every deployed file via GitHub Artifact Attestations (`actions/attest`), and deploys the static files and
-Sigstore bundle (`attestation.sigstore.json`) to GitHub Pages. Hosting the frontend on GitHub Pages separates code
-delivery from the relay/index server.
+Sigstore bundle (`attestation.sigstore.json`) to GitHub Pages.
 
 On startup, the page verifies `attestation.sigstore.json` in the browser (`app/src/attestation/`) against the pinned
 Sigstore Public Good root (`app/src/attestation/trusted-root.json`): the Fulcio X.509 certificate chain and Certificate
