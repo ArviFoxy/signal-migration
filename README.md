@@ -1,9 +1,9 @@
 # Telegram to Signal Migration 🔒🦊
 
 A web app that migrates data from Telegram to Signal:
-- sticker packs
-- Telegram contacts found by phone number,
-- Saved Messages (copied into Signal's Note to Self).
+- sticker packs,
+- Telegram contacts found on Signal by their phone number,
+- Saved Messages (copied into Note to Self).
 
 The web app runs locally in your browser. The Rust server cannot see any private data: it serves as an end-to-end encrypted relay to Signal (encrypted in the browser with Signal's key) and a shared index of uploaded sticker pack IDs. The web app is built by GitHub actions and hosted on GitHub Pages.
 
