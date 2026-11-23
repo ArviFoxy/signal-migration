@@ -6,7 +6,10 @@
 // (up to Signal's 100 MiB ciphertext limit) never need to be buffered in memory at once.
 
 import { toBase64 } from '../core/bytes';
-import { AttachmentEncryptor } from '../wasm/signal_migration_wasm';
+import {
+  AttachmentEncryptor,
+  encryptedAttachmentSize as wasmEncryptedAttachmentSize,
+} from '../wasm/signal_migration_wasm';
 import { type ChatChannel, chatHeader, type HttpResponse, type HttpsRequest, type SignalAccount } from './transport';
 import { loadSignalWasm } from './wasm';
 
@@ -342,10 +345,15 @@ export async function uploadAttachment(
   cancel: AbortSignal,
   chunkBytes = UPLOAD_CHUNK_BYTES,
 ): Promise<UploadedAttachment> {
-  const ciphertextSize = encryptedAttachmentSize(source.size);
-  if (ciphertextSize > MAX_ATTACHMENT_UPLOAD_BYTES) throw new AttachmentTooLargeError(ciphertextSize);
+  if (!Number.isSafeInteger(source.size) || source.size < 0) {
+    throw new Error(`invalid attachment size: ${source.size}`);
+  }
+  if (source.size > MAX_ATTACHMENT_UPLOAD_BYTES) throw new AttachmentTooLargeError(source.size);
 
   await loadSignalWasm();
+  // Use the WebAssembly implementation so Upload-Length / Content-Range always match AttachmentEncryptor bit-for-bit.
+  const ciphertextSize = wasmEncryptedAttachmentSize(source.size);
+  if (ciphertextSize > MAX_ATTACHMENT_UPLOAD_BYTES) throw new AttachmentTooLargeError(ciphertextSize);
   const form = await requestUploadForm(account, ciphertextSize, cancel);
   const uploader = new ChunkedUploader(account.https, form, ciphertextSize, cancel);
   const encryptor = new AttachmentEncryptor(source.size);

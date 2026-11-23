@@ -57,7 +57,8 @@ export async function animationDifference(
   format: 'tgs' | 'webm',
 ): Promise<number | null> {
   const png = ownBuffer(converted);
-  const opened = await askPngWorker<OpenedPng>({ open: png }, [png]);
+  const opened = await askPngWorker<OpenedPng | null>({ open: png }, [png]);
+  if (!opened) return null;
   let released = false;
   const release = () => {
     if (released) return Promise.resolve();
@@ -121,11 +122,14 @@ export async function stillDifference(converted: Uint8Array, original: Uint8Arra
   } catch {
     return null;
   }
-  const source = await asBitmap(original);
+  let source: ImageBitmap | null = null;
   try {
+    source = await asBitmap(original);
     // The app scales a picture down so that neither side is longer than MAX_STILL_SIZE (convert.ts reencodeWebp).
     const scale = Math.min(1, MAX_STILL_SIZE / Math.max(source.width, source.height));
-    if (copy.width !== Math.round(source.width * scale) || copy.height !== Math.round(source.height * scale)) {
+    const expectedWidth = Math.max(1, Math.round(source.width * scale));
+    const expectedHeight = Math.max(1, Math.round(source.height * scale));
+    if (copy.width !== expectedWidth || copy.height !== expectedHeight) {
       return null;
     }
     return largestDifference(
@@ -136,7 +140,7 @@ export async function stillDifference(converted: Uint8Array, original: Uint8Arra
     );
   } finally {
     copy.close();
-    source.close();
+    source?.close();
   }
 }
 

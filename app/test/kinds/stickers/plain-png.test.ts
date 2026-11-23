@@ -124,4 +124,70 @@ describe('a plain PNG file', () => {
     late.splice(late.findIndex((chunk) => chunk.kind === 'IDAT') + 1, 0, chunks[announced]);
     expect(isPlainPng(fileOf(late))).toBe(false);
   });
+
+  // Detects: APNG polyglot where fdAT immediately follows IDAT without a preceding fcTL, or where sequence numbers,
+  // frame counts, play counts, IHDR dimensions, or frame rectangles are malformed.
+  it('rejects APNG polyglots, bad sequence numbers, non-zero play count, and oversized IHDR', () => {
+    const chunks = chunksOf(animation);
+    const idatIdx = chunks.findIndex((c) => c.kind === 'IDAT');
+    const firstFdat = chunks.find((c) => c.kind === 'fdAT')!;
+
+    // 1. Polyglot: fdAT placed directly after IDAT without an intervening fcTL.
+    const polyglot = chunks.slice();
+    polyglot.splice(idatIdx + 1, 0, { kind: 'fdAT', data: firstFdat.data.slice() });
+    expect(isPlainPng(fileOf(polyglot)), 'fdAT directly after IDAT').toBe(false);
+
+    // 2. Non-zero acTL.num_plays (Signal requires infinite loop num_plays === 0).
+    const finiteLoop = chunks.map((c) => {
+      if (c.kind !== 'acTL') return c;
+      const data = c.data.slice();
+      new DataView(data.buffer, data.byteOffset, data.byteLength).setUint32(4, 1);
+      return { kind: c.kind, data };
+    });
+    expect(isPlainPng(fileOf(finiteLoop)), 'non-zero num_plays').toBe(false);
+
+    // 3. Corrupted fcTL sequence_number (skipping from 0 to 99).
+    const badSeq = chunks.map((c, idx) => {
+      if (c.kind !== 'fcTL' || idx <= idatIdx) return c;
+      const data = c.data.slice();
+      new DataView(data.buffer, data.byteOffset, data.byteLength).setUint32(0, 99);
+      return { kind: c.kind, data };
+    });
+    expect(isPlainPng(fileOf(badSeq)), 'non-monotonic sequence_number').toBe(false);
+
+    // 4. Out-of-bounds fcTL frame rectangle (x_offset + width > IHDR width).
+    const outOfBounds = chunks.map((c, idx) => {
+      if (c.kind !== 'fcTL' || idx <= idatIdx) return c;
+      const data = c.data.slice();
+      new DataView(data.buffer, data.byteOffset, data.byteLength).setUint32(12, 5); // x_offset=5, width=8 > 8
+      return { kind: c.kind, data };
+    });
+    expect(isPlainPng(fileOf(outOfBounds)), 'out-of-bounds fcTL rect').toBe(false);
+
+    // 5. Oversized IHDR (decompression bomb: 4096x4096).
+    const huge = chunksOf(still).map((c) => {
+      if (c.kind !== 'IHDR') return c;
+      const data = c.data.slice();
+      const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
+      view.setUint32(0, 4096);
+      view.setUint32(4, 4096);
+      return { kind: c.kind, data };
+    });
+    expect(isPlainPng(fileOf(huge)), 'oversized IHDR 4096x4096').toBe(false);
+
+    // 6. Frame 0 fcTL with dispose_op = 2 (APNG_DISPOSE_OP_PREVIOUS is invalid on frame 0).
+    const badFrame0Dispose = chunks.map((c, idx) => {
+      if (c.kind !== 'fcTL' || idx > idatIdx) return c;
+      const data = c.data.slice();
+      data[24] = 2;
+      return { kind: c.kind, data };
+    });
+    expect(isPlainPng(fileOf(badFrame0Dispose)), 'frame 0 dispose_op=2').toBe(false);
+
+    // 7. Non-empty IEND chunk.
+    const nonEmptyIend = chunksOf(still).map((c) =>
+      c.kind === 'IEND' ? { kind: 'IEND', data: new Uint8Array([1]) } : c,
+    );
+    expect(isPlainPng(fileOf(nonEmptyIend)), 'non-empty IEND').toBe(false);
+  });
 });

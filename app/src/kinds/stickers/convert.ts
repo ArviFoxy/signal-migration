@@ -13,7 +13,7 @@
 
 import lottie from 'lottie-web/build/player/lottie_light_canvas';
 import { buildVerifier } from '../../attestation/runtime';
-import { assetFile, assetUrl } from '../../core/assets';
+import { assetFile } from '../../core/assets';
 import { plainWebp } from './plain-webp';
 import { withTimeLimit } from '../../core/time-limit';
 import type { StickerFormat } from './telegram-packs';
@@ -104,6 +104,7 @@ export type Animation = {
 /** A worker that answers requests by ID, started on first use. */
 class WorkerChannel {
   #worker: Worker | null = null;
+  #revokeUrl: (() => void) | null = null;
   #starting: Promise<Worker> | null = null;
   #generation = 0;
   #nextId = 0;
@@ -113,8 +114,8 @@ class WorkerChannel {
     private readonly file: string,
     /** What the worker is, for the error when it fails as a whole. */
     private readonly name: string,
-    /** Additional static files this worker loads, verified before the worker starts. */
-    private readonly extraFiles: readonly string[] = [],
+    /** Optional WASM module initialized inside the worker (verified `ArrayBuffer` when attested). */
+    private readonly wasmFile?: string,
   ) {}
 
   async #ensureWorker(): Promise<Worker> {
@@ -122,11 +123,15 @@ class WorkerChannel {
     if (!this.#starting) {
       const generation = ++this.#generation;
       const pending = (async () => {
-        for (const file of [this.file, ...this.extraFiles]) {
-          await buildVerifier.verifyAsset(file, import.meta.url);
+        const [workerInput, wasmInput] = await Promise.all([
+          buildVerifier.resolveWorkerInput(this.file, import.meta.url),
+          this.wasmFile ? buildVerifier.resolveWasmInput(this.wasmFile, import.meta.url) : Promise.resolve(null),
+        ]);
+        if (this.#generation !== generation) {
+          workerInput.revoke();
+          throw new ConversionError(`${this.name} was stopped`);
         }
-        if (this.#generation !== generation) throw new ConversionError(`${this.name} was stopped`);
-        const worker = new Worker(assetUrl(this.file, import.meta.url), { type: 'module' });
+        const worker = new Worker(workerInput.url, { type: 'module' });
         worker.onmessage = (event: MessageEvent<{ id: number; result?: never; error?: string }>) => {
           const request = this.#pending.get(event.data.id);
           this.#pending.delete(event.data.id);
@@ -134,7 +139,23 @@ class WorkerChannel {
           else request?.resolve(event.data.result as never);
         };
         worker.onerror = (event) => this.stop(new ConversionError(`${this.name} failed: ${event.message}`));
+        worker.onmessageerror = () => this.stop(new ConversionError(`${this.name} returned an unreadable message`));
         this.#worker = worker;
+        this.#revokeUrl = workerInput.revoke;
+        if (wasmInput !== null) {
+          const initId = this.#nextId++;
+          await new Promise<void>((resolve, reject) => {
+            this.#pending.set(initId, { resolve: () => resolve(), reject });
+            if (wasmInput instanceof ArrayBuffer) {
+              worker.postMessage({ id: initId, kind: 'init', wasmBinary: wasmInput }, [wasmInput]);
+            } else {
+              worker.postMessage({ id: initId, kind: 'init', wasmUrl: wasmInput.href });
+            }
+          });
+          if (this.#generation !== generation || this.#worker !== worker) {
+            throw new ConversionError(`${this.name} was stopped`);
+          }
+        }
         return worker;
       })();
       this.#starting = pending;
@@ -147,10 +168,16 @@ class WorkerChannel {
 
   async request<T>(message: object, transfer: Transferable[] = []): Promise<T> {
     const worker = await this.#ensureWorker();
+    if (this.#worker !== worker) throw new ConversionError(`${this.name} was stopped`);
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve: resolve as (result: never) => void, reject });
-      worker.postMessage({ id, ...message }, transfer);
+      try {
+        worker.postMessage({ id, ...message }, transfer);
+      } catch (error) {
+        this.#pending.delete(id);
+        reject(error instanceof Error ? error : new ConversionError(String(error)));
+      }
     });
   }
 
@@ -160,13 +187,15 @@ class WorkerChannel {
     this.#starting = null;
     this.#worker?.terminate();
     this.#worker = null;
+    this.#revokeUrl?.();
+    this.#revokeUrl = null;
     for (const request of this.#pending.values()) request.reject(error);
     this.#pending.clear();
   }
 }
 
 const encoder = new WorkerChannel(assetFile('apngWorker'), 'the animation encoder');
-const videoDecoder = new WorkerChannel(assetFile('webmWorker'), 'the video decoder', [assetFile('webmDecoderWasm')]);
+const videoDecoder = new WorkerChannel(assetFile('webmWorker'), 'the video decoder', assetFile('webmDecoderWasm'));
 
 /** Asks the worker that encodes and reads animated PNG files (apng-worker.ts). */
 export const askPngWorker = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>
@@ -421,12 +450,93 @@ function newCanvas(size: number): { canvas: HTMLCanvasElement; context: CanvasRe
   return { canvas, context };
 }
 
+/** Maximum decompressed JSON size allowed for a Telegram .tgs Lottie animation (blocks gzip decompression bombs). */
+const MAX_TGS_JSON_BYTES = 4 * 1024 * 1024;
+/** Maximum animation duration accepted from a .tgs sticker, in seconds. */
+const MAX_TGS_DURATION_S = 60;
+
+async function gunzipWithLimit(compressed: Uint8Array, maxBytes: number): Promise<string> {
+  const reader = new Blob([compressed as Uint8Array<ArrayBuffer>])
+    .stream()
+    .pipeThrough(new DecompressionStream('gzip'))
+    .getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > maxBytes) {
+        await reader.cancel().catch(() => undefined);
+        throw new ConversionError(`the animation exceeds the ${maxBytes / (1024 * 1024)} MiB decompressed size limit`);
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+  const out = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    out.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(out);
+}
+
+/**
+ * Validates and strips untrusted Lottie fields so lottie-web cannot fetch external URLs or inject <link> elements
+ * into document.head (fonts.list, segments, external image/audio assets).
+ */
+function sanitizeLottieData(raw: unknown): { fr: number; ip: number; op: number; [key: string]: unknown } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new ConversionError('the animation file is not a valid Lottie object');
+  }
+  const data = raw as Record<string, unknown>;
+  const { fr, ip, op } = data;
+  if (
+    typeof fr !== 'number' ||
+    typeof ip !== 'number' ||
+    typeof op !== 'number' ||
+    !Number.isFinite(fr) ||
+    !Number.isFinite(ip) ||
+    !Number.isFinite(op) ||
+    fr <= 0 ||
+    fr > 120 ||
+    op <= ip ||
+    !Array.isArray(data.layers)
+  ) {
+    throw new ConversionError('the animation file has invalid timing or layers');
+  }
+  const duration = (op - ip) / fr;
+  if (!Number.isFinite(duration) || duration <= 0 || duration > MAX_TGS_DURATION_S) {
+    throw new ConversionError('the animation duration is out of bounds');
+  }
+  delete data.fonts;
+  delete data.segments;
+  if (Array.isArray(data.assets)) {
+    // Only precomposition assets (which contain inline vector layers) are permitted; external URL assets are stripped.
+    data.assets = data.assets.filter(
+      (asset): asset is Record<string, unknown> =>
+        Boolean(asset) && typeof asset === 'object' && Array.isArray((asset as Record<string, unknown>).layers),
+    );
+  } else {
+    data.assets = [];
+  }
+  return data as { fr: number; ip: number; op: number; [key: string]: unknown };
+}
+
 async function lottieAnimation(tgs: Uint8Array, step: Step): Promise<Animation> {
   step.now = 'unpacking the animation';
-  const json = await new Response(
-    new Blob([tgs as Uint8Array<ArrayBuffer>]).stream().pipeThrough(new DecompressionStream('gzip')),
-  ).text();
-  const data = JSON.parse(json) as { fr: number; ip: number; op: number };
+  const json = await gunzipWithLimit(tgs, MAX_TGS_JSON_BYTES);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new ConversionError('the animation file is not valid JSON');
+  }
+  const data = sanitizeLottieData(parsed);
   const totalFrames = data.op - data.ip;
   return {
     duration: totalFrames / data.fr,
@@ -441,19 +551,30 @@ async function lottieAnimation(tgs: Uint8Array, step: Step): Promise<Animation> 
         autoplay: false,
         animationData: structuredClone(data),
         rendererSettings: { context, clearCanvas: true },
+        ...({ autoloadSegments: false } as object),
       });
-      step.now = `waiting for the animation to load, at ${size} px`;
-      if (!animation.isLoaded)
-        await new Promise<void>((resolve) => animation.addEventListener('DOMLoaded', () => resolve()));
-      const frames: ArrayBuffer[] = [];
-      const count = Math.max(1, Math.round((totalFrames / data.fr) * frameRate));
-      for (let k = 0; k < count; k++) {
-        step.now = `drawing frame ${k + 1} of ${count} at ${size} px`;
-        animation.goToAndStop(Math.min((k * data.fr) / frameRate, totalFrames - 1), true);
-        frames.push(context.getImageData(0, 0, size, size).data.buffer);
+      try {
+        step.now = `waiting for the animation to load, at ${size} px`;
+        if (!animation.isLoaded) {
+          await new Promise<void>((resolve, reject) => {
+            animation.addEventListener('DOMLoaded', () => resolve());
+            animation.addEventListener('data_failed', () =>
+              reject(new ConversionError('the animation data failed to load')),
+            );
+            animation.addEventListener('error', () => reject(new ConversionError('the animation failed to load')));
+          });
+        }
+        const frames: ArrayBuffer[] = [];
+        const count = Math.max(1, Math.round((totalFrames / data.fr) * frameRate));
+        for (let k = 0; k < count; k++) {
+          step.now = `drawing frame ${k + 1} of ${count} at ${size} px`;
+          animation.goToAndStop(Math.min((k * data.fr) / frameRate, totalFrames - 1), true);
+          frames.push(context.getImageData(0, 0, size, size).data.buffer);
+        }
+        return frames;
+      } finally {
+        animation.destroy();
       }
-      animation.destroy();
-      return frames;
     },
     close() {},
   };
@@ -492,10 +613,17 @@ export const MAX_STILL_SIZE = MAX_SIZE;
 
 async function reencodeWebp(webp: Uint8Array): Promise<Uint8Array> {
   const bitmap = await createImageBitmap(new Blob([webp as Uint8Array<ArrayBuffer>], { type: 'image/webp' }));
-  const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height));
-  const canvas = new OffscreenCanvas(Math.round(bitmap.width * scale), Math.round(bitmap.height * scale));
-  canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
-  bitmap.close();
+  let canvas: OffscreenCanvas;
+  try {
+    const scale = Math.min(1, MAX_SIZE / Math.max(bitmap.width, bitmap.height));
+    canvas = new OffscreenCanvas(
+      Math.max(1, Math.round(bitmap.width * scale)),
+      Math.max(1, Math.round(bitmap.height * scale)),
+    );
+    canvas.getContext('2d')!.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+  } finally {
+    bitmap.close();
+  }
   for (const quality of [0.9, 0.8, 0.7, 0.6, 0.5]) {
     const blob = await canvas.convertToBlob({ type: 'image/webp', quality });
     if (blob.size > MAX_STICKER_BYTES) continue;

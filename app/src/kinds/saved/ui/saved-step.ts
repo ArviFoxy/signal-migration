@@ -72,7 +72,7 @@ export class SavedStep extends LightElement {
   readonly #clipPrefix = `saved-tl-${++nextClipId}`;
   #cachedMessages: readonly SavedMessage[] | null = null;
   #cachedTimeline: Timeline | null = null;
-  #dragging = false;
+  #dragPointerId: number | null = null;
   #observer: ResizeObserver | null = null;
   #observedStage: Element | null = null;
 
@@ -229,25 +229,26 @@ export class SavedStep extends LightElement {
           data-timeline-stage
           class="relative h-[136px] cursor-ew-resize touch-none peer-focus-visible:[&_[data-knob]]:ring-2 peer-focus-visible:[&_[data-knob]]:ring-accent peer-focus-visible:[&_[data-knob]]:ring-offset-2"
           @pointerdown=${(event: PointerEvent) => {
+            if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
             const stage = event.currentTarget as HTMLElement;
-            this.#dragging = true;
+            this.#dragPointerId = event.pointerId;
             stage.setPointerCapture(event.pointerId);
             this.draftDay = this.dayFromPointer(timeline, stage, event.clientX);
             this.querySelector<HTMLInputElement>('input[type="range"]')?.focus({ preventScroll: true });
           }}
           @pointermove=${(event: PointerEvent) => {
-            if (!this.#dragging) return;
+            if (this.#dragPointerId !== event.pointerId) return;
             this.draftDay = this.dayFromPointer(timeline, event.currentTarget as HTMLElement, event.clientX);
           }}
           @pointerup=${(event: PointerEvent) => {
-            if (!this.#dragging) return;
-            this.#dragging = false;
+            if (this.#dragPointerId !== event.pointerId) return;
+            this.#dragPointerId = null;
             const day = this.dayFromPointer(timeline, event.currentTarget as HTMLElement, event.clientX);
             this.commitDay(timeline, day);
           }}
-          @pointercancel=${() => {
-            if (!this.#dragging) return;
-            this.#dragging = false;
+          @pointercancel=${(event: PointerEvent) => {
+            if (this.#dragPointerId !== event.pointerId) return;
+            this.#dragPointerId = null;
             this.commitDay(timeline, this.draftDay ?? dayOffset);
           }}
         >

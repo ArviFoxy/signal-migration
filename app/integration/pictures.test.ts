@@ -213,3 +213,107 @@ it('refuses a still picture with one more small shape', async () => {
 it('refuses the conversion of an animation of another length', async () => {
   expect(await page('sameAnimation', 'video.png', 'animation.tgs', 'tgs')).toBe(false);
 });
+
+// Detects: APNG polyglot (fdAT directly after IDAT without fcTL) passing isPlainPng on a real converted animation.
+it('refuses a real APNG polyglot where fdAT immediately follows IDAT without fcTL', async () => {
+  const animBytes = Uint8Array.from(Buffer.from(await page<string>('getBase64', 'animation.png'), 'base64'));
+  const view = new DataView(animBytes.buffer, animBytes.byteOffset, animBytes.byteLength);
+  const chunks: { kind: string; data: Uint8Array }[] = [];
+  for (let at = 8; at < animBytes.length;) {
+    const len = view.getUint32(at);
+    chunks.push({
+      kind: String.fromCharCode(...animBytes.subarray(at + 4, at + 8)),
+      data: animBytes.slice(at + 8, at + 8 + len),
+    });
+    at += 12 + len;
+  }
+  const idatIdx = chunks.findIndex((c) => c.kind === 'IDAT');
+  const firstFdat = chunks.find((c) => c.kind === 'fdAT')!;
+  const polyChunks = chunks.slice();
+  polyChunks.splice(idatIdx + 1, 0, { kind: 'fdAT', data: firstFdat.data.slice() });
+  const parts: number[] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (const { kind, data } of polyChunks) {
+    const body = new Uint8Array([...kind].map((c) => c.charCodeAt(0)).concat([...data]));
+    const lenBuf = new Uint8Array(4);
+    new DataView(lenBuf.buffer).setUint32(0, data.length);
+    const sumBuf = new Uint8Array(4);
+    new DataView(sumBuf.buffer).setUint32(0, zlib.crc32(body));
+    parts.push(...lenBuf, ...body, ...sumBuf);
+  }
+  await put('polyglot.png', new Uint8Array(parts));
+  expect(await page('isPlainPng', 'polyglot.png')).toBe(false);
+});
+
+// Detects: untrusted .tgs Lottie JSON with fonts.list or external assets triggering SSRF requests or injecting
+// <link rel="stylesheet"> elements into document.head when lottie-web loads the sticker.
+it('strips fonts and external assets from .tgs stickers so lottie-web makes zero external requests', async () => {
+  site.trapHits.length = 0;
+  const linksBefore = await page<number>('headLinkCount');
+  const raw = JSON.parse(zlib.gunzipSync(animatedSticker()).toString('utf8')) as Record<string, unknown>;
+  raw.fonts = {
+    list: [
+      {
+        origin: 1,
+        fPath: `${site.base}trap/font.css`,
+        fClass: '',
+        fFamily: 'EvilFont',
+        fWeight: '',
+        fStyle: 'Regular',
+        fName: 'EvilFont-Regular',
+        ascent: 75,
+      },
+    ],
+  };
+  raw.assets = [
+    {
+      id: 'evil_img',
+      w: 64,
+      h: 64,
+      u: `${site.base}trap/`,
+      p: 'evil.png',
+      e: 0,
+    },
+  ];
+  await put('trapped.tgs', zlib.gzipSync(JSON.stringify(raw)));
+  await page('convert', 'trapped.tgs', 'tgs', 'trapped.png');
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(site.trapHits).toEqual([]);
+  expect(await page<number>('headLinkCount')).toBe(linksBefore);
+});
+
+// Detects: a corrupt-zlib untrusted PNG throwing out of animationDifference/sameAnimation (aborting pack
+// verification) instead of returning null/false so the next candidate or upload proceeds.
+it('returns false cleanly when comparing a PNG with corrupted zlib data', async () => {
+  const animBytes = Uint8Array.from(Buffer.from(await page<string>('getBase64', 'animation.png'), 'base64'));
+  const view = new DataView(animBytes.buffer, animBytes.byteOffset, animBytes.byteLength);
+  const chunks: { kind: string; data: Uint8Array }[] = [];
+  for (let at = 8; at < animBytes.length;) {
+    const len = view.getUint32(at);
+    chunks.push({
+      kind: String.fromCharCode(...animBytes.subarray(at + 4, at + 8)),
+      data: animBytes.slice(at + 8, at + 8 + len),
+    });
+    at += 12 + len;
+  }
+  const corrupt = chunks.map((c) =>
+    c.kind === 'IDAT' ? { kind: 'IDAT', data: new Uint8Array([0xff, 0xff, 0xff]) } : c,
+  );
+  const parts: number[] = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
+  for (const { kind, data } of corrupt) {
+    const body = new Uint8Array([...kind].map((c) => c.charCodeAt(0)).concat([...data]));
+    const lenBuf = new Uint8Array(4);
+    new DataView(lenBuf.buffer).setUint32(0, data.length);
+    const sumBuf = new Uint8Array(4);
+    new DataView(sumBuf.buffer).setUint32(0, zlib.crc32(body));
+    parts.push(...lenBuf, ...body, ...sumBuf);
+  }
+  await put('corrupt-zlib.png', new Uint8Array(parts));
+  expect(await page('sameAnimation', 'corrupt-zlib.png', 'animation.tgs', 'tgs')).toBe(false);
+});
+
+// Detects: a tiny gzip-bomb .tgs unpacking unbounded JSON into browser memory.
+it('rejects a .tgs gzip bomb exceeding the decompressed size limit', async () => {
+  const bomb = zlib.gzipSync(' '.repeat(5 * 1024 * 1024) + '{}');
+  await put('bomb.tgs', bomb);
+  await expect(page('convert', 'bomb.tgs', 'tgs', 'bomb.png')).rejects.toThrow(/large|limit|size/i);
+});

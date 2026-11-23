@@ -1,6 +1,6 @@
 // The Telegram login machine: the variants' handlers and work put together.
 
-import { byVariant, type Context } from '../core';
+import { byExhaustiveVariant, type Context } from '../core';
 import type { Work } from '../work';
 import { creating, creatingWork } from './creating';
 import { deletingHandlers, deletingWork } from './deleting';
@@ -17,7 +17,7 @@ import { stoppedHandlers, stoppedWork } from './stopped';
 export * from './state';
 
 export const telegramTransition: (state: TelegramState, event: TelegramEvent, context: Context) => TelegramState =
-  byVariant<TelegramState, TelegramEvent, Context>({
+  byExhaustiveVariant<TelegramState, TelegramEvent, Context>({
     off,
     creating,
     starting,

@@ -53,9 +53,13 @@ FROM base AS rust
 RUN apt-get update && apt-get install -y --no-install-recommends protobuf-compiler clang llvm \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH=/root/.cargo/bin:$PATH
-COPY crates/server/rust-toolchain.toml crates/signal-wasm/Cargo.lock /tmp/
+COPY crates/server/rust-toolchain.toml /tmp/rust-toolchain.toml
+COPY crates/signal-wasm/Cargo.lock /tmp/signal-wasm.Cargo.lock
+COPY crates/attestation-wasm/Cargo.lock /tmp/attestation-wasm.Cargo.lock
 RUN toolchain=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' /tmp/rust-toolchain.toml) \
-    && wasm_bindgen=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"/\1/p}' /tmp/Cargo.lock) \
+    && wasm_bindgen=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"/\1/p}' /tmp/signal-wasm.Cargo.lock) \
+    && attest_bindgen=$(sed -n '/^name = "wasm-bindgen"$/{n;s/^version = "\(.*\)"/\1/p}' /tmp/attestation-wasm.Cargo.lock) \
+    && test -n "$toolchain" && test -n "$wasm_bindgen" && test "$wasm_bindgen" = "$attest_bindgen" \
     && rustup toolchain install "$toolchain" --profile minimal --target wasm32-unknown-unknown \
     && cargo +"$toolchain" install wasm-bindgen-cli --version "$wasm_bindgen" --locked
 

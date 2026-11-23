@@ -30,10 +30,11 @@ libsignal=$repo/third_party/libsignal
 out=$repo/build/boringssl-wasm
 
 boring_tag=$(sed -n 's/^boring-signal = .*tag = "\([^"]*\)".*/\1/p' "$libsignal/Cargo.toml")
+boring_rev=$(sed -n '/^name = "boring-sys"$/{n;n;s/^source = "git+https:\/\/github\.com\/signalapp\/boring?[^#]*#\([0-9a-f]\{40\}\)"/\1/p}' "$libsignal/Cargo.lock")
 libc_version=$(sed -n '/^name = "libc"$/{n;s/^version = "\(.*\)"/\1/p}' "$libsignal/Cargo.lock")
 libc_sha256=$(sed -n '/^name = "libc"$/{n;n;n;s/^checksum = "\(.*\)"/\1/p}' "$libsignal/Cargo.lock")
-[ -n "$boring_tag" ] && [ -n "$libc_version" ] && [ -n "$libc_sha256" ] || {
-  echo "could not read the boring tag or the libc version from $libsignal" >&2
+[ -n "$boring_tag" ] && [ -n "$boring_rev" ] && [ -n "$libc_version" ] && [ -n "$libc_sha256" ] || {
+  echo "could not read the boring tag/rev or the libc version from $libsignal" >&2
   exit 1
 }
 
@@ -43,20 +44,38 @@ mkdir -p "$work"
 if [ -z "${WASI_SDK:-}" ]; then
   WASI_SDK=$out/work/$WASI_SDK_FILE
   if [ ! -d "$WASI_SDK" ]; then
-    archive=$out/work/$WASI_SDK_FILE.tar.gz
+    archive=$out/work/$WASI_SDK_FILE.tar.gz.tmp
+    extract_tmp=$out/work/$WASI_SDK_FILE.tmp
+    rm -rf "$archive" "$extract_tmp"
     curl -fsSLo "$archive" "https://github.com/WebAssembly/wasi-sdk/releases/download/$WASI_SDK_RELEASE/$WASI_SDK_FILE.tar.gz"
     echo "$WASI_SDK_SHA256  $archive" | sha256sum -c -
-    tar -xzf "$archive" -C "$out/work"
-    rm "$archive"
+    mkdir -p "$extract_tmp"
+    tar -xzf "$archive" -C "$extract_tmp" --strip-components=1
+    mv "$extract_tmp" "$WASI_SDK"
+    rm -f "$archive"
   fi
 fi
 
 boring=$work/boring
 if [ ! -d "$boring" ]; then
-  git clone --depth 1 --branch "$boring_tag" https://github.com/signalapp/boring "$boring"
-  git -C "$boring" submodule update --init --depth 1 boring-sys/deps/boringssl
+  boring_tmp=$work/boring.tmp
+  rm -rf "$boring_tmp"
+  git clone --depth 1 --branch "$boring_tag" https://github.com/signalapp/boring "$boring_tmp"
+  actual_rev=$(git -C "$boring_tmp" rev-parse HEAD)
+  [ "$actual_rev" = "$boring_rev" ] || {
+    echo "signalapp/boring commit mismatch: expected $boring_rev, got $actual_rev" >&2
+    exit 1
+  }
+  git -C "$boring_tmp" submodule update --init --depth 1 boring-sys/deps/boringssl
   # The one patch the boring crate applies whatever its features are (boring-sys/build/main.rs).
-  git -C "$boring/boring-sys/deps/boringssl" apply "$boring/boring-sys/patches/boring-pq.patch"
+  git -C "$boring_tmp/boring-sys/deps/boringssl" apply "$boring_tmp/boring-sys/patches/boring-pq.patch"
+  mv "$boring_tmp" "$boring"
+else
+  actual_rev=$(git -C "$boring" rev-parse HEAD)
+  [ "$actual_rev" = "$boring_rev" ] || {
+    echo "signalapp/boring commit mismatch: expected $boring_rev, got $actual_rev" >&2
+    exit 1
+  }
 fi
 source=$boring/boring-sys/deps/boringssl
 
@@ -69,7 +88,7 @@ if [ ! -f "$work/build/libcrypto.a" ] || [ ! -f "$work/build/libssl.a" ]; then
   cmake --build "$work/build" --target crypto ssl -j"$(nproc)"
 fi
 
-rm -rf "$out/lib" "$out/include" "$out/sysroot" "$out/libc"
+rm -rf "$out/lib" "$out/include" "$out/sysroot" "$out/libc" "$out/libc.tmp"
 mkdir -p "$out/lib" "$out/sysroot/include" "$out/sysroot/lib"
 cp "$work/build/libcrypto.a" "$work/build/libssl.a" "$out/lib/"
 cp "$WASI_SDK"/lib/clang/*/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a "$out/lib/"
@@ -78,10 +97,18 @@ cp -r "$WASI_SDK/share/wasi-sysroot/include/$WASI_TARGET" "$out/sysroot/include/
 cp -r "$WASI_SDK/share/wasi-sysroot/lib/$WASI_TARGET" "$out/sysroot/lib/"
 
 crate=$work/libc-$libc_version.crate
-[ -f "$crate" ] || curl -fsSLo "$crate" "https://static.crates.io/crates/libc/libc-$libc_version.crate"
-echo "$libc_sha256  $crate" | sha256sum -c -
-mkdir "$out/libc"
-tar -xzf "$crate" -C "$out/libc" --strip-components=1
-patch -d "$out/libc" -p1 < "$repo/crates/attestation-wasm/libc-wasm32-unknown.patch"
+if [ ! -f "$crate" ]; then
+  crate_tmp="$crate.tmp"
+  rm -f "$crate_tmp"
+  curl -fsSLo "$crate_tmp" "https://static.crates.io/crates/libc/libc-$libc_version.crate"
+  echo "$libc_sha256  $crate_tmp" | sha256sum -c -
+  mv "$crate_tmp" "$crate"
+else
+  echo "$libc_sha256  $crate" | sha256sum -c -
+fi
+mkdir "$out/libc.tmp"
+tar -xzf "$crate" -C "$out/libc.tmp" --strip-components=1
+patch -d "$out/libc.tmp" -p1 < "$repo/crates/attestation-wasm/libc-wasm32-unknown.patch"
+mv "$out/libc.tmp" "$out/libc"
 
 du -sh "$out/lib" "$out/include" "$out/sysroot" "$out/libc"

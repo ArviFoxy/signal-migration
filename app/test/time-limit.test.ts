@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { withTimeLimit } from '../src/core/time-limit';
+import { NoAnswerError, withFetchTimeLimit, withTimeLimit } from '../src/core/time-limit';
 
 describe('withTimeLimit', () => {
   afterEach(() => vi.useRealTimers());
@@ -30,5 +30,53 @@ describe('withTimeLimit', () => {
     expect(await result).toBe('converted');
     await vi.advanceTimersByTimeAsync(200_000);
     expect(stopped).toBe(false);
+  });
+
+  // Detects: response headers arriving in time while the response body stalls forever without aborting fetch.
+  it('aborts and rejects when a fetched body stalls past the time limit', async () => {
+    vi.useFakeTimers();
+    let aborted = false;
+    const fakeFetch: typeof fetch = (async (_input, init) => {
+      init?.signal?.addEventListener('abort', () => (aborted = true));
+      return {
+        arrayBuffer: () => new Promise<ArrayBuffer>(() => undefined),
+      } as unknown as Response;
+    }) as typeof fetch;
+
+    const promise = withFetchTimeLimit(
+      'Signal',
+      10,
+      'https://cdn.example/file',
+      {},
+      (response) => response.arrayBuffer(),
+      fakeFetch,
+    );
+    const outcome = promise.catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(10_000);
+    const error = await outcome;
+    expect(error).toBeInstanceOf(NoAnswerError);
+    expect(aborted).toBe(true);
+  });
+
+  // Detects: withFetchTimeLimit overwriting a caller-supplied AbortSignal instead of composing it.
+  it('forwards caller AbortSignal into fetch', async () => {
+    const caller = new AbortController();
+    let receivedSignal: AbortSignal | undefined;
+    const fakeFetch: typeof fetch = (async (_input, init) => {
+      receivedSignal = init?.signal ?? undefined;
+      return new Response('ok');
+    }) as typeof fetch;
+
+    await withFetchTimeLimit(
+      'The migration server',
+      10,
+      'https://server.example/x',
+      { signal: caller.signal },
+      (r) => r.text(),
+      fakeFetch,
+    );
+    expect(receivedSignal?.aborted).toBe(false);
+    caller.abort();
+    expect(receivedSignal?.aborted).toBe(true);
   });
 });

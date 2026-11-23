@@ -25,6 +25,23 @@ export const MAX_STICKER_BYTES = 300 * 1024;
 export const MAX_STICKERS = 200;
 const CDN_HOST = 'cdn.signal.org';
 const CONCURRENT_UPLOADS = 3;
+const MAX_CDN_ATTEMPTS = 4;
+const MAX_RETRY_AFTER_S = 60;
+
+function sleepAbortable(ms: number, cancel?: AbortSignal): Promise<void> {
+  if (cancel?.aborted) return Promise.reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancel!.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      cancel?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    cancel?.addEventListener('abort', onAbort, { once: true });
+  });
+}
 
 export type UploadFormItem = {
   id: number;
@@ -76,17 +93,35 @@ export function multipartBody(item: UploadFormItem, file: Uint8Array, boundary: 
   return body;
 }
 
-async function postToCdn(https: HttpsRequest, item: UploadFormItem, file: Uint8Array): Promise<void> {
-  const boundary = `----------------${randomHex(16)}`;
-  const response = await https(
-    CDN_HOST,
-    'POST',
-    '/',
-    [`Content-Type: multipart/form-data; boundary=${boundary}`],
-    multipartBody(item, file, boundary),
-  );
-  if (response.status < 200 || response.status >= 300)
-    throw new Error(`uploading ${item.key} answered ${response.status}`);
+async function postToCdn(
+  https: HttpsRequest,
+  item: UploadFormItem,
+  file: Uint8Array,
+  cancel?: AbortSignal,
+): Promise<void> {
+  for (let attempt = 1; ; attempt++) {
+    cancel?.throwIfAborted();
+    const boundary = `----------------${randomHex(16)}`;
+    const response = await https(
+      CDN_HOST,
+      'POST',
+      '/',
+      [`Content-Type: multipart/form-data; boundary=${boundary}`],
+      multipartBody(item, file, boundary),
+    );
+    if (response.status >= 200 && response.status < 300) return;
+    const retryable = response.status === 429 || (response.status >= 500 && response.status < 600);
+    if (!retryable || attempt >= MAX_CDN_ATTEMPTS) {
+      throw new Error(`uploading ${item.key} answered ${response.status}`);
+    }
+    const header = response.header('retry-after');
+    const retryAfter = header !== undefined ? Number(header) : NaN;
+    const delayMs =
+      response.status === 429 && Number.isFinite(retryAfter) && retryAfter >= 0
+        ? Math.min(retryAfter, MAX_RETRY_AFTER_S) * 1000
+        : Math.min(1000 * 2 ** (attempt - 1), 8000);
+    if (delayMs > 0) await sleepAbortable(delayMs, cancel);
+  }
 }
 
 export async function requestUploadForm(chat: ChatChannel, count: number): Promise<UploadForm> {
@@ -136,7 +171,7 @@ export async function uploadStickerPack(
   cancel?.throwIfAborted();
   const total = content.stickers.length + 1;
   let done = 0;
-  await postToCdn(https, form.manifest, encryptStickerFile(manifestFor(content), packKey));
+  await postToCdn(https, form.manifest, encryptStickerFile(manifestFor(content), packKey), cancel);
   cancel?.throwIfAborted();
   onProgress(++done, total);
   let next = 0;
@@ -144,7 +179,7 @@ export async function uploadStickerPack(
     while (next < content.stickers.length) {
       cancel?.throwIfAborted();
       const index = next++;
-      await postToCdn(https, form.stickers[index], encryptStickerFile(content.stickers[index].image, packKey));
+      await postToCdn(https, form.stickers[index], encryptStickerFile(content.stickers[index].image, packKey), cancel);
       cancel?.throwIfAborted();
       onProgress(++done, total);
     }

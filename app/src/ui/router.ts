@@ -6,35 +6,64 @@
 // typed by hand never starts a login or skips a step.
 //
 // Only the user's own navigation (Start, Continue, Back, starting the migration) adds an entry to the browser's
-// history. When the step on screen changes by itself (a login completes, Signal is unlinked from the phone), the
-// current entry is replaced, so that Back leads to steps the user actually went through.
+// history. Startup loading, automatic detours (a login completes, Signal is unlinked from the phone), and ending/clear
+// transitions replace the current entry rather than pushing, so Back leads only to steps the user went through.
 
-import { STEPS, type Step, type Workflow } from '../app/workflow';
+import { type AppState, STEPS, type SetupStep, type Step, type Workflow } from '../app/workflow';
 
 const stepOf = (hash: string): Step | null => {
   const name = hash.replace(/^#\/?/, '');
   return (STEPS as readonly string[]).includes(name) ? (name as Step) : null;
 };
 
-/** What the user asked for: the step asked for in setup, or the phase. */
-const requestOf = (workflow: Workflow) => (workflow.state.kind === 'setup' ? workflow.state.step : workflow.state.kind);
+const isLoading = (kind: AppState['kind']): boolean => kind === 'locking' || kind === 'loading';
 
-export function connectRouter(workflow: Workflow): void {
+type NavMarker = { kind: AppState['kind']; step: SetupStep | null };
+
+const navOf = (workflow: Workflow): NavMarker => ({
+  kind: workflow.state.kind,
+  step: workflow.state.kind === 'setup' ? workflow.state.step : null,
+});
+
+/** True only for explicit user-driven step changes that should push a browser history entry. */
+function isUserNavigation(prev: NavMarker, next: NavMarker): boolean {
+  if (prev.kind === 'setup' && next.kind === 'setup') return prev.step !== next.step;
+  if (prev.kind === 'setup' && next.kind === 'migrating') return true;
+  if (prev.kind === 'migrating' && next.kind === 'setup') return true;
+  return false;
+}
+
+export function connectRouter(workflow: Workflow): () => void {
+  let initialized = !isLoading(workflow.state.kind);
   let shown: Step = workflow.step;
-  let requested = requestOf(workflow);
+  let previous = navOf(workflow);
   let followingHistory = false;
-  history.replaceState(null, '', `#/${shown}`);
-  workflow.addEventListener('change', () => {
-    const request = requestOf(workflow);
-    const asked = request !== requested && !followingHistory;
-    requested = request;
+
+  if (initialized && stepOf(location.hash) !== shown) {
+    history.replaceState(null, '', `#/${shown}`);
+  }
+
+  const onChange = () => {
+    if (isLoading(workflow.state.kind)) return;
+    const next = navOf(workflow);
+    if (!initialized) {
+      initialized = true;
+      shown = workflow.step;
+      previous = next;
+      if (stepOf(location.hash) !== shown) history.replaceState(null, '', `#/${shown}`);
+      return;
+    }
+    const asked = isUserNavigation(previous, next) && !followingHistory;
+    previous = next;
     if (workflow.step === shown) return;
     shown = workflow.step;
     if (stepOf(location.hash) === shown) return;
     if (asked) history.pushState(null, '', `#/${shown}`);
     else history.replaceState(null, '', `#/${shown}`);
-  });
-  window.addEventListener('popstate', () => {
+  };
+
+  const onPopState = () => {
+    if (isLoading(workflow.state.kind)) return;
     const wanted = stepOf(location.hash);
     if (wanted && workflow.canShow(wanted)) {
       followingHistory = true;
@@ -42,5 +71,12 @@ export function connectRouter(workflow: Workflow): void {
       followingHistory = false;
     }
     if (stepOf(location.hash) !== workflow.step) history.replaceState(null, '', `#/${workflow.step}`);
-  });
+  };
+
+  workflow.addEventListener('change', onChange);
+  window.addEventListener('popstate', onPopState);
+  return () => {
+    workflow.removeEventListener('change', onChange);
+    window.removeEventListener('popstate', onPopState);
+  };
 }

@@ -20,11 +20,38 @@ function fileOf(chunks: Chunk[]): Uint8Array {
   return new Uint8Array([...letters('RIFF'), ...length(body.length + 4), ...letters('WEBP'), ...body]);
 }
 
-const picture = { kind: 'VP8 ', data: [1, 2, 3, 4, 5] };
-const lossless = { kind: 'VP8L', data: [1, 2, 3, 4] };
+/** Valid 8x8 lossy VP8 keyframe header (10 bytes). */
+const vp8 = (width: number, height: number) => ({
+  kind: 'VP8 ',
+  data: [0x10, 0x00, 0x00, 0x9d, 0x01, 0x2a, width & 0xff, (width >> 8) & 0x3f, height & 0xff, (height >> 8) & 0x3f],
+});
+/** Valid lossless VP8L header (5 bytes). */
+const vp8l = (width: number, height: number) => {
+  const bits = ((width - 1) & 0x3fff) | (((height - 1) & 0x3fff) << 14);
+  return {
+    kind: 'VP8L',
+    data: [0x2f, bits & 0xff, (bits >> 8) & 0xff, (bits >> 16) & 0xff, (bits >> 24) & 0xff],
+  };
+};
+const picture = vp8(8, 8);
+const lossless = vp8l(8, 8);
 const transparency = { kind: 'ALPH', data: [9, 9, 9] };
 /** The header chunk of the extended form; `flags` announces what the file holds. */
-const header = (flags: number) => ({ kind: 'VP8X', data: [flags, 0, 0, 0, 7, 0, 0, 7, 0, 0] });
+const header = (flags: number, width = 8, height = 8) => ({
+  kind: 'VP8X',
+  data: [
+    flags,
+    0,
+    0,
+    0,
+    (width - 1) & 0xff,
+    ((width - 1) >> 8) & 0xff,
+    ((width - 1) >> 16) & 0xff,
+    (height - 1) & 0xff,
+    ((height - 1) >> 8) & 0xff,
+    ((height - 1) >> 16) & 0xff,
+  ],
+});
 const TRANSPARENCY = 0x10;
 const ANIMATION = 0x02;
 const COLOUR_PROFILE = 0x20;
@@ -69,7 +96,7 @@ describe('a plain WebP file', () => {
     expect(isPlainWebp(new Uint8Array([...file, 0]))).toBe(false);
     expect(isPlainWebp(file.subarray(0, file.length - 1))).toBe(false);
     const tooLong = file.slice();
-    tooLong[file.length - 10] = 200;
+    tooLong[file.length - picture.data.length - 4] = 200;
     expect(isPlainWebp(tooLong)).toBe(false);
     expect(isPlainWebp(new Uint8Array(0))).toBe(false);
     expect(isPlainWebp(fileOf([]))).toBe(false);
@@ -83,6 +110,16 @@ describe('a plain WebP file', () => {
     const wave = fileOf([picture]);
     wave.set([87, 65, 86, 69], 8);
     expect(isPlainWebp(wave)).toBe(false);
+  });
+
+  // Detects: oversized WebP headers (e.g. 16383x16383 decompression bomb) passing isPlainWebp before createImageBitmap.
+  it('rejects WebP files larger than 512x512 or with mismatched VP8X/bitstream dimensions', () => {
+    expect(isPlainWebp(fileOf([vp8(513, 512)])), 'VP8 width > 512').toBe(false);
+    expect(isPlainWebp(fileOf([vp8l(1000, 1000)])), 'VP8L 1000x1000').toBe(false);
+    expect(isPlainWebp(fileOf([header(0, 1024, 1024), vp8(1024, 1024)])), 'VP8X 1024x1024').toBe(false);
+    expect(isPlainWebp(fileOf([header(0, 8, 8), vp8(16, 16)])), 'VP8X mismatch').toBe(false);
+    expect(isPlainWebp(fileOf([vp8(512, 512)])), 'VP8 512x512').toBe(true);
+    expect(isPlainWebp(fileOf([vp8l(512, 512)])), 'VP8L 512x512').toBe(true);
   });
 });
 

@@ -23,3 +23,32 @@ for patch in "$repo"/scripts/tdweb/*.patch; do
 done
 cd "$work"
 npx webpack --mode production
+
+# Replace legacy webpack 4 / regenerator-runtime Function() shims with globalThis so tdweb and its worker run under
+# strict CSP without 'unsafe-eval'.
+node -e '
+const fs = require("node:fs");
+const path = require("node:path");
+const dir = path.resolve("dist");
+let replacedRegenerator = 0;
+let replacedGlobal = 0;
+for (const file of fs.readdirSync(dir).filter((f) => f.endsWith(".js"))) {
+  const full = path.join(dir, file);
+  let src = fs.readFileSync(full, "utf8");
+  const next1 = src.replaceAll("Function(\"r\", \"regeneratorRuntime = r\")(runtime);", () => {
+    replacedRegenerator++;
+    return "globalThis.regeneratorRuntime = runtime;";
+  });
+  const next2 = next1.replaceAll("g = g || new Function(\"return this\")();", () => {
+    replacedGlobal++;
+    return "g = g || globalThis;";
+  });
+  if (next2 !== src) fs.writeFileSync(full, next2);
+  if (/\bFunction\s*\(/.test(next2)) {
+    throw new Error(`Unexpected Function() call remains in ${file}`);
+  }
+}
+if (replacedRegenerator === 0 || replacedGlobal === 0) {
+  throw new Error(`Expected tdweb CSP shims to match (regenerator=${replacedRegenerator}, global=${replacedGlobal})`);
+}
+'

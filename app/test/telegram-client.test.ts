@@ -24,9 +24,18 @@ const simulated = vi.hoisted(() => {
 
     readonly number = SimulatedTdlib.runs.length + 1;
     readonly sent: string[] = [];
+    readonly queries: Query[] = [];
     holdDownloads = false;
     crashed = false;
     readonly worker = { terminate: () => undefined };
+    readonly channel = {
+      onmessage: (() => undefined) as ((msg: unknown) => void) | null,
+      closed: false,
+      close: async () => {
+        await Promise.resolve();
+        this.channel.closed = true;
+      },
+    };
     readonly #onUpdate: (update: Update) => void;
 
     constructor(options: { onUpdate: (update: Update) => void }) {
@@ -61,6 +70,7 @@ const simulated = vi.hoisted(() => {
 
     send(query: Query): Promise<unknown> {
       this.sent.push(query['@type']);
+      this.queries.push(query);
       if (this.crashed) return new Promise(() => undefined);
       const file = (fileId: number) => {
         const uniqueId = this.uniqueIdOf(fileId);
@@ -366,4 +376,116 @@ it('terminates cleanly during a restart without an unhandled promise rejection',
   } finally {
     process.off('unhandledRejection', onUnhandled);
   }
+});
+
+// Detects: withDownloadedFile continuing to send run 1's file_id in readFilePart and deleteFile to run 2 after a
+// mid-stream restart (corrupting file contents or deleting an unrelated file in run 2).
+it('aborts withDownloadedFile with TelegramRestartedError on mid-stream crash and never deletes run 1 file_id in run 2', async () => {
+  const { client } = await signedInClient();
+  const run1 = currentRun();
+  const run1FileId = run1.fileIdOf('u1');
+  let chunksSeen = 0;
+
+  await expect(
+    client.withDownloadedFile(
+      run1FileId,
+      async (_size, readChunks) => {
+        await readChunks(async () => {
+          chunksSeen++;
+          if (chunksSeen === 1) run1.crash();
+        });
+      },
+      2,
+    ),
+  ).rejects.toBeInstanceOf(TelegramRestartedError);
+
+  // Wait for run 2 to become usable and verify run 2 never received readFilePart or deleteFile for run 1's file_id.
+  await client.invoke({ _: 'getInstalledStickerSets', sticker_type: { _: 'stickerTypeRegular' } });
+  const run2 = currentRun();
+  expect(run2.number).toBe(2);
+  expect(run2.queries.filter((q) => q['@type'] === 'readFilePart')).toEqual([]);
+  expect(run2.queries.filter((q) => q['@type'] === 'deleteFile')).toEqual([]);
+});
+
+// Detects: run 1's BroadcastChannel remaining open when run 2 starts on the same instanceName (causing tdweb's
+// closeOtherClients handshake to deadlock forever waiting for run 1's terminated worker to answer 'closed').
+it('closes run 1 BroadcastChannel before constructing run 2 after a fatal error', async () => {
+  const { client } = await signedInClient();
+  const run1 = currentRun();
+  let run1ClosedWhenRun2Started: boolean | null = null;
+  SimulatedTdlib.onCreate = (run) => {
+    if (run.number === 2) run1ClosedWhenRun2Started = run1.channel.closed;
+  };
+  run1.crash();
+  await client.invoke({ _: 'getInstalledStickerSets', sticker_type: { _: 'stickerTypeRegular' } });
+  expect(run1.channel.closed).toBe(true);
+  expect(run1ClosedWhenRun2Started).toBe(true);
+});
+
+// Detects: dispose() deleting IndexedDB while a slow loginCopies.restore() is still in flight, letting restore()
+// finish afterwards and re-create /<instance>/dbfs on disk.
+it('waits for an in-flight loginCopies.restore() before deleting IndexedDB in dispose()', async () => {
+  const order: string[] = [];
+  let finishRestore!: () => void;
+  const slowCopies: LoginCopies = {
+    save: async () => undefined,
+    restore: async () => {
+      order.push('restore:start');
+      await new Promise<void>((resolve) => (finishRestore = resolve));
+      order.push('restore:end');
+      return true;
+    },
+  };
+  vi.stubGlobal('indexedDB', {
+    deleteDatabase: () => {
+      order.push('deleteDatabase');
+      const req: { onsuccess?: () => void; onerror?: () => void } = {};
+      queueMicrotask(() => req.onsuccess?.());
+      return req;
+    },
+  });
+  try {
+    const client = new TelegramClient(
+      'telegram-0000000000000009',
+      { apiId: 1, apiHash: 'simulated' },
+      () => undefined,
+      () => undefined,
+      slowCopies,
+    );
+    await vi.waitFor(() => expect(order).toEqual(['restore:start']));
+    const disposing = client.dispose();
+    await new Promise((r) => setTimeout(r, 10));
+    // deleteDatabase must not have run while restore() is still open.
+    expect(order).toEqual(['restore:start']);
+    finishRestore();
+    await disposing;
+    expect(order.indexOf('restore:end')).toBeLessThan(order.indexOf('deleteDatabase'));
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+// Detects: two concurrent readers of the same file deleting the local file while the slower reader is still reading.
+it('keeps a downloaded file until all concurrent readers finish before deleting it', async () => {
+  const { client } = await signedInClient();
+  const run1 = currentRun();
+  const fileId = run1.fileIdOf('u1');
+  let releaseReader2!: () => void;
+  const reader2Blocked = new Promise<void>((resolve) => (releaseReader2 = resolve));
+
+  const reader2 = client.withDownloadedFile(
+    fileId,
+    async (_size, readChunks) => {
+      await readChunks(async () => {
+        await reader2Blocked;
+      });
+    },
+    2,
+  );
+  const reader1 = client.readFile(fileId);
+  await reader1;
+  expect(run1.queries.filter((q) => q['@type'] === 'deleteFile')).toHaveLength(0);
+  releaseReader2();
+  await reader2;
+  expect(run1.queries.filter((q) => q['@type'] === 'deleteFile')).toHaveLength(1);
 });

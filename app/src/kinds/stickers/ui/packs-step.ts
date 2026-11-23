@@ -131,7 +131,7 @@ export class StickerPacksStep extends MigrationView {
 
   render() {
     const packs = this.packs;
-    const readProgress = this.migration?.readProgress ?? null;
+    const readProgress = packs.kind === 'reading' ? packs.progress : null;
     if (packs.kind === 'none' || packs.kind === 'reading') {
       return html`${stepHeader(this.position, 'Sticker packs', 'Reading your packs from Telegram…')}
       ${
@@ -188,7 +188,7 @@ export class StickerPacksStep extends MigrationView {
     const choosable = visible.filter(
       (entry) => entry.state !== 'in-signal' && entry.pack.stickers.length <= MAX_STICKERS,
     );
-    const allVisibleSelected = visible.length > 0 && choosable.every((entry) => entry.selected);
+    const allVisibleSelected = choosable.length > 0 && choosable.every((entry) => entry.selected);
     return html`${stepHeader(this.position, 'Sticker packs', 'Choose the packs to add to your Signal.')}
     ${stickyBar(
       html`<div class="flex flex-wrap items-center justify-between gap-3">

@@ -17,6 +17,7 @@ import {
   type Step,
   stepOf,
 } from './machine/app';
+import { migrationProgress } from './machine/app/migrating';
 import type { Context } from './machine/core';
 import type { FriendsState } from './machine/friends';
 import type { PacksState } from './machine/packs';
@@ -243,8 +244,7 @@ export class Workflow extends Runtime {
   get packsReady(): boolean {
     const state = this.state;
     if (!isSession(state) || state.packs.kind !== 'read') return false;
-    const device = linkedDevice(state.signal);
-    return device === null || state.packs.signalRead === device.deviceId;
+    return state.signal.kind !== 'linked' || state.packs.signalRead === state.signal.deviceKey;
   }
 
   /** Each kind the user chose is ready for the migration: the packs are read, the friends are looked for. */
@@ -262,7 +262,7 @@ export class Workflow extends Runtime {
     return this.state.kind === 'migrating' && this.state.run.status === 'failed';
   }
 
-  /** Cross-kind migration completion and retry status for the migrate screen. */
+  /** Cross-kind migration completion and retry status for the migrate screen (shares predicate with settleMigrating). */
   get migrationRun(): MigrationRunStatus {
     const state = this.state;
     if (state.kind === 'done') {
@@ -271,22 +271,18 @@ export class Workflow extends Runtime {
     if (state.kind === 'ending') {
       return { ended: true, completed: true, canRetry: false, failed: false, ending: true, finished: false };
     }
-    const chosen = this.chosen;
-    const migration = this.stickers;
-    const failed = this.runFailed;
-    const stickersEnded =
-      !chosen.stickers ||
-      (migration !== null &&
-        ((state.kind === 'migrating' && state.run.status === 'ended') ||
-          migration.phase === 'done' ||
-          migration.phase === 'stopped'));
-    const friendsDone = !chosen.friends || this.friendsToAdd === 0 || this.friendsAdded !== null;
-    const saved = this.savedCopy;
-    const savedDone = !chosen.saved || (saved !== null && saved.copied >= saved.toCopy);
-    const completed = stickersEnded && friendsDone && savedDone && !failed;
-    const failedPacks = migration ? migration.selected.filter((entry) => entry.state === 'failed').length : 0;
-    const canRetry = failed || failedPacks > 0 || Boolean(migration?.announceError);
-    return { ended: failed || completed, completed, canRetry, failed, ending: false, finished: false };
+    if (!isSession(state)) {
+      return { ended: false, completed: false, canRetry: false, failed: false, ending: false, finished: false };
+    }
+    const progress = migrationProgress(state);
+    return {
+      ended: progress.ended,
+      completed: progress.completed,
+      canRetry: progress.canRetry,
+      failed: progress.failed,
+      ending: false,
+      finished: false,
+    };
   }
 
   /** The newest failure of background work: reading the packs or Signal's packs, the run. */
@@ -331,7 +327,6 @@ export class Workflow extends Runtime {
   }
 
   startMigration(): void {
-    this.stickers?.stopPreviews();
     this.dispatch({ type: 'start-migration' });
   }
 

@@ -54,13 +54,14 @@ export class SignalStep extends LightElement {
 
   render() {
     const link = this.link;
-    const device = link.device;
+    const unlinking = link.state.kind === 'unlinking';
+    const device = unlinking ? null : link.device;
     const url = this.qrUrl;
     const error = link.error
       ? html`<div class="flex flex-col items-start gap-3">
           <p class="text-sm text-danger" role="alert">${link.error}</p>
           ${
-            device
+            device || unlinking
               ? nothing
               : html`<button type="button" class=${secondaryButton} @click=${() => link.retry()}>
                   Show a new code
@@ -70,31 +71,36 @@ export class SignalStep extends LightElement {
       : nothing;
     return html`${stepHeader(this.position, 'Connect Signal', 'Links your browser as a device of your Signal account.')}
     ${
-      device
-        ? html`<div class="flex flex-col gap-3">
-            <p class="flex items-center gap-2 font-semibold text-accent">
-              ${icons.check(18)} Linked as device ${device.deviceId}
-            </p>
-            ${error}
-          </div>`
-        : loginCard(
-            qrBox(url && this.qrImage?.url === url ? this.qrImage.image : null, 'QR code for linking a Signal device'),
-            html`${instructions([
-                'Open Signal on your phone',
-                'Settings › Linked devices › Link new device',
-                'Point the camera at this code',
-              ])}
-              <label class="flex max-w-xs flex-col gap-2">
-                <span class="text-sm font-semibold">Device name</span>
-                <input
-                  type="text"
-                  .value=${link.deviceName}
-                  @input=${(event: Event) => (link.deviceName = (event.target as HTMLInputElement).value)}
-                  class="min-h-11 rounded-[10px] bg-white px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
-                />
-              </label>
-              ${error}`,
-          )
+      unlinking
+        ? html`<p class="text-muted">Unlinking Signal…</p>`
+        : device
+          ? html`<div class="flex flex-col gap-3">
+              <p class="flex items-center gap-2 font-semibold text-accent">
+                ${icons.check(18)} Linked as device ${device.deviceId}
+              </p>
+              ${error}
+            </div>`
+          : loginCard(
+              qrBox(
+                url && this.qrImage?.url === url ? this.qrImage.image : null,
+                'QR code for linking a Signal device',
+              ),
+              html`${instructions([
+                  'Open Signal on your phone',
+                  'Settings › Linked devices › Link new device',
+                  'Point the camera at this code',
+                ])}
+                <label class="flex max-w-xs flex-col gap-2">
+                  <span class="text-sm font-semibold">Device name</span>
+                  <input
+                    type="text"
+                    .value=${link.deviceName}
+                    @input=${(event: Event) => (link.deviceName = (event.target as HTMLInputElement).value)}
+                    class="min-h-11 rounded-[10px] bg-white px-3.5 text-[15px] ring-1 ring-line-strong ring-inset focus:ring-2 focus:ring-accent focus:outline-none"
+                  />
+                </label>
+                ${error}`,
+            )
     }
     ${stickyFooter(
       html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>

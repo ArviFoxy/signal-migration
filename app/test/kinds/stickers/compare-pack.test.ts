@@ -158,9 +158,10 @@ describe('the comparison of a copy on Signal with the Telegram pack', () => {
     const large = { file: new Uint8Array(MAX_STICKER_BYTES + 1).fill(7), emoji: '🐈', format: 'webp' as const };
     const pack = { title: 'Cats', stickers: [large] };
     const copy = new Copy(pack);
-    // A WebP file with one lossy picture of four bytes: 'RIFF', the length that follows, 'WEBP', and one chunk.
+    // A WebP file with one lossy 8x8 VP8 keyframe header: 'RIFF', length, 'WEBP', 'VP8 ', 10-byte VP8 keyframe header.
     const reencoded = new Uint8Array([
-      82, 73, 70, 70, 16, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 32, 4, 0, 0, 0, 9, 9, 9, 9,
+      82, 73, 70, 70, 22, 0, 0, 0, 87, 69, 66, 80, 86, 80, 56, 32, 10, 0, 0, 0, 0x10, 0, 0, 0x9d, 0x01, 0x2a, 8, 0, 8,
+      0,
     ]);
     copy.stickers[0] = reencoded;
     const asked: Uint8Array[][] = [];

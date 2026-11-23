@@ -7,17 +7,23 @@ import { probeWebm, renderWebm, WebmDecodeError } from './webm-decoding';
 
 /** What the page asks the worker. */
 export type WebmCall =
+  | { kind: 'init'; wasmBinary?: ArrayBuffer; wasmUrl?: string }
   | { kind: 'probe'; file: Uint8Array }
   | { kind: 'render'; file: Uint8Array; size: number; frameRate: number; count: number };
 
 type WebmRequest = WebmCall & { id: number };
 
 let decoder: Promise<WebmDecoderModule> | null = null;
+/** Verified WASM bytes retained for re-instantiation after a trap without re-fetching over the network. */
+let verifiedWasmBytes: Uint8Array | null = null;
+let configuredWasmUrl: string | null = null;
 
 function loadDecoder(): Promise<WebmDecoderModule> {
   if (!decoder) {
-    const wasmUrl = assetUrl(assetFile('webmDecoderWasm'), import.meta.url);
-    const pending = createWebmDecoder({ locateFile: () => wasmUrl });
+    const options = verifiedWasmBytes
+      ? { wasmBinary: verifiedWasmBytes.slice() }
+      : { locateFile: () => configuredWasmUrl ?? assetUrl(assetFile('webmDecoderWasm'), import.meta.url) };
+    const pending = createWebmDecoder(options);
     decoder = pending.catch((error) => {
       if (decoder === pending) decoder = null;
       throw error;
@@ -32,6 +38,12 @@ self.onmessage = async (event: MessageEvent<WebmRequest>) => {
     (self as unknown as Worker).postMessage({ id: request.id, ...message }, transfer);
   let loaded: Promise<WebmDecoderModule> | null = null;
   try {
+    if (request.kind === 'init') {
+      if (request.wasmBinary) verifiedWasmBytes = new Uint8Array(request.wasmBinary);
+      if (request.wasmUrl) configuredWasmUrl = request.wasmUrl;
+      reply({ result: null });
+      return;
+    }
     loaded = loadDecoder();
     const module = await loaded;
     if (request.kind === 'probe') {

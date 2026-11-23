@@ -60,17 +60,63 @@ function fileOf(chunks: Chunk[]): Uint8Array {
   return file;
 }
 
+const MAX_WEBP_SIZE = 512;
+
+type Dimensions = { width: number; height: number };
+
+function vp8xDimensions(data: Uint8Array): Dimensions | null {
+  if (data.length !== 10) return null;
+  const width = 1 + (data[4] | (data[5] << 8) | (data[6] << 16));
+  const height = 1 + (data[7] | (data[8] << 8) | (data[9] << 16));
+  return { width, height };
+}
+
+function vp8Dimensions(data: Uint8Array): Dimensions | null {
+  // Lossy VP8 bitstream: 3-byte frame tag (bit 0 === 0 for keyframe), 3-byte start code 9d 01 2a, 14-bit width/height.
+  if (data.length < 10) return null;
+  if ((data[0] & 1) !== 0) return null;
+  if (data[3] !== 0x9d || data[4] !== 0x01 || data[5] !== 0x2a) return null;
+  const width = (data[6] | (data[7] << 8)) & 0x3fff;
+  const height = (data[8] | (data[9] << 8)) & 0x3fff;
+  return width > 0 && height > 0 ? { width, height } : null;
+}
+
+function vp8lDimensions(data: Uint8Array): Dimensions | null {
+  // Lossless VP8L bitstream: signature byte 0x2f, followed by 14-bit (width-1) and 14-bit (height-1).
+  if (data.length < 5 || data[0] !== 0x2f) return null;
+  const bits = data[1] | (data[2] << 8) | (data[3] << 16) | (data[4] << 24);
+  const width = (bits & 0x3fff) + 1;
+  const height = ((bits >>> 14) & 0x3fff) + 1;
+  return { width, height };
+}
+
+function withinSizeLimit(dimensions: Dimensions | null): dimensions is Dimensions {
+  return (
+    dimensions !== null &&
+    dimensions.width >= 1 &&
+    dimensions.height >= 1 &&
+    dimensions.width <= MAX_WEBP_SIZE &&
+    dimensions.height <= MAX_WEBP_SIZE
+  );
+}
+
 /**
- * Whether `file` is a WebP file that holds one still picture, with or without transparency, and nothing else: no
- * animation, no colour profile, no other data, and nothing after the container.
+ * Whether `file` is a WebP file that holds one still picture within Signal's 512x512 limit, with or without
+ * transparency, and nothing else: no animation, no colour profile, no other data, and nothing after the container.
  */
 export function isPlainWebp(file: Uint8Array): boolean {
   const chunks = chunksOf(file);
   if (!chunks || !LAYOUTS.has(chunks.map((chunk) => chunk.kind).join(','))) return false;
+  const imageChunk = chunks[chunks.length - 1];
+  const imageDims = imageChunk.kind === 'VP8 ' ? vp8Dimensions(imageChunk.data) : vp8lDimensions(imageChunk.data);
+  if (!withinSizeLimit(imageDims)) return false;
   if (chunks[0].kind !== 'VP8X') return true;
   // The header of the extended form announces what else the file holds; only transparency may be announced.
   const header = chunks[0].data;
-  return header.length === 10 && (header[0] & ~HAS_TRANSPARENCY) === 0;
+  if (header.length !== 10 || (header[0] & ~HAS_TRANSPARENCY) !== 0) return false;
+  const headerDims = vp8xDimensions(header);
+  if (!withinSizeLimit(headerDims)) return false;
+  return headerDims.width === imageDims.width && headerDims.height === imageDims.height;
 }
 
 /**

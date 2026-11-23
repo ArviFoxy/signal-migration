@@ -4,7 +4,7 @@
 // screens). Below the panel, a link to the source code.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { ATTESTATIONS_URL, GITHUB_REPOSITORY_URL } from '../attestation/config';
 import type { BuildVerification } from '../attestation/verify';
 import { connectionDiagram, type DiagramPart, icons, LightElement } from './layout';
@@ -80,90 +80,111 @@ const githubMark = html`<svg width="16" height="16" viewBox="0 0 16 16" fill="cu
 </svg>`;
 
 /**
- * Where the cards open: beside the panel (the sidebar on wide screens), with the arrow pointing left at the row, or
- * below each row (the connections sheet on narrow screens), with the arrow pointing up.
+ * Where the info opens: beside the panel (the sidebar on wide screens) as a floating tooltip with an arrow pointing
+ * left at the row, or inline below each row inside the scrollable mobile sheet.
  */
-const PLACEMENT = {
-  side: {
-    card: 'left-full bottom-0 ml-4 w-[min(480px,calc(100vw-360px))] before:absolute before:inset-y-0 before:-left-4 before:w-4',
-    arrow: '-left-[7px] bottom-[18px] border-b border-l',
-  },
-  below: {
-    card: 'inset-x-0 top-full mt-3 before:absolute before:inset-x-0 before:-top-3 before:h-3',
-    arrow: '-top-[7px] right-[18px] border-t border-l',
-  },
-};
+const SIDE_CARD =
+  'left-full bottom-0 ml-4 w-[min(480px,calc(100vw-360px))] before:absolute before:inset-y-0 before:-left-4 before:w-4';
+const SIDE_ARROW = '-left-[7px] bottom-[18px] border-b border-l';
 
 @customElement('connections-panel')
 export class ConnectionsPanel extends LightElement {
   @property({ attribute: false }) telegram!: Connection;
   @property({ attribute: false }) signal!: Connection;
   @property({ attribute: false }) index!: Connection;
-  @property({ attribute: false }) placement: keyof typeof PLACEMENT = 'side';
+  @property({ attribute: false }) placement: 'side' | 'below' = 'side';
   /** The ID of the confirmation card that "Disconnect and clear local state" opens. */
   @property({ attribute: false }) clearTarget = '';
   /** Whether there is anything to clear; the button stays in place either way. */
   @property({ attribute: false }) canClear = false;
   /** Verification result for this build's GitHub Artifact Attestation. */
   @property({ attribute: false }) build: BuildVerification = { kind: 'unverified', url: ATTESTATIONS_URL };
+  /** Which row's inline info panel is expanded in the narrow-screen sheet. */
+  @state() private openInfo: keyof typeof INFO | null = null;
 
-  private card(id: keyof typeof INFO) {
+  private infoBody(id: keyof typeof INFO) {
     const info = INFO[id];
-    const placement = PLACEMENT[this.placement];
+    return html`<div class="flex flex-col gap-4">
+      <p class="flex items-start gap-2.5">
+        <span class="mt-[3px]">${icons.lock()}</span>
+        <span class="flex flex-col gap-2">
+          <span class="text-sm leading-snug text-pretty">${info.plain}</span>
+          <span class="text-xs leading-relaxed text-pretty text-muted">${info.technical}</span>
+        </span>
+      </p>
+      ${info.diagram ? connectionDiagram(info.diagram.parts, info.diagram.encryption) : nothing}
+    </div>`;
+  }
+
+  private sideCard(id: keyof typeof INFO) {
     return html`<div
-      id="connection-info-${this.placement}-${id}"
+      id="connection-info-side-${id}"
       role="tooltip"
-      class="connection-card invisible absolute z-50 rounded-xl bg-white p-5 text-ink opacity-0 shadow-[0_8px_32px_rgba(20,20,30,0.16)] ring-1 ring-line transition-opacity duration-150 ${placement.card}"
+      class="connection-card invisible absolute z-50 rounded-xl bg-white p-5 text-ink opacity-0 shadow-[0_8px_32px_rgba(20,20,30,0.16)] ring-1 ring-line transition-opacity duration-150 ${SIDE_CARD}"
     >
-      <span class="absolute size-3.5 rotate-45 border-line bg-white ${placement.arrow}"></span>
-      <div class="flex flex-col gap-4">
-        <p class="flex items-start gap-2.5">
-          <span class="mt-[3px]">${icons.lock()}</span>
-          <span class="flex flex-col gap-2">
-            <span class="text-sm leading-snug text-pretty">${info.plain}</span>
-            <span class="text-xs leading-relaxed text-pretty text-muted">${info.technical}</span>
-          </span>
-        </p>
-        ${info.diagram ? connectionDiagram(info.diagram.parts, info.diagram.encryption) : nothing}
-      </div>
+      <span class="absolute size-3.5 rotate-45 border-line bg-white ${SIDE_ARROW}"></span>
+      ${this.infoBody(id)}
+    </div>`;
+  }
+
+  private inlineCard(id: keyof typeof INFO) {
+    return html`<div id="connection-info-below-${id}" class="mt-2.5 border-t border-line pt-3 pr-1.5 text-ink">
+      ${this.infoBody(id)}
     </div>`;
   }
 
   private row(id: keyof typeof INFO, connection: Connection) {
     const action = connection.action && connection.state === 'on' ? connection.action : null;
+    const inline = this.placement === 'below';
+    const expanded = inline && this.openInfo === id;
     return html`<li
-      class="connection-row relative flex items-start gap-2.5 rounded-[10px] bg-white py-2.5 pr-1.5 pl-3 ring-1 ring-line ring-inset hover:ring-line-strong"
+      class="connection-row relative flex flex-col rounded-[10px] bg-white py-2.5 pr-1.5 pl-3 ring-1 ring-line ring-inset hover:ring-line-strong"
     >
-      <!-- The dot is centred on the name's line. -->
-      <span class="flex h-[18px] flex-none items-center">
-        <span class="size-2.5 rounded-full ${DOTS[connection.state]}"></span>
-      </span>
-      <span class="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span class="text-[13px] leading-[18px] font-semibold">${INFO[id].title}</span>
-        <span class="text-xs leading-4 whitespace-nowrap text-muted">
-          ${connection.status}${
-            action
-              ? html` ·
-                  <button
-                    type="button"
-                    class="cursor-pointer font-semibold text-danger hover:underline"
-                    @click=${() => this.emit(action.event)}
-                  >
-                    ${action.label}
-                  </button>`
-              : nothing
-          }
+      <div class="flex items-start gap-2.5">
+        <!-- The dot is centred on the name's line. -->
+        <span class="flex h-[18px] flex-none items-center">
+          <span class="size-2.5 rounded-full ${DOTS[connection.state]}"></span>
         </span>
-      </span>
-      <button
-        type="button"
-        aria-label="About the ${INFO[id].title} connection"
-        aria-describedby="connection-info-${this.placement}-${id}"
-        class="-my-1 flex size-8 flex-none cursor-pointer items-center justify-center rounded-lg text-muted hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
-      >
-        ${icons.info()}
-      </button>
-      ${this.card(id)}
+        <span class="flex min-w-0 flex-1 flex-col gap-0.5">
+          <span class="text-[13px] leading-[18px] font-semibold">${INFO[id].title}</span>
+          <span class="text-xs leading-4 whitespace-nowrap text-muted">
+            ${connection.status}${
+              action
+                ? html` ·
+                    <button
+                      type="button"
+                      class="cursor-pointer font-semibold text-danger hover:underline"
+                      @click=${() => this.emit(action.event)}
+                    >
+                      ${action.label}
+                    </button>`
+                : nothing
+            }
+          </span>
+        </span>
+        ${
+          inline
+            ? html`<button
+                type="button"
+                aria-label="About the ${INFO[id].title} connection"
+                aria-expanded=${expanded}
+                aria-controls="connection-info-below-${id}"
+                class="-my-1 flex size-8 flex-none cursor-pointer items-center justify-center rounded-lg text-muted hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+                @click=${() => (this.openInfo = expanded ? null : id)}
+              >
+                ${icons.info()}
+              </button>`
+            : html`<button
+                type="button"
+                aria-label="About the ${INFO[id].title} connection"
+                aria-describedby="connection-info-side-${id}"
+                class="-my-1 flex size-8 flex-none cursor-pointer items-center justify-center rounded-lg text-muted hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-accent"
+              >
+                ${icons.info()}
+              </button>`
+        }
+      </div>
+      ${inline ? (expanded ? this.inlineCard(id) : nothing) : this.sideCard(id)}
     </li>`;
   }
 

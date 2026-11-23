@@ -6,7 +6,7 @@
 // whose connections open in a card.
 
 import { html, nothing, type PropertyValues } from 'lit';
-import { customElement, property } from 'lit/decorators.js';
+import { customElement, property, state } from 'lit/decorators.js';
 import { ATTESTATIONS_URL } from '../attestation/config';
 import type { BuildVerification } from '../attestation/verify';
 import type { SignalState, UnlinkReason } from '../app/machine/signal';
@@ -18,6 +18,7 @@ import '../kinds/stickers/ui/packs-step';
 import type { Connection, ConnectionState } from './connections-panel';
 import './connections-panel';
 import {
+  assertNever,
   icons,
   LightElement,
   primaryButton,
@@ -28,10 +29,13 @@ import {
   stepsFor,
   stickyFooter,
 } from './layout';
+import type { MigrateFriends, MigrateSaved } from './migrate-step';
 import './migrate-step';
 import './review-step';
 import './signal-step';
 import './telegram-step';
+
+type BannerView = { kind: 'none' } | { kind: 'notice'; key: string; message: string; retryable: boolean };
 
 const TELEGRAM_STATUS: Record<TelegramState['kind'], [ConnectionState, string]> = {
   off: ['off', 'Not connected'],
@@ -63,6 +67,8 @@ const UNLINKED: Partial<Record<UnlinkReason, string>> = {
 export class MigrationApp extends LightElement {
   @property({ attribute: false }) workflow!: Workflow;
   @property({ attribute: false }) build: BuildVerification = { kind: 'unverified', url: ATTESTATIONS_URL };
+  @state() private dismissedBannerKey: string | null = null;
+  #lastRawBannerKey: string | null = null;
   #onChange = () => this.requestUpdate();
   #shownStep: string | undefined;
 
@@ -70,7 +76,21 @@ export class MigrationApp extends LightElement {
     if (changed.has('workflow')) {
       (changed.get('workflow') as Workflow | undefined)?.removeEventListener('change', this.#onChange);
       this.workflow.addEventListener('change', this.#onChange);
+      this.dismissedBannerKey = null;
+      this.#lastRawBannerKey = null;
     }
+    if (this.workflow) {
+      const rawKey = this.rawBanner()?.key ?? null;
+      if (rawKey !== this.#lastRawBannerKey) {
+        this.#lastRawBannerKey = rawKey;
+        this.dismissedBannerKey = null;
+      }
+    }
+  }
+
+  private closePopover(id: string): void {
+    const popover = this.querySelector<HTMLElement>(`#${id}`);
+    if (popover?.matches(':popover-open')) popover.hidePopover();
   }
 
   /** A new step starts at the top of the page. */
@@ -117,47 +137,58 @@ export class MigrationApp extends LightElement {
   private connectionsPanel(placement: 'side' | 'below') {
     const connections = this.connections();
     const w = this.workflow;
-    const clearId = `clear-everything-${placement}`;
     return html`<connections-panel
-        .telegram=${connections.telegram}
-        .signal=${connections.signal}
-        .index=${connections.index}
-        .placement=${placement}
-        .clearTarget=${clearId}
-        .canClear=${w.canClear}
-        .build=${this.build}
-        @telegram-sign-out=${() => w.signOutOfTelegram()}
-        @signal-unlink=${() => w.unlinkSignal()}
-      ></connections-panel>
-      ${html`<div
-        id=${clearId}
-        popover
-        class="m-auto w-[min(420px,calc(100vw-32px))] rounded-2xl bg-white p-6 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] ring-1 ring-line backdrop:bg-ink/20"
-      >
-        <div class="flex flex-col gap-4">
-          <h3 class="font-display text-lg font-semibold">Disconnect and clear local state?</h3>
-          <p class="text-[15px]">
-            This signs your browser out of Telegram, unlinks your browser from your Signal account, and deletes what the
-            migration keeps in your browser, then starts over. Nothing in your Telegram or Signal account is deleted.
-            Packs already added stay in Signal.
-          </p>
-          <div class="flex justify-end gap-3">
-            <button type="button" popovertarget=${clearId} popovertargetaction="hide" class=${secondaryButton}>
-              Cancel
-            </button>
-            <button
-              type="button"
-              class="${primaryButton} bg-danger hover:bg-danger"
-              @click=${() => {
-                document.getElementById(clearId)?.hidePopover();
-                void w.clear();
-              }}
-            >
-              Disconnect and clear
-            </button>
-          </div>
+      .telegram=${connections.telegram}
+      .signal=${connections.signal}
+      .index=${connections.index}
+      .placement=${placement}
+      .clearTarget=${'clear-everything'}
+      .canClear=${w.canClear}
+      .build=${this.build}
+      @telegram-sign-out=${() => {
+        this.closePopover('connections-sheet');
+        w.signOutOfTelegram();
+      }}
+      @signal-unlink=${() => {
+        this.closePopover('connections-sheet');
+        w.unlinkSignal();
+      }}
+    ></connections-panel>`;
+  }
+
+  /** One shared confirmation popover hoisted outside the sidebar and mobile connections sheet. */
+  private clearPopover() {
+    const w = this.workflow;
+    return html`<div
+      id="clear-everything"
+      popover
+      class="m-auto w-[min(420px,calc(100vw-32px))] rounded-2xl bg-white p-6 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] ring-1 ring-line backdrop:bg-ink/20"
+    >
+      <div class="flex flex-col gap-4">
+        <h3 class="font-display text-lg font-semibold">Disconnect and clear local state?</h3>
+        <p class="text-[15px]">
+          This signs your browser out of Telegram, unlinks your browser from your Signal account, and deletes what the
+          migration keeps in your browser, then starts over. Nothing in your Telegram or Signal account is deleted.
+          Packs already added stay in Signal.
+        </p>
+        <div class="flex justify-end gap-3">
+          <button type="button" popovertarget="clear-everything" popovertargetaction="hide" class=${secondaryButton}>
+            Cancel
+          </button>
+          <button
+            type="button"
+            class="${primaryButton} bg-danger hover:bg-danger"
+            @click=${() => {
+              this.closePopover('clear-everything');
+              this.closePopover('connections-sheet');
+              void w.clear();
+            }}
+          >
+            Disconnect and clear
+          </button>
         </div>
-      </div>`}`;
+      </div>
+    </div>`;
   }
 
   /** The entry of the step list that is current: the last one ("Done and logged out") once the migration finished. */
@@ -221,7 +252,7 @@ export class MigrationApp extends LightElement {
       <div
         id="connections-sheet"
         popover
-        class="m-auto w-[min(400px,calc(100vw-32px))] overflow-visible rounded-2xl bg-panel p-5 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] backdrop:bg-ink/20"
+        class="m-auto max-h-[calc(100dvh-32px)] w-[min(400px,calc(100vw-32px))] overflow-y-auto rounded-2xl bg-panel p-5 text-ink shadow-[0_8px_40px_rgba(20,20,30,0.18)] backdrop:bg-ink/20"
       >
         <div class="flex flex-col gap-3">${this.connectionsPanel('below')}</div>
       </div>
@@ -400,36 +431,95 @@ export class MigrationApp extends LightElement {
           @back=${() => w.goTo(this.beside('review', -1))}
           @start=${() => w.startMigration()}
         ></review-step>`;
-      case 'migrate':
+      case 'migrate': {
+        const friends: MigrateFriends | null = !w.chosen.friends
+          ? null
+          : w.friends.kind === 'found' || w.state.kind === 'done'
+            ? { kind: 'ready', toAdd: w.friendsToAdd, added: w.friendsAdded }
+            : w.friends.kind === 'failed'
+              ? { kind: 'failed' }
+              : { kind: 'looking' };
+        const savedCopy = w.savedCopy;
+        const saved: MigrateSaved | null = !w.chosen.saved
+          ? null
+          : savedCopy
+            ? { kind: 'ready', toCopy: savedCopy.toCopy, copied: savedCopy.copied }
+            : w.saved.kind === 'failed'
+              ? { kind: 'failed' }
+              : { kind: 'reading' };
         return html`<migrate-step
           class="contents"
           .migration=${w.stickers}
           .position=${position}
           .stickers=${w.chosen.stickers}
-          .friends=${w.chosen.friends ? { toAdd: w.friendsToAdd, added: w.friendsAdded } : null}
-          .saved=${w.chosen.saved ? (w.savedCopy ?? 'reading') : null}
+          .friends=${friends}
+          .saved=${saved}
           .run=${w.migrationRun}
           @retry=${() => w.tryAgain()}
           @finish=${() => w.finish()}
           @back-to-start=${() => w.goTo('start')}
           @restart=${() => w.startOver()}
         ></migrate-step>`;
+      }
     }
   }
 
   /**
-   * The newest failure: background work's, TDLib's, or, during the setup and the migration, an account's when its
-   * step is not on screen. The end shows the accounts' failures on its own screen.
+   * The newest failure or notice: background work's, TDLib's, or, during the setup and the migration, an account's
+   * when its step is not on screen. The end shows the accounts' failures on its own screen.
    */
-  private notice(): string | null {
+  private rawBanner(): { key: string; message: string; retryable: boolean } | null {
     const w = this.workflow;
+    if (w.error) return { key: `error:${w.error}`, message: w.error, retryable: w.canTryAgain };
+    if (w.notice) return { key: `notice:${w.notice}`, message: w.notice, retryable: false };
     const accounts = w.state.kind === 'setup' || w.state.kind === 'migrating';
-    return (
-      w.error ??
-      w.notice ??
-      (accounts && w.step !== 'telegram' ? w.telegram.error : null) ??
-      (accounts && w.step !== 'signal' ? w.signal.error : null)
-    );
+    if (accounts && w.step !== 'telegram' && w.telegram.error)
+      return { key: `telegram:${w.telegram.error}`, message: w.telegram.error, retryable: false };
+    if (accounts && w.step !== 'signal' && w.signal.error)
+      return { key: `signal:${w.signal.error}`, message: w.signal.error, retryable: false };
+    return null;
+  }
+
+  private bannerView(): BannerView {
+    const raw = this.rawBanner();
+    if (!raw || raw.key === this.dismissedBannerKey) return { kind: 'none' };
+    return { kind: 'notice', key: raw.key, message: raw.message, retryable: raw.retryable };
+  }
+
+  private renderBanner() {
+    const w = this.workflow;
+    const banner = this.bannerView();
+    switch (banner.kind) {
+      case 'none':
+        return nothing;
+      case 'notice':
+        return html`<div
+          role="alert"
+          class="fixed bottom-6 left-1/2 z-50 flex w-[min(560px,calc(100vw-32px))] -translate-x-1/2 items-start gap-3 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-[0_8px_32px_rgba(20,20,30,0.3)]"
+        >
+          <span class="flex-1">${banner.message}</span>
+          ${
+            banner.retryable
+              ? html`<button type="button" class="cursor-pointer font-semibold text-white" @click=${() => w.tryAgain()}>
+                  Try again
+                </button>`
+              : nothing
+          }
+          <button
+            type="button"
+            aria-label="Dismiss"
+            class="cursor-pointer text-white/70 hover:text-white"
+            @click=${() => {
+              this.dismissedBannerKey = banner.key;
+              w.dismissError();
+            }}
+          >
+            ×
+          </button>
+        </div>`;
+      default:
+        return assertNever(banner);
+    }
   }
 
   render() {
@@ -448,35 +538,7 @@ export class MigrationApp extends LightElement {
           ${this.content()}
         </main>
       </div>
-      ${
-        this.notice()
-          ? html`<div
-              role="alert"
-              class="fixed bottom-6 left-1/2 z-50 flex w-[min(560px,calc(100vw-32px))] -translate-x-1/2 items-start gap-3 rounded-xl bg-ink px-4 py-3 text-sm text-white shadow-[0_8px_32px_rgba(20,20,30,0.3)]"
-            >
-              <span class="flex-1">${this.notice()}</span>
-              ${
-                w.canTryAgain
-                  ? html`<button
-                      type="button"
-                      class="cursor-pointer font-semibold text-white"
-                      @click=${() => w.tryAgain()}
-                    >
-                      Try again
-                    </button>`
-                  : nothing
-              }
-              <button
-                type="button"
-                aria-label="Dismiss"
-                class="cursor-pointer text-white/70 hover:text-white"
-                @click=${() => w.dismissError()}
-              >
-                ×
-              </button>
-            </div>`
-          : nothing
-      }
+      ${this.clearPopover()} ${this.renderBanner()}
     </div>`;
   }
 }

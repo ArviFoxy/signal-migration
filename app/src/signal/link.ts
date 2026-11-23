@@ -184,7 +184,7 @@ export async function linkDevice(
     };
 
     cancel.throwIfAborted();
-    const socket = await connectChat('/v1/websocket/', '/v1/keepalive');
+    const socket = await connectChat('/v1/websocket/', '/v1/keepalive', [], { onServerRequest: () => 200 });
     try {
       const response = await socket.request('PUT', '/v1/devices/link', {
         headers: ['content-type:application/json', basicAuthorization(provision.aci, password).replace(': ', ':')],

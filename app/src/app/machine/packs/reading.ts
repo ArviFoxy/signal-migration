@@ -1,9 +1,10 @@
 // Reading the packs from Telegram and looking them up in the index.
 
-import type { Context, VariantHandlers } from '../core';
+import { type Context, type ExhaustiveVariantHandlers, IGNORE } from '../core';
 import type { PacksEvent, PacksState } from './state';
 
-export const reading: VariantHandlers<PacksState, 'reading', PacksEvent, Context> = {
+export const reading: ExhaustiveVariantHandlers<PacksState, 'reading', PacksEvent, Context> = {
+  'packs/progress': (state, event) => ({ ...state, progress: { done: event.done, total: event.total } }),
   'packs/read': (state, event) => ({
     kind: 'read',
     instance: state.instance,
@@ -19,4 +20,7 @@ export const reading: VariantHandlers<PacksState, 'reading', PacksEvent, Context
     attempt: state.attempt,
     error: `Reading your sticker packs failed: ${event.error}`,
   }),
+  'packs/signal-read': IGNORE,
+  'packs/signal-failed': IGNORE,
+  'packs/try-again': IGNORE,
 };

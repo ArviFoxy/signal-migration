@@ -22,7 +22,13 @@ export class ReviewStep extends MigrationView {
   @state() private showAll = false;
 
   render() {
-    if (this.stickers && !this.migration) return stepHeader(this.position, 'Review', 'Reading your packs…');
+    if (this.stickers && !this.migration) {
+      return html`${stepHeader(this.position, 'Review', 'Reading your packs…')}
+      ${stickyFooter(
+        html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back')}>Back</button>
+          <button type="button" class=${primaryButton} disabled>Start migration</button>`,
+      )}`;
+    }
     const selected = this.migration?.selected ?? [];
     const friends = this.friends;
     const saved = this.saved;

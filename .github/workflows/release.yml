@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   build-and-attest:
+    if: ${{ !github.event.release.prerelease }}
     runs-on: ubuntu-latest
     # Fresh from-source builds of TDLib, the WebM decoder, BoringSSL, Rust WASM modules, and the web app.
     timeout-minutes: 120

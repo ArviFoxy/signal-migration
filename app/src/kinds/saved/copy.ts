@@ -6,7 +6,9 @@
 // behind the copied ones, but older messages added later would stand behind newer ones.
 
 import {
+  attachmentFits,
   type AttachmentMetadata,
+  AttachmentTooLargeError,
   bytesSource,
   MAX_ATTACHMENTS_PER_MESSAGE,
   uploadAttachment,
@@ -20,7 +22,7 @@ import {
   trimBody,
 } from '../../signal/note-to-self';
 import type { SignalAccount } from '../../signal/transport';
-import type { ConvertSticker } from '../stickers/convert';
+import { ConversionError, type ConvertSticker } from '../stickers/convert';
 import { reasonLeftOut, type SavedMedia, type SavedMessage, timestampOf } from './messages';
 import type { SavedSource } from './telegram-saved';
 
@@ -143,38 +145,46 @@ async function uploadSavedMedia(
   if (!source.withMedia) {
     throw new Error('reading Telegram media files is not available in this session');
   }
-  return source.withMedia(media, async (size, readChunks) => {
-    cancel.throwIfAborted();
-    if (media.stickerFormat && media.stickerFormat !== 'webp' && convert) {
-      const raw = await readAllBytes(readChunks, size);
-      const converted = await convert(raw, media.stickerFormat);
-      const convertedSize = converted.animation?.size;
-      return uploadAttachment(
-        account,
-        bytesSource(converted.image),
-        {
-          contentType: 'image/png',
-          width: convertedSize ?? media.width,
-          height: convertedSize ?? media.height,
-          flags: AttachmentPointer_Flags.BORDERLESS,
-          caption: caption || undefined,
-        },
-        cancel,
-      );
-    }
-    return uploadAttachment(account, { size, readChunks }, metadataOf(media, caption), cancel);
-  });
+  return source.withMedia(
+    media,
+    async (size, readChunks) => {
+      cancel.throwIfAborted();
+      if (!attachmentFits(size)) throw new AttachmentTooLargeError(size);
+      if (media.stickerFormat && media.stickerFormat !== 'webp' && convert) {
+        const raw = await readAllBytes(readChunks, size);
+        const converted = await convert(raw, media.stickerFormat);
+        const convertedSize = converted.animation?.size;
+        return uploadAttachment(
+          account,
+          bytesSource(converted.image),
+          {
+            contentType: 'image/png',
+            width: convertedSize ?? media.width,
+            height: convertedSize ?? media.height,
+            flags: AttachmentPointer_Flags.BORDERLESS,
+            caption: caption || undefined,
+          },
+          cancel,
+        );
+      }
+      return uploadAttachment(account, { size, readChunks }, metadataOf(media, caption), cancel);
+    },
+    cancel,
+  );
 }
 
 export type CopyOptions = {
   source?: SavedSource;
   convert?: ConvertSticker;
+  /** Called when a group is permanently uncopyable (oversized unknown-size file or unconvertible sticker) and skipped. */
+  onSkipped?: (group: SavedGroup, error: Error) => void;
 };
 
 /**
  * Sends `messages` to Note to Self in their order, grouping Telegram albums, uploading any media and long-text
  * attachments to Signal's CDN, and sending each message with its deterministic timestamp. `onSent` gets the Telegram
- * ID of the last message in each group once Signal has accepted it. Stops between messages when `cancel` fires.
+ * ID of the last message in each group once Signal has accepted it (or once a permanently uncopyable group is
+ * skipped so later messages are not wedged). Stops between messages when `cancel` fires.
  */
 export async function copyToNoteToSelf(
   account: Pick<SignalAccount, 'withChat' | 'https' | 'sendNoteToSelf'>,
@@ -194,20 +204,30 @@ export async function copyToNoteToSelf(
     const attachments: UploadedAttachment[] = [];
     let body = fullBody;
 
-    if (fullBody !== '' && !bodyFits(fullBody)) {
-      const textBytes = textEncoder.encode(fullBody);
-      attachments.push(
-        await uploadAttachment(account, bytesSource(textBytes), { contentType: LONG_TEXT_CONTENT_TYPE }, cancel),
-      );
-      body = trimBody(fullBody);
-    }
+    try {
+      if (fullBody !== '' && !bodyFits(fullBody)) {
+        const textBytes = textEncoder.encode(fullBody);
+        attachments.push(
+          await uploadAttachment(account, bytesSource(textBytes), { contentType: LONG_TEXT_CONTENT_TYPE }, cancel),
+        );
+        body = trimBody(fullBody);
+      }
 
-    for (const item of group.messages) {
-      if (!item.media) continue;
-      const itemCaption = item !== bodyOwner && item.body !== '' ? item.body : undefined;
-      attachments.push(
-        await uploadSavedMedia(account, options.source!, item.media, itemCaption, options.convert, cancel),
-      );
+      for (const item of group.messages) {
+        if (!item.media) continue;
+        const itemCaption = item !== bodyOwner && item.body !== '' ? item.body : undefined;
+        attachments.push(
+          await uploadSavedMedia(account, options.source!, item.media, itemCaption, options.convert, cancel),
+        );
+      }
+    } catch (error) {
+      if (cancel.aborted) return;
+      if (error instanceof AttachmentTooLargeError || error instanceof ConversionError) {
+        options.onSkipped?.(group, error);
+        onSent(group.lastId);
+        continue;
+      }
+      throw error;
     }
 
     if (cancel.aborted) return;

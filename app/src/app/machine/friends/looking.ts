@@ -1,14 +1,14 @@
 // Reading the people from Telegram and asking Signal about them.
 
-import type { Context, VariantHandlers } from '../core';
+import { type Context, type ExhaustiveVariantHandlers, IGNORE } from '../core';
 import type { FriendsEvent, FriendsState } from './state';
 
-export const looking: VariantHandlers<FriendsState, 'looking', FriendsEvent, Context> = {
+export const looking: ExhaustiveVariantHandlers<FriendsState, 'looking', FriendsEvent, Context> = {
   'friends/progress': (state, event) => ({ ...state, progress: event.progress }),
   'friends/found': (state, event) => ({
     kind: 'found',
     instance: state.instance,
-    deviceId: state.deviceId,
+    deviceKey: state.deviceKey,
     attempt: state.attempt,
     search: event.search,
     photos: new Map(),
@@ -16,8 +16,10 @@ export const looking: VariantHandlers<FriendsState, 'looking', FriendsEvent, Con
   'friends/failed': (state, event) => ({
     kind: 'failed',
     instance: state.instance,
-    deviceId: state.deviceId,
+    deviceKey: state.deviceKey,
     attempt: state.attempt,
     error: `Looking for your friends on Signal failed: ${event.error}`,
   }),
+  'friends/photo': IGNORE,
+  'friends/try-again': IGNORE,
 };

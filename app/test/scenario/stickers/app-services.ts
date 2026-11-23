@@ -292,6 +292,9 @@ export function appServices(
         user.phone.unlink(account.deviceId);
         device.onUnlinked();
       },
+      dispose() {
+        devices.delete(account.deviceId);
+      },
     };
     devices.set(device.deviceId, device);
     return device;

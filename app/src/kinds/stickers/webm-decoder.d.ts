@@ -16,5 +16,6 @@ declare module 'webm-decoder' {
   };
   export default function createWebmDecoder(options?: {
     locateFile?: (path: string, prefix: string) => string;
+    wasmBinary?: Uint8Array | ArrayBuffer;
   }): Promise<WebmDecoderModule>;
 }

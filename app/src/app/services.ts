@@ -6,7 +6,7 @@ import { createStore, del, get, set } from 'idb-keyval';
 import type * as Td from 'tdlib-types';
 import { systemClock } from '../core/clock';
 import { serverHttpUrl } from '../core/server';
-import { fetchWithTimeLimit, SERVER_TIME_LIMIT_S } from '../core/time-limit';
+import { SERVER_TIME_LIMIT_S, withFetchTimeLimit } from '../core/time-limit';
 import { type FriendSource, phoneNumberSource } from '../kinds/friends/search';
 import { type PeopleSource, peopleOf } from '../kinds/friends/telegram-people';
 import { type SavedSource, savedMessagesOf } from '../kinds/saved/telegram-saved';
@@ -75,6 +75,8 @@ export interface LinkedDevice extends SignalAccount {
   readonly stored: StoredDevice;
   onUnlinked: () => void;
   unlink(): Promise<void>;
+  /** Closes the open chat session and zeroes local secret material without contacting Signal. */
+  dispose(): void;
 }
 
 export type SignalServices = {
@@ -129,14 +131,17 @@ function browserLock(wait: boolean): Promise<boolean> {
 
 export const realServices: AppServices = {
   telegram: {
-    async app() {
-      const response = await fetchWithTimeLimit(
+    app() {
+      return withFetchTimeLimit(
         'The migration server',
         SERVER_TIME_LIMIT_S,
         serverHttpUrl('/v1/config'),
+        {},
+        async (response) => {
+          if (!response.ok) throw new Error(`reading the migration server's configuration answered ${response.status}`);
+          return ((await response.json()) as { telegram: TelegramApp | null }).telegram;
+        },
       );
-      if (!response.ok) throw new Error(`reading the migration server's configuration answered ${response.status}`);
-      return ((await response.json()) as { telegram: TelegramApp | null }).telegram;
     },
     newInstance: newTelegramInstance,
     start(app, instance, onAuthorizationState, onFatalError) {

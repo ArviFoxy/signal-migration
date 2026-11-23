@@ -21,7 +21,7 @@ import {
   stepOf,
   unlinkOldDevice,
 } from './session';
-import { savedLeft } from './migrating';
+import { migrationProgress } from './migrating';
 import { type AppState, isSession, type Session, type SessionState } from './state';
 
 /** What follows from the accounts in the setup and during the migration. */
@@ -53,18 +53,8 @@ function settleMigrating(state: Extract<AppState, { kind: 'migrating' }>, contex
   // (starting, within its time limit) or saved is not lost.
   const telegramLost = !['starting', 'saving', 'signed-in'].includes(next.telegram.kind);
   if (telegramLost || next.signal.kind !== 'linked') return { ...sessionOf(next), kind: 'setup', step: 'review' };
-  // Done once each chosen kind is done. Sticker packs: every pack is in Signal and the other devices were told; the
-  // phone shows nothing otherwise. Friends: the contacts are written. Saved messages: they are read and all sent.
-  if (next.chosen.friends && next.run.friendsAdded === null) return next;
-  if (next.chosen.saved && (next.saved.kind !== 'read' || savedLeft(next).length > 0)) return next;
-  if (next.chosen.stickers) {
-    const packs = next.packs;
-    if (next.run.status !== 'ended' || packs.kind !== 'read') return next;
-    const migration = packs.migration;
-    if (!migration.selected.every((entry) => entry.state === 'in-signal') || migration.unannounced !== 0) return next;
-  } else if (next.run.status === 'failed') {
-    return next;
-  }
+  // Done once each chosen kind is done (shared single predicate with Workflow.migrationRun).
+  if (!migrationProgress(next).readyToFinish) return next;
   return beginEnding(next, 'finish', context);
 }
 

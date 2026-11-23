@@ -17,15 +17,16 @@ export type SignalIdentifiers = StoredContact;
  * the user is in touch with on Signal already; a source that can uses them to say when a found person is one of them.
  */
 export interface FriendSource {
-  find(people: Person[], known: KnownAccount[]): Promise<Map<number, SignalIdentifiers>>;
+  find(people: Person[], known: KnownAccount[], cancel?: AbortSignal): Promise<Map<number, SignalIdentifiers>>;
 }
 
 /** The source that asks about the phone numbers Telegram shows; `discover` is Signal's contact discovery. */
 export function phoneNumberSource(
-  discover: (phoneNumbers: string[], known: KnownAccount[]) => Promise<DiscoveredAccount[]>,
+  discover: (phoneNumbers: string[], known: KnownAccount[], cancel?: AbortSignal) => Promise<DiscoveredAccount[]>,
 ): FriendSource {
   return {
-    async find(people, known) {
+    async find(people, known, cancel) {
+      cancel?.throwIfAborted();
       const byNumber = new Map<string, number[]>();
       for (const person of people) {
         if (!person.phoneNumber) continue;
@@ -33,7 +34,7 @@ export function phoneNumberSource(
       }
       const found = new Map<number, SignalIdentifiers>();
       if (byNumber.size === 0) return found;
-      for (const account of await discover([...byNumber.keys()], known)) {
+      for (const account of await discover([...byNumber.keys()], known, cancel)) {
         for (const userId of byNumber.get(account.phoneNumber) ?? []) {
           found.set(userId, {
             accountId: account.accountId,
@@ -89,14 +90,19 @@ export async function findFriends(
   account: SignalAccount,
   sources: FriendSource[],
   onProgress: (progress: SearchProgress) => void,
+  cancel?: AbortSignal,
 ): Promise<FriendSearch> {
-  const telegram = await people.readPeople((progress) => onProgress({ part: 'telegram', ...progress }));
+  cancel?.throwIfAborted();
+  const telegram = await people.readPeople((progress) => onProgress({ part: 'telegram', ...progress }), cancel);
+  cancel?.throwIfAborted();
   const everyone = [...telegram.people.values()];
   onProgress({ part: 'signal', phoneNumbers: everyone.filter((person) => person.phoneNumber !== null).length });
   const { contacts: inSignal, knownAccounts } = await (await account.storage()).readContacts();
+  cancel?.throwIfAborted();
   const identifiers = new Map<number, SignalIdentifiers>();
   for (const source of sources) {
-    for (const [userId, signal] of await source.find(everyone, knownAccounts)) {
+    cancel?.throwIfAborted();
+    for (const [userId, signal] of await source.find(everyone, knownAccounts, cancel)) {
       identifiers.set(userId, merged(identifiers.get(userId), signal));
     }
   }
@@ -160,14 +166,25 @@ export function friendsIn(rows: FriendRow[], search: FriendSearch): FoundFriend[
   return [...userIds].map((userId) => search.found.get(userId)!);
 }
 
-/** The contacts to add: everyone found who is not in Signal yet and whom the user ticked. */
+/** Deduplicates a list of contacts so at most one record is produced per Signal account. */
+function deduplicateContacts(contacts: readonly NewContact[]): NewContact[] {
+  const unique: NewContact[] = [];
+  for (const contact of contacts) {
+    if (!unique.some((existing) => sameAccount(existing, contact))) unique.push(contact);
+  }
+  return unique;
+}
+
+/** The contacts to add: everyone found who is not in Signal yet and whom the user ticked, one per Signal account. */
 export function contactsToAdd(search: FriendSearch, ticked: readonly number[]): NewContact[] {
-  return [...search.found.values()]
-    .filter((friend) => !friend.inSignal && ticked.includes(friend.person.userId))
-    .map((friend) => ({
-      ...friend.signal,
-      nickname: { given: friend.person.givenName, family: friend.person.familyName },
-    }));
+  return deduplicateContacts(
+    [...search.found.values()]
+      .filter((friend) => !friend.inSignal && ticked.includes(friend.person.userId))
+      .map((friend) => ({
+        ...friend.signal,
+        nickname: { given: friend.person.givenName, family: friend.person.familyName },
+      })),
+  );
 }
 
 /** How often adding is tried again when another device changed the storage service in between. */
@@ -179,11 +196,12 @@ const WRITE_ATTEMPTS = 5;
  * earlier attempt can have written them and stopped before telling. Returns how many were added.
  */
 export async function addContacts(account: SignalAccount, contacts: NewContact[]): Promise<number> {
-  if (contacts.length === 0) return 0;
+  const uniqueContacts = deduplicateContacts(contacts);
+  if (uniqueContacts.length === 0) return 0;
   const storage = await account.storage();
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     const snapshot = await storage.readContacts();
-    const fresh = contacts.filter((contact) => !snapshot.contacts.some((stored) => sameAccount(stored, contact)));
+    const fresh = uniqueContacts.filter((contact) => !snapshot.contacts.some((stored) => sameAccount(stored, contact)));
     if (fresh.length === 0 || (await storage.addContacts(snapshot, fresh))) {
       await account.announceStorageChange();
       return fresh.length;

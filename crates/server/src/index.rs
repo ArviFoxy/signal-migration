@@ -9,20 +9,20 @@
 //! The server keeps no accounts and logs no client addresses; per-address limits live in memory only. Behind a reverse
 //! proxy on the same machine, the limit counts the address the proxy reports (see `client_address`).
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::Future;
-use std::net::{IpAddr, SocketAddr};
+use std::io::Write;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use axum::body::Bytes;
 use axum::extract::{ConnectInfo, Query, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use tokio::io::AsyncWriteExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex as AsyncMutex, Semaphore, watch};
 
 pub const ENTRY_LEN: usize = 48;
 pub const LOOKUP_KEY_LEN: usize = 32;
@@ -44,6 +44,8 @@ pub type SignalPacks = Arc<dyn Fn([u8; PACK_ID_LEN]) -> Pin<Box<dyn Future<Outpu
 const PUBLIC_CDN: &str = "https://cdn-ca.signal.org";
 /// How long Signal's CDN may take to answer.
 const CDN_TIME_LIMIT: Duration = Duration::from_secs(10);
+/// Upper bound on concurrent outbound HEAD requests to Signal's CDN.
+const MAX_CONCURRENT_CDN_CHECKS: usize = 32;
 
 /// Asks Signal's CDN itself, with a request for the headers of the pack's manifest.
 pub fn signal_cdn() -> SignalPacks {
@@ -64,13 +66,28 @@ pub fn signal_cdn() -> SignalPacks {
         })
     })
 }
+
 /// At most this many entries per read; a client reads again from where the last read ended.
 pub const MAX_ENTRIES_PER_READ: usize = 100_000;
 
 /// Upper bound on distinct client addresses tracked by [`AddressLimiter`] in memory.
 const MAX_TRACKED_ADDRESSES: usize = 10_000;
 
-/// A token bucket per client address, kept in memory only and bounded in size.
+/// Normalizes an IP address for rate-limiting and per-client quotas: IPv4-mapped IPv6 addresses become IPv4, and
+/// non-loopback IPv6 addresses are masked to their `/64` prefix so rotating host identifiers within one allocation
+/// shares a single bucket.
+pub fn rate_limit_key(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V4(v4) => IpAddr::V4(v4),
+        IpAddr::V6(v6) if v6.is_loopback() => IpAddr::V6(v6),
+        IpAddr::V6(v6) => {
+            let prefix = u128::from(v6) & !u128::from(u64::MAX);
+            IpAddr::V6(Ipv6Addr::from(prefix))
+        }
+    }
+}
+
+/// A token bucket per client address (or IPv6 `/64`), kept in memory only and bounded in size.
 pub struct AddressLimiter {
     capacity: f64,
     refill_per_second: f64,
@@ -113,10 +130,11 @@ impl AddressLimiter {
 
     /// Takes one token for `address`; false when its bucket is empty.
     pub fn allow(&mut self, address: IpAddr, now: Instant) -> bool {
-        if !self.buckets.contains_key(&address) && self.buckets.len() >= self.max_addresses {
+        let key = rate_limit_key(address);
+        if !self.buckets.contains_key(&key) && self.buckets.len() >= self.max_addresses {
             self.prune(now);
         }
-        let (tokens, last) = self.buckets.entry(address).or_insert((self.capacity, now));
+        let (tokens, last) = self.buckets.entry(key).or_insert((self.capacity, now));
         *tokens = (*tokens + now.duration_since(*last).as_secs_f64() * self.refill_per_second).min(self.capacity);
         *last = now;
         if *tokens >= 1.0 {
@@ -128,22 +146,49 @@ impl AddressLimiter {
     }
 }
 
-pub struct IndexState {
-    path: PathBuf,
-    entries: Vec<[u8; ENTRY_LEN]>,
-    known: HashSet<[u8; ENTRY_LEN]>,
-    /// The Signal packs that have an entry.
-    listed: HashSet<[u8; PACK_ID_LEN]>,
-    append_limiter: AddressLimiter,
-    signal_packs: SignalPacks,
+fn split_entry(entry: &[u8; ENTRY_LEN]) -> ([u8; LOOKUP_KEY_LEN], [u8; PACK_ID_LEN]) {
+    let lookup_key = entry[..LOOKUP_KEY_LEN]
+        .try_into()
+        .expect("an entry begins with a lookup key");
+    let pack_id = entry[LOOKUP_KEY_LEN..].try_into().expect("an entry ends in a pack ID");
+    (lookup_key, pack_id)
 }
 
-fn pack_id_of(entry: &[u8; ENTRY_LEN]) -> [u8; PACK_ID_LEN] {
-    entry[LOOKUP_KEY_LEN..].try_into().expect("an entry ends in a pack ID")
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ListingStatus {
+    New,
+    ExactDuplicate,
+    PackConflict,
+}
+
+fn listing_status(
+    listed: &HashMap<[u8; PACK_ID_LEN], [u8; LOOKUP_KEY_LEN]>,
+    lookup_key: &[u8; LOOKUP_KEY_LEN],
+    pack_id: &[u8; PACK_ID_LEN],
+) -> ListingStatus {
+    match listed.get(pack_id) {
+        None => ListingStatus::New,
+        Some(existing) if existing == lookup_key => ListingStatus::ExactDuplicate,
+        Some(_) => ListingStatus::PackConflict,
+    }
+}
+
+type InFlightChecks = HashMap<[u8; PACK_ID_LEN], watch::Receiver<Option<OnSignal>>>;
+
+struct IndexInner {
+    /// Serializes disk appends and state updates inside `spawn_blocking` so client disconnects cannot diverge disk and memory.
+    write_path: StdMutex<PathBuf>,
+    entries: StdRwLock<Vec<[u8; ENTRY_LEN]>>,
+    /// The Signal packs that have an entry (`pack_id -> lookup_key`).
+    listed: StdRwLock<HashMap<[u8; PACK_ID_LEN], [u8; LOOKUP_KEY_LEN]>>,
+    append_limiter: StdMutex<AddressLimiter>,
+    signal_packs: SignalPacks,
+    cdn_semaphore: Arc<Semaphore>,
+    in_flight: Arc<AsyncMutex<InFlightChecks>>,
 }
 
 #[derive(Clone)]
-pub struct Index(pub Arc<Mutex<IndexState>>);
+pub struct Index(Arc<IndexInner>);
 
 impl Index {
     /// Opens the index file, creating it if missing. Any trailing partial entry (from an interrupted write) is
@@ -165,16 +210,54 @@ impl Index {
             file.set_len(aligned_len).await?;
             file.sync_data().await?;
         }
-        let known = entries.iter().copied().collect();
-        let listed = entries.iter().map(pack_id_of).collect();
-        Ok(Self(Arc::new(Mutex::new(IndexState {
-            path,
-            entries,
-            known,
-            listed,
-            append_limiter: AddressLimiter::new(60, Duration::from_secs(60)),
+        let mut listed = HashMap::with_capacity(entries.len());
+        for entry in &entries {
+            let (lookup_key, pack_id) = split_entry(entry);
+            listed.entry(pack_id).or_insert(lookup_key);
+        }
+        Ok(Self(Arc::new(IndexInner {
+            write_path: StdMutex::new(path),
+            entries: StdRwLock::new(entries),
+            listed: StdRwLock::new(listed),
+            append_limiter: StdMutex::new(AddressLimiter::new(60, Duration::from_secs(60))),
             signal_packs,
-        }))))
+            cdn_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_CDN_CHECKS)),
+            in_flight: Arc::new(AsyncMutex::new(HashMap::new())),
+        })))
+    }
+
+    /// Asks Signal's CDN whether `pack_id` exists, deduplicating concurrent checks for the same pack ID and bounding
+    /// overall concurrency. Runs the outbound request in a detached task so a cancelled client cannot starve waiters.
+    async fn check_signal_pack(&self, pack_id: [u8; PACK_ID_LEN]) -> OnSignal {
+        let mut rx = {
+            let mut in_flight = self.0.in_flight.lock().await;
+            if let Some(existing) = in_flight.get(&pack_id) {
+                existing.clone()
+            } else {
+                let (tx, rx) = watch::channel(None);
+                in_flight.insert(pack_id, rx.clone());
+                let semaphore = Arc::clone(&self.0.cdn_semaphore);
+                let signal_packs = Arc::clone(&self.0.signal_packs);
+                let map = Arc::clone(&self.0.in_flight);
+                tokio::spawn(async move {
+                    let answer = match semaphore.acquire_owned().await {
+                        Ok(_permit) => signal_packs(pack_id).await,
+                        Err(_) => OnSignal::Unknown,
+                    };
+                    let _ = tx.send(Some(answer));
+                    map.lock().await.remove(&pack_id);
+                });
+                rx
+            }
+        };
+        loop {
+            if let Some(answer) = *rx.borrow() {
+                return answer;
+            }
+            if rx.changed().await.is_err() {
+                return OnSignal::Unknown;
+            }
+        }
     }
 }
 
@@ -183,10 +266,10 @@ pub async fn read(State(index): State<Index>, Query(query): Query<HashMap<String
     let Ok(from) = query.get("from").map_or(Ok(0), |value| value.parse::<usize>()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let state = index.0.lock().await;
-    let start = from.min(state.entries.len());
-    let end = (start + MAX_ENTRIES_PER_READ).min(state.entries.len());
-    let body: Vec<u8> = state.entries[start..end].iter().flatten().copied().collect();
+    let entries = index.0.entries.read().expect("entries lock not poisoned");
+    let start = from.min(entries.len());
+    let end = start.saturating_add(MAX_ENTRIES_PER_READ).min(entries.len());
+    let body: Vec<u8> = entries[start..end].iter().flatten().copied().collect();
     (
         [
             (header::CONTENT_TYPE, "application/octet-stream"),
@@ -204,8 +287,9 @@ pub async fn read(State(index): State<Index>, Query(query): Query<HashMap<String
 /// it sends in that header, so a client cannot choose its bucket. A loopback request without a readable header counts
 /// against the loopback address.
 pub fn client_address(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
-    if !peer.ip().is_loopback() {
-        return peer.ip();
+    let peer_ip = peer.ip().to_canonical();
+    if !peer_ip.is_loopback() {
+        return peer_ip;
     }
     headers
         .get_all("x-forwarded-for")
@@ -213,8 +297,9 @@ pub fn client_address(peer: SocketAddr, headers: &HeaderMap) -> IpAddr {
         .next_back()
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.rsplit(',').next())
-        .and_then(|last| last.trim().parse().ok())
-        .unwrap_or(peer.ip())
+        .and_then(|last| last.trim().parse::<IpAddr>().ok())
+        .map(|ip| ip.to_canonical())
+        .unwrap_or(peer_ip)
 }
 
 /// `POST /v1/sticker-packs/index` with one 48-byte entry: 201 when added, 200 when already present.
@@ -231,51 +316,62 @@ pub async fn append(
     let Ok(entry) = <[u8; ENTRY_LEN]>::try_from(body.as_ref()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
-    let pack_id = pack_id_of(&entry);
-    let signal_packs = {
-        let mut state = index.0.lock().await;
-        if state.known.contains(&entry) {
-            return StatusCode::OK.into_response();
+    let (lookup_key, pack_id) = split_entry(&entry);
+    {
+        let listed = index.0.listed.read().expect("listed lock not poisoned");
+        match listing_status(&listed, &lookup_key, &pack_id) {
+            ListingStatus::ExactDuplicate => return StatusCode::OK.into_response(),
+            ListingStatus::PackConflict => return StatusCode::CONFLICT.into_response(),
+            ListingStatus::New => {}
         }
-        if state.listed.contains(&pack_id) {
-            return StatusCode::CONFLICT.into_response();
-        }
-        if !state.append_limiter.allow(client, Instant::now()) {
-            return StatusCode::TOO_MANY_REQUESTS.into_response();
-        }
-        state.signal_packs.clone()
-    };
-    // Signal's CDN is asked without the lock, so that a slow answer holds up nobody else.
-    match signal_packs(pack_id).await {
+    }
+    if !index
+        .0
+        .append_limiter
+        .lock()
+        .expect("limiter lock not poisoned")
+        .allow(client, Instant::now())
+    {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    // Signal's CDN is asked without holding the write lock, deduplicated per pack ID and bounded in concurrency.
+    match index.check_signal_pack(pack_id).await {
         OnSignal::Exists => {}
         OnSignal::Missing => return StatusCode::UNPROCESSABLE_ENTITY.into_response(),
         OnSignal::Unknown => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
-    let mut state = index.0.lock().await;
-    // Someone else may have added the same entry, or one for the same pack, while the CDN was asked.
-    if state.known.contains(&entry) {
-        return StatusCode::OK.into_response();
-    }
-    if state.listed.contains(&pack_id) {
-        return StatusCode::CONFLICT.into_response();
-    }
-    let aligned_len = (state.entries.len() * ENTRY_LEN) as u64;
-    let mut file = match tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&state.path)
-        .await
-    {
-        Ok(file) => file,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-    };
-    if file.write_all(&entry).await.is_err() || file.sync_data().await.is_err() {
-        // Roll back any partial write so the file remains aligned to ENTRY_LEN.
-        let _ = file.set_len(aligned_len).await;
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-    state.entries.push(entry);
-    state.known.insert(entry);
-    state.listed.insert(pack_id);
-    StatusCode::CREATED.into_response()
+    // Run the re-check, disk append + sync + rollback, and in-memory update inside `spawn_blocking` so cancelling
+    // this HTTP handler future on client disconnect cannot leave disk and memory diverged or misaligned.
+    let inner = Arc::clone(&index.0);
+    let status = tokio::task::spawn_blocking(move || {
+        let path = inner.write_path.lock().expect("write lock not poisoned");
+        {
+            let listed = inner.listed.read().expect("listed lock not poisoned");
+            match listing_status(&listed, &lookup_key, &pack_id) {
+                ListingStatus::ExactDuplicate => return StatusCode::OK,
+                ListingStatus::PackConflict => return StatusCode::CONFLICT,
+                ListingStatus::New => {}
+            }
+        }
+        let aligned_len = (inner.entries.read().expect("entries lock not poisoned").len() * ENTRY_LEN) as u64;
+        let mut file = match std::fs::OpenOptions::new().create(true).append(true).open(&*path) {
+            Ok(file) => file,
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        if file.write_all(&entry).is_err() || file.sync_data().is_err() {
+            // Roll back any partial write so the file remains aligned to ENTRY_LEN.
+            let _ = file.set_len(aligned_len);
+            return StatusCode::INTERNAL_SERVER_ERROR;
+        }
+        inner
+            .listed
+            .write()
+            .expect("listed lock not poisoned")
+            .insert(pack_id, lookup_key);
+        inner.entries.write().expect("entries lock not poisoned").push(entry);
+        StatusCode::CREATED
+    })
+    .await
+    .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    status.into_response()
 }

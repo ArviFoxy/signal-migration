@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use signal_migration_server::{
     ClientConfig, Config, TelegramApp,
     index::{Index, signal_cdn},
-    parse_allowed_origins,
+    parse_allowed_origins, parse_tls_config,
     relay::RelayTargets,
     router,
 };
@@ -59,6 +59,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(raw) => parse_allowed_origins(&raw)?,
         None => Vec::new(),
     };
+    let tls_files = parse_tls_config(non_empty_env("TLS_CERT"), non_empty_env("TLS_KEY"))?;
     let app = router(Config {
         static_dir,
         frontend_redirect_url,
@@ -71,8 +72,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     })
     .into_make_service_with_connect_info::<SocketAddr>();
 
-    match (env::var("TLS_CERT"), env::var("TLS_KEY")) {
-        (Ok(cert), Ok(key)) => {
+    match tls_files {
+        Some((cert, key)) => {
             rustls::crypto::ring::default_provider()
                 .install_default()
                 .map_err(|_| "a TLS provider is already installed")?;
@@ -80,7 +81,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("https://{address}/");
             axum_server::bind_rustls(address, tls).serve(app).await?;
         }
-        _ => {
+        None => {
             println!("http://{address}/");
             axum::serve(tokio::net::TcpListener::bind(address).await?, app).await?;
         }

@@ -6,7 +6,7 @@ import { DEFAULT_DEVICE_NAME } from '../../../signal/device-name';
 import type { Context, Variant, VariantHandlers } from '../core';
 import type { AppEvent } from '../events';
 import type { Record } from '../record';
-import { initialSignal, type SignalState } from '../signal';
+import { deviceKeyOf, initialSignal, type SignalState } from '../signal';
 import { initialTelegram, type TelegramState } from '../telegram';
 import type { Work } from '../work';
 import { beginEnding, INITIAL_CHOICE } from './session';
@@ -19,7 +19,14 @@ export function fromRecord(record: Record | null, context: Context): AppState {
     ? { kind: 'starting', method: 'qr', instance: record.telegram, attempt: 1, resumed: true, stop: false }
     : initialTelegram;
   const signal: SignalState = record?.signal
-    ? { kind: 'linked', deviceName: DEFAULT_DEVICE_NAME, device: record.signal, error: null, unlinks: 0 }
+    ? {
+        kind: 'linked',
+        deviceName: DEFAULT_DEVICE_NAME,
+        deviceKey: deviceKeyOf(record.signal, context.nonce),
+        device: record.signal,
+        error: null,
+        unlinks: 0,
+      }
     : initialSignal(DEFAULT_DEVICE_NAME);
   const session: Session = {
     telegram,

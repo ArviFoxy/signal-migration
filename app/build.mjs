@@ -43,6 +43,31 @@ function normalizeBackendOrigin(raw) {
   return parsed.origin;
 }
 
+function contentSecurityPolicy(origin) {
+  const connect = [
+    "'self'",
+    'blob:',
+    'https://*.web.telegram.org',
+    'wss://*.web.telegram.org',
+    'https://cdn-ca.signal.org',
+  ];
+  if (origin) {
+    connect.push(origin, origin.replace(/^http/, 'ws'));
+  }
+  return [
+    "default-src 'none'",
+    "script-src 'self' 'wasm-unsafe-eval' blob:",
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob:",
+    "font-src 'self'",
+    "worker-src 'self' blob:",
+    `connect-src ${connect.join(' ')}`,
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'none'",
+  ].join('; ');
+}
+
 function shortHash(bytes) {
   return createHash('sha256').update(bytes).digest('hex').slice(0, 8);
 }
@@ -154,12 +179,17 @@ const stylesBytes = fs.readFileSync(rawStylesPath);
 const stylesCss = `styles-${shortHash(stylesBytes)}.css`;
 fs.renameSync(rawStylesPath, path.join(outdir, stylesCss));
 
-// 5. Emit index.html referencing the hashed assets with Subresource Integrity hashes.
+// 5. Emit index.html referencing the hashed assets with Subresource Integrity hashes and strict CSP.
 const fontsSri = sriSha384(fs.readFileSync(path.join(outdir, fontsCss)));
 const stylesSri = sriSha384(stylesBytes);
 const mainSri = sriSha384(fs.readFileSync(path.join(outdir, mainJs)));
+const csp = contentSecurityPolicy(backendOrigin);
 const indexHtml = fs
   .readFileSync('public/index.html', 'utf8')
+  .replace(
+    '<meta name="referrer" content="no-referrer" />',
+    `<meta name="referrer" content="no-referrer" />\n    <meta http-equiv="Content-Security-Policy" content="${csp}" />`,
+  )
   .replace(
     '<link rel="stylesheet" href="./fonts.css" />',
     `<link rel="stylesheet" href="./${fontsCss}" integrity="${fontsSri}" />`,
@@ -172,8 +202,13 @@ const indexHtml = fs
     '<script type="module" src="./main.js"></script>',
     `<script type="module" src="./${mainJs}" integrity="${mainSri}"></script>`,
   );
-if (!indexHtml.includes(fontsCss) || !indexHtml.includes(stylesCss) || !indexHtml.includes(mainJs)) {
-  throw new Error('public/index.html did not contain expected asset tags to rewrite');
+if (
+  !indexHtml.includes('http-equiv="Content-Security-Policy"') ||
+  !indexHtml.includes(fontsCss) ||
+  !indexHtml.includes(stylesCss) ||
+  !indexHtml.includes(mainJs)
+) {
+  throw new Error('public/index.html did not contain expected meta or asset tags to rewrite');
 }
 fs.writeFileSync(path.join(outdir, 'index.html'), indexHtml);
 

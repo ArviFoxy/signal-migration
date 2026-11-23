@@ -20,6 +20,7 @@ extern "C" {
 // WASI's error numbers.
 const SUCCESS: i32 = 0;
 const BAD_FILE_DESCRIPTOR: i32 = 8;
+const INVALID_ARGUMENT: i32 = 28;
 const IO_ERROR: i32 = 29;
 const NOT_SEEKABLE: i32 = 70;
 
@@ -29,7 +30,13 @@ const STANDARD_ERROR: i32 = 2;
 /// Fills `length` bytes at `buffer` with random bytes from the browser.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn __imported_wasi_snapshot_preview1_random_get(buffer: *mut u8, length: usize) -> i32 {
-    // SAFETY: the C library passes a buffer of `length` writable bytes.
+    if length == 0 {
+        return SUCCESS;
+    }
+    if buffer.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    // SAFETY: `length > 0` and `buffer` is non-null; the C library passes a writable buffer of `length` bytes.
     let bytes = unsafe { core::slice::from_raw_parts_mut(buffer, length) };
     match getrandom::fill(bytes) {
         Ok(()) => SUCCESS,
@@ -44,8 +51,17 @@ pub unsafe extern "C" fn __imported_wasi_snapshot_preview1_clock_time_get(
     _precision: i64,
     nanoseconds: *mut u64,
 ) -> i32 {
-    // SAFETY: the C library passes a pointer to one writable u64.
-    unsafe { *nanoseconds = (milliseconds_since_1970() * 1_000_000.0) as u64 };
+    if nanoseconds.is_null() {
+        return INVALID_ARGUMENT;
+    }
+    let ms = milliseconds_since_1970();
+    let ns = if ms.is_finite() && ms >= 0.0 {
+        (ms * 1_000_000.0) as u64
+    } else {
+        0
+    };
+    // SAFETY: `nanoseconds` is non-null and points to one writable u64.
+    unsafe { *nanoseconds = ns };
     SUCCESS
 }
 
@@ -64,17 +80,29 @@ pub unsafe extern "C" fn __imported_wasi_snapshot_preview1_fd_write(
     piece_count: usize,
     written: *mut usize,
 ) -> i32 {
-    // SAFETY: the C library passes `piece_count` pieces, each naming readable bytes.
-    let pieces = unsafe { core::slice::from_raw_parts(pieces, piece_count) };
+    if file != STANDARD_OUTPUT && file != STANDARD_ERROR {
+        return BAD_FILE_DESCRIPTOR;
+    }
+    if written.is_null() || (piece_count > 0 && pieces.is_null()) {
+        return INVALID_ARGUMENT;
+    }
     let mut bytes = Vec::new();
-    for piece in pieces {
-        // SAFETY: as above.
-        bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(piece.start, piece.length) });
+    if piece_count > 0 {
+        // SAFETY: `piece_count > 0` and `pieces` is non-null; the C library passes `piece_count` initialized pieces.
+        let pieces = unsafe { core::slice::from_raw_parts(pieces, piece_count) };
+        for piece in pieces {
+            if piece.length == 0 {
+                continue;
+            }
+            if piece.start.is_null() {
+                return INVALID_ARGUMENT;
+            }
+            // SAFETY: `piece.length > 0` and `piece.start` is non-null.
+            bytes.extend_from_slice(unsafe { core::slice::from_raw_parts(piece.start, piece.length) });
+        }
     }
-    if file == STANDARD_OUTPUT || file == STANDARD_ERROR {
-        console_error(&String::from_utf8_lossy(&bytes));
-    }
-    // SAFETY: the C library passes a pointer to one writable usize.
+    console_error(&String::from_utf8_lossy(&bytes));
+    // SAFETY: `written` is non-null and points to one writable usize.
     unsafe { *written = bytes.len() };
     SUCCESS
 }

@@ -50,11 +50,15 @@ export function insertPacks<T>(existing: ExistingPack<T>[], added: NewPack<T>[])
 }
 
 const MAX_POSITION = 0xffffffff;
+/** Spacing left between packs when renumbering or appending so future inserts fit without rewriting all records. */
+const POSITION_STRIDE = 1024;
 
 /**
  * Signal positions for packs listed in their final order, where existing packs carry their current position and
  * new packs carry null. Signal sorts packs by position, then by pack ID. Existing positions are kept when every run
- * of new packs fits strictly between the positions around it; otherwise every pack is numbered from 0.
+ * of new packs fits strictly between the positions around it (distributing evenly across bounded gaps and using a
+ * stride at the tail); otherwise every pack is renumbered with a stride so future visits can insert without another
+ * full rewrite.
  */
 export function assignPositions(order: (number | null)[]): number[] {
   const positions: number[] = [];
@@ -70,11 +74,28 @@ export function assignPositions(order: (number | null)[]): number[] {
     }
     let runEnd = index;
     while (runEnd < order.length && order[runEnd] === null) runEnd++;
-    const next = runEnd < order.length ? (order[runEnd] as number) : MAX_POSITION + 1;
+    const hasNext = runEnd < order.length;
+    const next = hasNext ? (order[runEnd] as number) : MAX_POSITION + 1;
     const runLength = runEnd - index;
-    if (next - previous - 1 < runLength) return order.map((_, i) => i);
-    for (let offset = 1; offset <= runLength; offset++) positions.push(previous + offset);
-    previous += runLength;
+    const gap = next - previous - 1;
+    if (gap < runLength) {
+      const stride = order.length * POSITION_STRIDE <= MAX_POSITION ? POSITION_STRIDE : 1;
+      return order.map((_, i) => (i + 1) * stride);
+    }
+    if (hasNext) {
+      // Distribute inserts evenly inside (previous, next) so room stays on both sides.
+      const span = next - previous;
+      for (let offset = 1; offset <= runLength; offset++) {
+        positions.push(previous + Math.floor((span * offset) / (runLength + 1)));
+      }
+      previous = positions[positions.length - 1];
+    } else {
+      const step = Math.min(POSITION_STRIDE, Math.floor(gap / runLength));
+      for (let offset = 1; offset <= runLength; offset++) {
+        positions.push(previous + offset * step);
+      }
+      previous = positions[positions.length - 1];
+    }
     index = runEnd;
   }
   return positions;

@@ -156,4 +156,45 @@ describe('reading Saved Messages', () => {
     expect(requests.some((r) => r._ === 'getRemoteFile' && r.remote_file_id === 'remote-7')).toBe(true);
     expect(new TextDecoder().decode(received[0])).toBe('file-2007');
   });
+
+  // Detects: TDLib restarting during createPrivateChat leaving ensureChat() returning an old chat id without
+  // throwing TelegramRestartedError, causing getChatHistory in the new run to fail with 400 Chat not found.
+  it('retries when TDLib restarts during createPrivateChat', async () => {
+    let run = 1;
+    let knownInRun = new Set<number>();
+    let createCalls = 0;
+    const invoke = async (query: { _: string }) => {
+      switch (query._) {
+        case 'getMe':
+          return { _: 'user', id: MY_USER_ID };
+        case 'createPrivateChat':
+          createCalls++;
+          if (createCalls === 1) {
+            // Simulate a restart finishing just before createPrivateChat returns: new run does not know the chat.
+            run++;
+            knownInRun = new Set();
+            return { _: 'chat', id: MY_USER_ID };
+          }
+          knownInRun.add(MY_USER_ID);
+          return { _: 'chat', id: MY_USER_ID };
+        case 'getChatHistory':
+          if (!knownInRun.has(MY_USER_ID)) throw new TelegramError(400, 'Chat not found');
+          return { _: 'messages', total_count: 0, messages: [] };
+        default:
+          throw new Error(`not simulated: ${query._}`);
+      }
+    };
+    const client = {
+      invoke,
+      get run() {
+        return run;
+      },
+      withFileRef: async () => {
+        throw new Error('unused');
+      },
+    } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'>;
+
+    expect(await savedMessagesOf(client).readMessages(() => undefined)).toEqual([]);
+    expect(createCalls).toBe(2);
+  });
 });

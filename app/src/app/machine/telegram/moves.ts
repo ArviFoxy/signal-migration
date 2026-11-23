@@ -27,10 +27,10 @@ export const stopped = (state: Running, error: string): TelegramState => ({
   error,
 });
 
-/** With the QR method, TDLib is asked for a QR code once it waits for a phone number. */
+/** With the QR method, TDLib is asked for a QR code once it is in a state that accepts QR requests and idle. */
 export function withQrRequest(state: Login): Login {
   if (state.method !== 'qr' || state.request || state.qrRequested) return state;
-  if (state.auth._ !== 'authorizationStateWaitPhoneNumber') return state;
+  if (!QR_REQUEST_STATES.has(state.auth._)) return state;
   return {
     ...state,
     request: { _: 'requestQrCodeAuthentication', other_user_ids: [] },

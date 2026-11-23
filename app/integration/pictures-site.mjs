@@ -35,8 +35,15 @@ export async function startPicturesSite() {
     path.join(root, 'index.html'),
     '<!doctype html><meta charset="utf-8"><script type="module" src="/pictures-page.js"></script>',
   );
+  const trapHits = [];
   const server = http.createServer((request, response) => {
-    const file = path.join(root, new URL(request.url, 'http://x').pathname.replace(/\/$/, '/index.html'));
+    const pathname = new URL(request.url, 'http://x').pathname;
+    if (pathname.startsWith('/trap/')) {
+      trapHits.push(pathname);
+      response.writeHead(200, { 'content-type': 'text/css' }).end('/* trap */');
+      return;
+    }
+    const file = path.join(root, pathname.replace(/\/$/, '/index.html'));
     if (!file.startsWith(root) || !fs.existsSync(file)) return response.writeHead(404).end();
     response.writeHead(200, { 'content-type': TYPES[path.extname(file)] ?? 'application/octet-stream' });
     fs.createReadStream(file).pipe(response);
@@ -44,6 +51,7 @@ export async function startPicturesSite() {
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   return {
     base: `http://127.0.0.1:${server.address().port}/`,
+    trapHits,
     async stop() {
       await new Promise((resolve) => server.close(resolve));
       fs.rmSync(root, { recursive: true, force: true });

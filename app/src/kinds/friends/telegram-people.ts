@@ -75,9 +75,9 @@ export type ReadingProgress = {
 
 /** Where the people come from: the user's account in the app, simulated data in tests. */
 export interface PeopleSource {
-  readPeople(onProgress: (progress: ReadingProgress) => void): Promise<TelegramPeople>;
+  readPeople(onProgress: (progress: ReadingProgress) => void, cancel?: AbortSignal): Promise<TelegramPeople>;
   /** The bytes of a picture, by the run-tagged reference a person or a group carries. */
-  readPhoto(photo: TelegramFileRef): Promise<Uint8Array>;
+  readPhoto(photo: TelegramFileRef, cancel?: AbortSignal): Promise<Uint8Array>;
 }
 
 /** How many chats Telegram is asked to load, and how many members of a large group it gives, in one request. */
@@ -95,18 +95,34 @@ const GROUPS_BEFORE_ESTIMATE = 5;
 const SECONDS_BEFORE_ESTIMATE = 5;
 
 const MAIN_LIST = { _: 'chatListMain' } as const;
+const E164_DIGITS = /^[1-9]\d{4,14}$/;
+
+/** Normalizes a TDLib `user.phone_number` string into strict E.164 (`+<digits>`), or null if invalid/empty. */
+function normalizeTelegramPhone(raw: string): string | null {
+  const digits = raw.trim().replace(/^\+/, '');
+  return E164_DIGITS.test(digits) ? `+${digits}` : null;
+}
 
 /**
  * The people of the account behind `client`. `now` is the clock, in milliseconds, by which the time left is
  * estimated.
  */
 export function peopleOf(
-  client: Pick<TelegramClient, 'invoke' | 'run' | 'readFileRef'>,
+  client: Pick<TelegramClient, 'invoke' | 'run' | 'readFileRef'> & Partial<Pick<TelegramClient, 'invokeInRun'>>,
   now: () => number = () => performance.now(),
 ): PeopleSource {
-  const rawInvoke = ((query: { _: string }) => patiently(() => client.invoke(query as never))) as Td.Invoke;
-  const invoke = ((query: { _: string }) =>
-    patiently(() => untilNotRestarted(() => client.invoke(query as never)))) as Td.Invoke;
+  // Single raw invoke without nested patiently(): outer loops own flood-wait retries so 429s never multiply.
+  const rawInvoke = ((query: { _: string }) => client.invoke(query as never)) as Td.Invoke;
+  const invokeInRun = async <T extends Td.$FunctionName>(
+    run: number,
+    query: { readonly _: T } & Td.$FunctionInputByName[T],
+  ): Promise<Td.$FunctionResultByName[T]> => {
+    if (client.invokeInRun) return client.invokeInRun(run, query as never) as Promise<Td.$FunctionResultByName[T]>;
+    if (client.run !== run) throw new TelegramRestartedError();
+    const result = (await client.invoke(query as never)) as Td.$FunctionResultByName[T];
+    if (client.run !== run) throw new TelegramRestartedError();
+    return result;
+  };
 
   let chatsLoadedInRun = -1;
   let loadingChats: { run: number; promise: Promise<void> } | null = null;
@@ -115,19 +131,19 @@ export function peopleOf(
    * With `use_chat_info_database: false`, each fresh TDLib run starts with an empty chat list in memory. Loading
    * chats once per run lets `getChats`, `getChat`, and `getSupergroup` survive a mid-read TDLib restart.
    */
-  const ensureChatsLoaded = (): Promise<void> => {
+  const ensureChatsLoaded = (cancel?: AbortSignal): Promise<number> => {
     const run = client.run;
-    if (chatsLoadedInRun === run) return Promise.resolve();
-    if (loadingChats?.run === run) return loadingChats.promise;
+    if (chatsLoadedInRun === run) return Promise.resolve(run);
+    if (loadingChats?.run === run) return loadingChats.promise.then(() => run);
     const promise = (async () => {
       for (;;) {
+        cancel?.throwIfAborted();
         try {
-          await rawInvoke({ _: 'loadChats', chat_list: MAIN_LIST, limit: CHATS_PER_REQUEST });
+          await invokeInRun(run, { _: 'loadChats', chat_list: MAIN_LIST, limit: CHATS_PER_REQUEST });
         } catch (error) {
           if (error instanceof TelegramError && error.code === ALL_LOADED) break;
           throw error;
         }
-        if (client.run !== run) throw new TelegramRestartedError();
       }
       if (client.run !== run) throw new TelegramRestartedError();
       chatsLoadedInRun = run;
@@ -137,22 +153,26 @@ export function peopleOf(
       if (loadingChats?.promise === promise) loadingChats = null;
     };
     promise.then(clear, clear);
-    return promise;
+    return promise.then(() => run);
   };
 
   /** Runs an operation that requires the chat list to be loaded in the current TDLib run. */
-  const withChats = <T>(operation: () => Promise<T>): Promise<T> =>
-    patiently(() =>
-      untilNotRestarted(async () => {
-        await ensureChatsLoaded();
-        return operation();
-      }),
+  const withChats = <T>(operation: (run: number) => Promise<T>, cancel?: AbortSignal): Promise<T> =>
+    patiently(
+      () =>
+        untilNotRestarted(async () => {
+          cancel?.throwIfAborted();
+          const run = await ensureChatsLoaded(cancel);
+          return operation(run);
+        }),
+      cancel,
     );
 
   /** The IDs of all chats in the main list, in its order. */
-  function chatIds(): Promise<number[]> {
+  function chatIds(cancel?: AbortSignal): Promise<number[]> {
     return withChats(
-      async () => (await rawInvoke({ _: 'getChats', chat_list: MAIN_LIST, limit: EVERY_CHAT })).chat_ids,
+      async (run) => (await invokeInRun(run, { _: 'getChats', chat_list: MAIN_LIST, limit: EVERY_CHAT })).chat_ids,
+      cancel,
     );
   }
 
@@ -167,58 +187,66 @@ export function peopleOf(
    */
   async function readMembers(
     type: Td.chatTypeBasicGroup | Td.chatTypeSupergroup,
-    take: (userIds: number[], part: number) => Promise<void>,
+    take: (userIds: number[], part: number, run: number) => Promise<void>,
+    cancel?: AbortSignal,
   ): Promise<void> {
     if (type._ === 'chatTypeBasicGroup') {
-      const info = await withChats(() =>
-        rawInvoke({ _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id }),
-      );
-      return take(userIdsOf(info.members), 1);
+      await withChats(async (run) => {
+        const info = await invokeInRun(run, { _: 'getBasicGroupFullInfo', basic_group_id: type.basic_group_id });
+        await take(userIdsOf(info.members), 1, run);
+      }, cancel);
+      return;
     }
     // What TDLib already knows of the group answers without a request to Telegram's servers. The size is 0 there
     // when TDLib does not know it.
-    const known = await withChats(() => rawInvoke({ _: 'getSupergroup', supergroup_id: type.supergroup_id }));
+    const known = await withChats(
+      (run) => invokeInRun(run, { _: 'getSupergroup', supergroup_id: type.supergroup_id }),
+      cancel,
+    );
     if (known.member_count > GROUP_SIZE_LIMIT) return;
     // Every answer names the size of the group, so the first one says whether the group is read at all.
     for (let offset = 0; ; offset += MEMBERS_PER_REQUEST) {
-      const page = await withChats(() =>
-        rawInvoke({
+      cancel?.throwIfAborted();
+      const stop = await withChats(async (run) => {
+        const page = await invokeInRun(run, {
           _: 'getSupergroupMembers',
           supergroup_id: type.supergroup_id,
           filter: { _: 'supergroupMembersFilterRecent' },
           offset,
           limit: MEMBERS_PER_REQUEST,
-        }),
-      );
-      if (page.total_count > GROUP_SIZE_LIMIT) return;
-      const arrived = offset + MEMBERS_PER_REQUEST;
-      const last = page.members.length === 0 || arrived >= page.total_count;
-      await take(userIdsOf(page.members), last ? 1 : arrived / page.total_count);
-      if (last) return;
+        });
+        if (page.total_count > GROUP_SIZE_LIMIT) return true;
+        const arrived = offset + MEMBERS_PER_REQUEST;
+        const last = page.members.length === 0 || arrived >= page.total_count;
+        await take(userIdsOf(page.members), last ? 1 : arrived / page.total_count, run);
+        return last;
+      }, cancel);
+      if (stop) return;
     }
   }
 
   return {
-    readPhoto: (photo) => patiently(() => client.readFileRef(photo)),
-    async readPeople(onProgress) {
+    readPhoto: (photo, cancel) => patiently(() => client.readFileRef(photo, cancel), cancel),
+    async readPeople(onProgress, cancel) {
+      cancel?.throwIfAborted();
+      const invoke = ((query: { _: string }) =>
+        patiently(() => untilNotRestarted(() => rawInvoke(query as never)), cancel)) as Td.Invoke;
       const self = (await invoke({ _: 'getMe' })).id;
       const people = new Map<number, Person>();
-      /** Notes the person behind `userId` and says whether it is one: not the user, a bot or a deleted account. */
-      const isPerson = async (userId: number): Promise<boolean> => {
+      /**
+       * Notes the person behind `userId` in `run` and says whether it is one: not the user, a bot or a deleted
+       * account. Throws `TelegramRestartedError` if TDLib restarted out of `run`, so the caller reloads that run's
+       * context (chats / contacts / group page) instead of silently dropping users with 400 User not found.
+       */
+      const isPersonInRun = async (userId: number, run: number): Promise<boolean> => {
         if (userId === self) return false;
         if (people.has(userId)) return true;
-        // The library answers from the records that came with the chats and the member lists. An account it holds
-        // no record of is passed over.
-        let run = 0;
-        const user = await patiently(() =>
-          untilNotRestarted(async () => {
-            const before = client.run;
-            const found = await rawInvoke({ _: 'getUser', user_id: userId });
-            run = client.run === before ? before : 0;
-            return found;
-          }),
-        ).catch((error: unknown) => {
-          if (error instanceof TelegramError && error.code !== TOO_FAST) return null;
+        cancel?.throwIfAborted();
+        const user = await invokeInRun(run, { _: 'getUser', user_id: userId }).catch((error: unknown) => {
+          if (error instanceof TelegramError && error.code !== TOO_FAST) {
+            if (client.run !== run) throw new TelegramRestartedError();
+            return null;
+          }
           throw error;
         });
         if (!user || user.type._ !== 'userTypeRegular') return false;
@@ -226,7 +254,7 @@ export function peopleOf(
           userId,
           givenName: user.first_name,
           familyName: user.last_name,
-          phoneNumber: user.phone_number ? `+${user.phone_number}` : null,
+          phoneNumber: normalizeTelegramPhone(user.phone_number),
           ...(user.profile_photo ? { photo: fileRef(user.profile_photo.small, run) } : {}),
           ...(user.profile_photo?.minithumbnail ? { photoPreview: user.profile_photo.minithumbnail.data } : {}),
         });
@@ -234,7 +262,7 @@ export function peopleOf(
       };
 
       // First what TDLib answers by itself: which chats are one-to-one chats and which are groups.
-      const ids = await chatIds();
+      const ids = await chatIds(cancel);
       const entries: (ChatEntry | null)[] = ids.map(() => null);
       const groups: {
         index: number;
@@ -245,31 +273,51 @@ export function peopleOf(
         photoPreview: string | undefined;
       }[] = [];
       for (const [index, chatId] of ids.entries()) {
-        let run = 0;
-        const chat = await withChats(async () => {
-          const before = client.run;
-          const result = await rawInvoke({ _: 'getChat', chat_id: chatId });
-          run = client.run === before ? before : 0;
-          return result;
-        });
-        const type = chat.type;
-        if (type._ === 'chatTypePrivate') {
-          if (await isPerson(type.user_id)) entries[index] = { kind: 'person', userId: type.user_id };
-        } else if (type._ === 'chatTypeBasicGroup' || (type._ === 'chatTypeSupergroup' && !type.is_channel)) {
-          groups.push({
-            index,
-            chatId,
-            title: chat.title,
-            type,
-            photo: chat.photo ? fileRef(chat.photo.small, run) : undefined,
-            photoPreview: chat.photo?.minithumbnail?.data,
-          });
+        cancel?.throwIfAborted();
+        const chatEntry = await withChats(async (run) => {
+          const chat = await invokeInRun(run, { _: 'getChat', chat_id: chatId });
+          const type = chat.type;
+          if (type._ === 'chatTypePrivate') {
+            return (await isPersonInRun(type.user_id, run))
+              ? ({ kind: 'person' as const, userId: type.user_id } satisfies ChatEntry)
+              : null;
+          }
+          if (type._ === 'chatTypeBasicGroup' || (type._ === 'chatTypeSupergroup' && !type.is_channel)) {
+            return {
+              kind: 'group-pending' as const,
+              index,
+              chatId,
+              title: chat.title,
+              type,
+              photo: chat.photo ? fileRef(chat.photo.small, run) : undefined,
+              photoPreview: chat.photo?.minithumbnail?.data,
+            };
+          }
+          return null;
+        }, cancel);
+        if (!chatEntry) continue;
+        if (chatEntry.kind === 'person') {
+          entries[index] = chatEntry;
+        } else {
+          const { kind: _kind, ...group } = chatEntry;
+          groups.push(group);
         }
       }
       // The contact list comes in one request, with the records of the people on it.
-      const contactIds: number[] = [];
-      for (const userId of (await invoke({ _: 'getContacts' })).user_ids)
-        if (await isPerson(userId)) contactIds.push(userId);
+      const contactIds = await patiently(
+        () =>
+          untilNotRestarted(async () => {
+            cancel?.throwIfAborted();
+            const run = client.run;
+            const contacts = await invokeInRun(run, { _: 'getContacts' });
+            const resolved: number[] = [];
+            for (const userId of contacts.user_ids) {
+              if (await isPersonInRun(userId, run)) resolved.push(userId);
+            }
+            return resolved;
+          }),
+        cancel,
+      );
 
       // Then the groups, whose members Telegram's servers are asked for: a few groups at a time.
       const groupsStarted = now();
@@ -292,15 +340,26 @@ export function peopleOf(
       tell();
       const readGroup = async (group: (typeof groups)[number]) => {
         const present: number[] = [];
+        const seen = new Set<number>();
         // A group whose members Telegram refuses to give is passed over, and the rest is still read. What arrived
         // of a group before a refusal is kept.
-        await readMembers(group.type, async (userIds, part) => {
-          for (const userId of userIds) if (await isPerson(userId)) present.push(userId);
-          if (part < 1) {
-            partsArrived.set(group.chatId, part);
-            tell();
-          }
-        }).catch((error: unknown) => {
+        await readMembers(
+          group.type,
+          async (userIds, part, run) => {
+            for (const userId of userIds) {
+              if (seen.has(userId)) continue;
+              if (await isPersonInRun(userId, run)) {
+                seen.add(userId);
+                present.push(userId);
+              }
+            }
+            if (part < 1) {
+              partsArrived.set(group.chatId, part);
+              tell();
+            }
+          },
+          cancel,
+        ).catch((error: unknown) => {
           if (error instanceof TelegramError && error.code !== TOO_FAST) return;
           throw error;
         });
@@ -321,7 +380,10 @@ export function peopleOf(
       const waiting = [...groups];
       await Promise.all(
         Array.from({ length: GROUPS_AT_ONCE }, async () => {
-          for (let group = waiting.shift(); group; group = waiting.shift()) await readGroup(group);
+          for (let group = waiting.shift(); group; group = waiting.shift()) {
+            cancel?.throwIfAborted();
+            await readGroup(group);
+          }
         }),
       );
 

@@ -46,9 +46,9 @@ export class RelayLink {
 
   /** Sends whatever ciphertext the endpoint has produced. */
   flush(): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#socket.readyState !== WebSocket.OPEN) return;
     const encrypted = this.#endpoint.takeEncrypted();
-    if (encrypted.length > 0 && this.#socket.readyState === WebSocket.OPEN) this.#socket.send(encrypted);
+    if (encrypted.length > 0) this.#socket.send(encrypted);
   }
 
   #detachAndClose(): void {

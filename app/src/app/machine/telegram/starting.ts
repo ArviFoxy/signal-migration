@@ -1,14 +1,21 @@
 // TDLib started and has not reported whether it holds a login. It has a minute to report; after that the instance
 // is kept, stopped, with "Try again".
 
-import type { Context, Variant, VariantHandlers } from '../core';
+import { type Context, type ExhaustiveVariantHandlers, IGNORE, type Variant } from '../core';
 import type { Work } from '../work';
 import { afterReport, deleting, stopped } from './moves';
 import { LOGIN_STATES, START_TIME_LIMIT_S, type TelegramEvent, type TelegramState } from './state';
 
 type Starting = Variant<TelegramState, 'starting'>;
 
-export const starting: VariantHandlers<TelegramState, 'starting', TelegramEvent, Context> = {
+export const starting: ExhaustiveVariantHandlers<TelegramState, 'starting', TelegramEvent, Context> = {
+  'telegram/start': IGNORE,
+  'telegram/use-method': (state, event) => ({ ...state, method: event.method }),
+  'telegram/submit': IGNORE,
+  'telegram/retry': IGNORE,
+  // A new instance holds no login yet; a kept one may, so TDLib's report decides.
+  'telegram/stop': (state) => (state.resumed ? { ...state, stop: true } : deleting(state)),
+  'telegram/forget': (state) => deleting(state),
   'telegram/auth': (state, { auth }) => {
     if (auth._ === 'authorizationStateWaitTdlibParameters') return state;
     // A kept login that never completed: TDLib restores its QR code, whose token may have expired meanwhile
@@ -19,14 +26,21 @@ export const starting: VariantHandlers<TelegramState, 'starting', TelegramEvent,
     if (auth._ === 'authorizationStateClosing' || auth._ === 'authorizationStateClosed') return deleting(state, true);
     return afterReport(state, auth);
   },
+  'telegram/fatal': (state, event) => (event.restarted ? state : deleting(state)),
+  'telegram/start-failed': (state, event) => stopped(state, event.error),
   'telegram/start-deadline': (state) =>
     stopped(state, `Telegram's library did not start within ${START_TIME_LIMIT_S} seconds.`),
-  'telegram/start-failed': (state, event) => stopped(state, event.error),
-  'telegram/fatal': (state, event) => (event.restarted ? state : deleting(state)),
-  // A new instance holds no login yet; a kept one may, so TDLib's report decides.
-  'telegram/stop': (state) => (state.resumed ? { ...state, stop: true } : deleting(state)),
-  'telegram/forget': (state) => deleting(state),
-  'telegram/use-method': (state, event) => ({ ...state, method: event.method }),
+  'telegram/request-done': IGNORE,
+  'telegram/request-failed': IGNORE,
+  'telegram/saved': IGNORE,
+  'telegram/save-failed': IGNORE,
+  'telegram/logged-out': IGNORE,
+  'telegram/logout-failed': IGNORE,
+  'telegram/logout-deadline': IGNORE,
+  'telegram/ending-deadline': IGNORE,
+  'telegram/deleted': IGNORE,
+  'record/saved': IGNORE,
+  'record/failed': IGNORE,
 };
 
 export const startingWork = (state: Starting): Work[] => [
