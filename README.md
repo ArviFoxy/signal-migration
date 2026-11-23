@@ -1,11 +1,15 @@
 # Telegram to Signal Migration 🔒🦊
 
-A web app for moving data from Telegram to Signal: sticker packs, Telegram friends who are on Signal, and Saved
-Messages (copied into Signal's Note to Self). Everything runs in the browser, and the Rust server relays encrypted
-traffic to Signal and keeps a shared index of uploaded sticker packs. The web app does not trust the backend server,
-treating it as a potential attacker for confidentiality and integrity. Instead, the static frontend is built and
-attested by GitHub Actions and hosted on GitHub Pages, proving that the delivered code matches this repository without
-requiring the backend server to be trusted or attested.
+A web app that migrates data from Telegram to Signal:
+- sticker packs
+- Telegram contacts found by phone number,
+- Saved Messages (copied into Signal's Note to Self).
+
+The web app runs locally in your browser. The Rust server cannot see any private data: it serves as an end-to-end encrypted relay to Signal (encrypted in the browser with Signal's key) and a shared index of uploaded sticker pack IDs. The web app is built by GitHub actions and hosted on GitHub Pages.
+
+You as an user:
+- trust GitHub (not me) to attest that the delivered page matches the source code in this repo,
+- can verify from the source code that the app does not reveal any private information to the backend. 
 
 ## Parts
 
