@@ -10,8 +10,10 @@ use futures_util::{SinkExt, StreamExt};
 use signal_migration_server::index::{
     AddressLimiter, ENTRY_LEN, Index, OnSignal, SignalPacks, client_address, signal_cdn,
 };
-use signal_migration_server::relay::RelayTargets;
-use signal_migration_server::{ClientConfig, Config, TelegramApp, parse_allowed_origins, router};
+use signal_migration_server::relay::{RelayLimits, RelayTargets};
+use signal_migration_server::{
+    ClientConfig, Config, TelegramApp, parse_allowed_origins, parse_tls_config, router, router_with_relay_limits,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
@@ -603,8 +605,8 @@ async fn signals_cdn_is_asked_only_for_an_entry_that_could_be_added() {
     assert_eq!(server.signal.asked(), 60);
 }
 
-/// Detects: two entries for one Signal pack both added when they arrive together, each having seen that the pack
-/// was not listed before Signal's CDN answered.
+/// Detects: two entries for one Signal pack both added when they arrive together, and duplicate outbound CDN checks
+/// for the same in-flight pack ID.
 #[tokio::test]
 async fn two_entries_for_one_pack_that_arrive_together_give_one_entry() {
     let server = Arc::new(start(RelayTargets::signal()).await);
@@ -613,13 +615,16 @@ async fn two_entries_for_one_pack_that_arrive_together_give_one_entry() {
         let server = server.clone();
         async move { server.add(entry_for(1, 9)).await }
     });
+    while server.signal.asked() < 1 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
     let second = tokio::spawn({
         let server = server.clone();
         async move { server.add(entry_for(2, 9)).await }
     });
-    while server.signal.asked() < 2 {
-        tokio::time::sleep(Duration::from_millis(5)).await;
-    }
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    // Concurrent checks for the same pack ID are deduplicated to one outbound CDN HEAD request.
+    assert_eq!(server.signal.asked(), 1);
     drop(held);
     let mut answers = [first.await.unwrap(), second.await.unwrap()];
     answers.sort();
@@ -769,15 +774,17 @@ async fn relay_enforces_allowed_origins_when_configured() {
     assert_eq!(reply, Message::Binary(b"ping".to_vec().into()));
     let _ = socket.close(None).await;
 
-    // Same-origin (Origin matching Host) is also accepted.
+    // API-only server does not fall back to Origin == Host.
     let mut same_req = format!("ws://{base}/tunnel/chat.signal.org")
         .into_client_request()
         .unwrap();
     same_req
         .headers_mut()
         .insert("Origin", format!("http://{base}").parse().unwrap());
-    let (mut same_socket, _) = tokio_tungstenite::connect_async(same_req).await.unwrap();
-    let _ = same_socket.close(None).await;
+    assert!(
+        tokio_tungstenite::connect_async(same_req).await.is_err(),
+        "API-only server must reject Host-fallback Origin"
+    );
 
     // API-only server without redirect returns 404 on /.
     let root = reqwest::get(format!("http://{base}/")).await.unwrap();
@@ -792,6 +799,277 @@ fn parse_allowed_origins_rejects_paths_and_non_http_schemes() {
     assert!(parse_allowed_origins("ftp://arvifoxy.github.io").is_err());
     let parsed = parse_allowed_origins(" https://arvifoxy.github.io , http://127.0.0.1:8080 ").unwrap();
     assert_eq!(parsed.len(), 2);
+}
+
+/// Detects: uppercase hostnames, comma-only values failing open, or userinfo/whitespace slipping through ALLOWED_ORIGINS.
+#[test]
+fn parse_allowed_origins_normalizes_case_and_rejects_empty_commas_and_userinfo() {
+    assert!(parse_allowed_origins(",").is_err());
+    assert!(parse_allowed_origins(" , , ").is_err());
+    assert!(parse_allowed_origins("https://user@example.com").is_err());
+    assert!(parse_allowed_origins("https://example.com evil").is_err());
+    assert!(parse_allowed_origins("http:example.com").is_err());
+    assert!(parse_allowed_origins("http:").is_err());
+    let parsed = parse_allowed_origins("https://ArviFoxy.github.io").unwrap();
+    assert_eq!(
+        parsed,
+        vec![axum::http::HeaderValue::from_static("https://arvifoxy.github.io")]
+    );
+}
+
+/// Detects: rotating addresses within a single IPv6 /64 bypassing per-address rate limiting.
+#[test]
+fn ipv6_addresses_in_same_64_share_rate_limit() {
+    let mut limiter = AddressLimiter::new(2, Duration::from_secs(60));
+    let start = Instant::now();
+    assert!(limiter.allow("2001:db8:1:2::1".parse().unwrap(), start));
+    assert!(limiter.allow("2001:db8:1:2::2".parse().unwrap(), start));
+    assert!(!limiter.allow("2001:db8:1:2::3".parse().unwrap(), start));
+    assert!(limiter.allow("2001:db8:1:3::1".parse().unwrap(), start));
+}
+
+/// Detects: dual-stack IPv4-mapped IPv6 loopback ignoring X-Forwarded-For behind a local reverse proxy.
+#[test]
+fn client_address_recognizes_ipv4_mapped_ipv6_loopback() {
+    let mut headers = axum::http::HeaderMap::new();
+    headers.append("x-forwarded-for", "203.0.113.5".parse().unwrap());
+    let mapped_loopback: SocketAddr = "[::ffff:127.0.0.1]:50000".parse().unwrap();
+    assert_eq!(
+        client_address(mapped_loopback, &headers),
+        "203.0.113.5".parse::<std::net::IpAddr>().unwrap()
+    );
+}
+
+/// Detects: 404/error responses under /fonts/ being permanently marked immutable.
+#[tokio::test]
+async fn missing_font_is_not_cached_immutable() {
+    let server = start(RelayTargets::signal()).await;
+    let response = reqwest::get(format!("http://{}/fonts/missing.woff2", server.base))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 404);
+    assert_eq!(response.headers()["cache-control"], "no-cache");
+}
+
+/// Detects: POST /v1/sticker-packs/index buffering megabytes before checking the 48-byte entry length.
+#[tokio::test]
+async fn oversized_index_post_is_rejected_with_413() {
+    let server = start(RelayTargets::signal()).await;
+    let status = server.add(vec![0u8; 64 * 1024]).await;
+    assert_eq!(status, 413);
+}
+
+/// Detects: API-only relay accepting an http:// origin matching Host (scheme downgrade / unintended Host fallback).
+#[tokio::test]
+async fn api_only_relay_rejects_host_origin_fallback() {
+    let echo = echo_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let signal = FakeSignal::default();
+    let targets = RelayTargets(Arc::new(HashMap::from([(
+        "chat.signal.org".to_string(),
+        echo.to_string(),
+    )])));
+    let config = Config {
+        static_dir: None,
+        frontend_redirect_url: None,
+        allowed_origins: parse_allowed_origins("https://arvifoxy.github.io").unwrap(),
+        index: Index::open(dir.path().join("index.bin"), signal.packs()).await.unwrap(),
+        relay_targets: targets,
+        client: ClientConfig { telegram: None },
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let mut downgraded = format!("ws://{base}/tunnel/chat.signal.org")
+        .into_client_request()
+        .unwrap();
+    downgraded
+        .headers_mut()
+        .insert("Origin", format!("http://{base}").parse().unwrap());
+    assert!(tokio_tungstenite::connect_async(downgraded).await.is_err());
+}
+
+/// Detects: self-hosted static mode allowing http:// downgrade for a non-loopback Host, or rejecting https:// same-origin.
+#[tokio::test]
+async fn static_relay_allows_https_same_origin_and_rejects_non_loopback_http_downgrade() {
+    let echo = echo_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let signal = FakeSignal::default();
+    let targets = RelayTargets(Arc::new(HashMap::from([(
+        "chat.signal.org".to_string(),
+        echo.to_string(),
+    )])));
+    let config = Config {
+        static_dir: Some(dir.path().to_path_buf()),
+        frontend_redirect_url: None,
+        allowed_origins: parse_allowed_origins("https://arvifoxy.github.io").unwrap(),
+        index: Index::open(dir.path().join("index.bin"), signal.packs()).await.unwrap(),
+        relay_targets: targets,
+        client: ClientConfig { telegram: None },
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // Non-loopback Host with http:// Origin is rejected (no scheme downgrade).
+    let mut http_remote = format!("ws://{base}/tunnel/chat.signal.org")
+        .into_client_request()
+        .unwrap();
+    http_remote
+        .headers_mut()
+        .insert("Host", "signal.example".parse().unwrap());
+    http_remote
+        .headers_mut()
+        .insert("Origin", "http://signal.example".parse().unwrap());
+    assert!(tokio_tungstenite::connect_async(http_remote).await.is_err());
+
+    // Non-loopback Host with https:// Origin is accepted.
+    let mut https_remote = format!("ws://{base}/tunnel/chat.signal.org")
+        .into_client_request()
+        .unwrap();
+    https_remote
+        .headers_mut()
+        .insert("Host", "signal.example".parse().unwrap());
+    https_remote
+        .headers_mut()
+        .insert("Origin", "https://signal.example".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(https_remote).await.unwrap();
+    let _ = socket.close(None).await;
+}
+
+/// Detects: half-configured TLS silently falling back to unencrypted HTTP.
+#[test]
+fn parse_tls_config_requires_both_cert_and_key_or_neither() {
+    assert_eq!(parse_tls_config(None, None).unwrap(), None);
+    assert_eq!(
+        parse_tls_config(Some("cert.pem".into()), Some("key.pem".into())).unwrap(),
+        Some(("cert.pem".into(), "key.pem".into()))
+    );
+    assert!(parse_tls_config(Some("cert.pem".into()), None).is_err());
+    assert!(parse_tls_config(None, Some("key.pem".into())).is_err());
+}
+
+/// Detects: unbounded relay connections or idle sockets exhausting file descriptors.
+#[tokio::test]
+async fn relay_enforces_connection_caps_and_idle_timeout() {
+    let listener_up = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let up_addr = listener_up.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener_up.accept().await {
+            held.push(stream);
+        }
+    });
+    let dir = tempfile::tempdir().unwrap();
+    let signal = FakeSignal::default();
+    let targets = RelayTargets(Arc::new(HashMap::from([(
+        "chat.signal.org".to_string(),
+        up_addr.to_string(),
+    )])));
+    let config = Config {
+        static_dir: Some(dir.path().to_path_buf()),
+        frontend_redirect_url: None,
+        allowed_origins: Vec::new(),
+        index: Index::open(dir.path().join("index.bin"), signal.packs()).await.unwrap(),
+        relay_targets: targets,
+        client: ClientConfig { telegram: None },
+    };
+    let limits = RelayLimits {
+        max_connections: 2,
+        max_per_ip: 1,
+        connect_timeout: Duration::from_secs(2),
+        idle_timeout: Duration::from_millis(120),
+        max_message_size: 1024,
+        max_frame_size: 1024,
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router_with_relay_limits(config, limits).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let connect_as = |ip: &'static str| {
+        let mut req = format!("ws://{base}/tunnel/chat.signal.org")
+            .into_client_request()
+            .unwrap();
+        req.headers_mut().insert("x-forwarded-for", ip.parse().unwrap());
+        tokio_tungstenite::connect_async(req)
+    };
+
+    let (mut first, _) = connect_as("203.0.113.10").await.unwrap();
+    // Second connection from same client hits per-IP limit (429).
+    match connect_as("203.0.113.10").await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 429),
+        other => panic!("expected 429 per-IP refusal, got {other:?}"),
+    }
+    // Second client takes the second global slot; third hits global limit (503).
+    let (_second, _) = connect_as("203.0.113.11").await.unwrap();
+    match connect_as("203.0.113.12").await {
+        Err(tokio_tungstenite::tungstenite::Error::Http(resp)) => assert_eq!(resp.status(), 503),
+        other => panic!("expected 503 global refusal, got {other:?}"),
+    }
+    // Idle timeout closes the tunnel and releases its slot.
+    let closed = tokio::time::timeout(Duration::from_secs(2), async {
+        while let Some(Ok(msg)) = first.next().await {
+            if matches!(msg, Message::Close(_)) {
+                return true;
+            }
+        }
+        true
+    })
+    .await;
+    assert!(closed.is_ok(), "idle tunnel must close after idle_timeout");
+    // After idle shutdown releases permits, a new client can connect again.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let (mut reopened, _) = connect_as("203.0.113.10").await.unwrap();
+    let _ = reopened.close(None).await;
+}
+
+/// Detects: cancelling a client HTTP request mid-append leaving disk and memory out of sync or misaligned.
+#[tokio::test]
+async fn cancelled_append_keeps_disk_and_memory_consistent() {
+    let server = Arc::new(start(RelayTargets::signal()).await);
+    let held = server.signal.hold.clone().write_owned().await;
+    let url = format!("http://{}/v1/sticker-packs/index", server.base);
+    let client = reqwest::Client::new();
+    let req = tokio::spawn({
+        let url = url.clone();
+        async move {
+            let _ = client.post(url).body(entry_for(11, 22)).send().await;
+        }
+    });
+    while server.signal.asked() < 1 {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    drop(held);
+    // Abort immediately as the append transitions to disk write.
+    req.abort();
+    let _ = req.await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let disk = std::fs::read(&server.index_path).unwrap_or_default();
+    let memory = server.index().await;
+    assert_eq!(disk.len() % ENTRY_LEN, 0);
+    assert_eq!(disk, memory);
 }
 
 /// Checks the question to Signal's CDN against the real one. It needs the network, and SIGNAL_PACK_ID with the 32

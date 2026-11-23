@@ -5,10 +5,9 @@ pub mod index;
 pub mod relay;
 
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use axum::extract::{Request, State};
-use axum::http::{HeaderValue, Method, header};
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{HeaderValue, Method, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Redirect, Response};
 use axum::routing::get;
@@ -46,7 +45,17 @@ pub struct Config {
     pub client: ClientConfig,
 }
 
-/// Validates and parses a comma-separated list of HTTP(S) origins (`scheme://host[:port]`, no path or trailing slash).
+/// Validates TLS environment variables: both `TLS_CERT` and `TLS_KEY` must be set together, or neither.
+pub fn parse_tls_config(cert: Option<String>, key: Option<String>) -> Result<Option<(String, String)>, String> {
+    match (cert, key) {
+        (Some(cert), Some(key)) => Ok(Some((cert, key))),
+        (None, None) => Ok(None),
+        _ => Err("set both TLS_CERT and TLS_KEY, or neither".to_string()),
+    }
+}
+
+/// Validates, normalizes to lowercase, and parses a comma-separated list of HTTP(S) origins (`scheme://host[:port]`,
+/// no path, query, fragment, userinfo, or whitespace). Rejects non-empty strings that contain no valid origins.
 pub fn parse_allowed_origins(raw: &str) -> Result<Vec<HeaderValue>, String> {
     let mut origins = Vec::new();
     for part in raw.split(',') {
@@ -54,18 +63,40 @@ pub fn parse_allowed_origins(raw: &str) -> Result<Vec<HeaderValue>, String> {
         if trimmed.is_empty() {
             continue;
         }
-        let rest = trimmed
-            .strip_prefix("https://")
-            .or_else(|| trimmed.strip_prefix("http://"))
-            .ok_or_else(|| format!("allowed origin must start with http:// or https://: {trimmed}"))?;
+        if trimmed.chars().any(char::is_whitespace) {
+            return Err(format!("allowed origin contains whitespace: {trimmed}"));
+        }
+        let uri: Uri = trimmed
+            .parse()
+            .map_err(|_| format!("allowed origin is not a valid URI: {trimmed}"))?;
+        let Some(scheme) = uri.scheme_str() else {
+            return Err(format!("allowed origin must start with http:// or https://: {trimmed}"));
+        };
+        let scheme = scheme.to_ascii_lowercase();
+        if scheme != "http" && scheme != "https" {
+            return Err(format!("allowed origin must start with http:// or https://: {trimmed}"));
+        }
+        let Some(rest) = trimmed.get(scheme.len()..).and_then(|s| s.strip_prefix("://")) else {
+            return Err(format!("allowed origin must start with http:// or https://: {trimmed}"));
+        };
         if rest.is_empty() || rest.contains('/') || rest.contains('?') || rest.contains('#') {
             return Err(format!(
                 "allowed origin must be scheme://host[:port] with no path: {trimmed}"
             ));
         }
-        let value =
-            HeaderValue::from_str(trimmed).map_err(|_| format!("allowed origin is not a valid header: {trimmed}"))?;
+        let Some(authority) = uri.authority() else {
+            return Err(format!("allowed origin is missing a host: {trimmed}"));
+        };
+        if authority.as_str().contains('@') || authority.host().is_empty() {
+            return Err(format!("allowed origin must be scheme://host[:port]: {trimmed}"));
+        }
+        let normalized = format!("{scheme}://{}", authority.as_str().to_ascii_lowercase());
+        let value = HeaderValue::from_str(&normalized)
+            .map_err(|_| format!("allowed origin is not a valid header: {trimmed}"))?;
         origins.push(value);
+    }
+    if !raw.trim().is_empty() && origins.is_empty() {
+        return Err("ALLOWED_ORIGINS did not contain any valid origins".to_string());
     }
     Ok(origins)
 }
@@ -74,12 +105,12 @@ async fn client_config(State(config): State<ClientConfig>) -> Json<ClientConfig>
     Json(config)
 }
 
-/// Unhashed app assets (index.html, attestation files) must revalidate on deploy; content-hashed fonts are immutable.
+/// Unhashed app assets (index.html, attestation files) must revalidate on deploy; successful content-hashed fonts are immutable.
 async fn cache_headers(request: Request, next: Next) -> Response {
     let is_hashed_font = request.uri().path().starts_with("/fonts/");
     let mut response = next.run(request).await;
     if !response.headers().contains_key(header::CACHE_CONTROL) {
-        let value = if is_hashed_font {
+        let value = if is_hashed_font && response.status().is_success() {
             HeaderValue::from_static("public, max-age=31536000, immutable")
         } else {
             HeaderValue::from_static("no-cache")
@@ -90,8 +121,13 @@ async fn cache_headers(request: Request, next: Next) -> Response {
 }
 
 pub fn router(config: Config) -> Router {
+    router_with_relay_limits(config, relay::RelayLimits::default())
+}
+
+pub fn router_with_relay_limits(config: Config, relay_limits: relay::RelayLimits) -> Router {
     let index_routes = Router::new()
         .route("/v1/sticker-packs/index", get(index::read).post(index::append))
+        .layer(DefaultBodyLimit::max(index::ENTRY_LEN))
         .with_state(config.index);
     let config_routes = Router::new()
         .route("/v1/config", get(client_config))
@@ -105,12 +141,15 @@ pub fn router(config: Config) -> Router {
         api_routes = api_routes.layer(cors);
     }
 
+    let allow_same_origin = config.static_dir.is_some();
     let relay_routes = Router::new()
         .route("/tunnel/{host}", get(relay::tunnel))
-        .with_state(relay::RelayState {
-            targets: config.relay_targets,
-            allowed_origins: Arc::new(config.allowed_origins),
-        });
+        .with_state(relay::RelayState::new(
+            config.relay_targets,
+            config.allowed_origins,
+            allow_same_origin,
+            relay_limits,
+        ));
 
     let mut app = Router::new().merge(api_routes).merge(relay_routes);
     if let Some(static_dir) = config.static_dir {
