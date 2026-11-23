@@ -75,6 +75,8 @@ export interface LinkedDevice extends SignalAccount {
   readonly stored: StoredDevice;
   onUnlinked: () => void;
   unlink(): Promise<void>;
+  /** Closes the open chat session and zeroes local secret material without contacting Signal. */
+  dispose(): void;
 }
 
 export type SignalServices = {

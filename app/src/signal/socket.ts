@@ -54,25 +54,22 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
     let onClose: MessageChannel['onClose'] | null = null;
     const early: Uint8Array[] = [];
     let earlyClose: [number, string] | null = null;
-    const openTimer = setTimeout(() => {
-      if (opened || closed) return;
-      closed = true;
-      link.close();
-      socket.free();
-      reject(new NoAnswerError('Signal', REQUEST_TIME_LIMIT_S));
-    }, REQUEST_TIME_LIMIT_S * 1000);
+    let link: RelayLink | null = null;
+    let openTimer: ReturnType<typeof setTimeout> | undefined;
+
     const channel: MessageChannel = {
       send: (bytes) => {
         if (closed) throw new SocketClosedError(1000);
         socket.send(bytes);
-        link.flush();
+        link?.flush();
       },
       close: (code = 1000) => {
         if (closed) return;
         closed = true;
         clearTimeout(openTimer);
         socket.close(code);
-        link.close();
+        link?.close();
+        link = null;
         socket.free();
       },
       get onMessage() {
@@ -90,8 +87,11 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
       },
       set onClose(handler) {
         onClose = handler;
-        if (earlyClose) handler(...earlyClose);
-        earlyClose = null;
+        if (earlyClose) {
+          const args = earlyClose;
+          earlyClose = null;
+          handler(...args);
+        }
       },
     };
     const deliver = (message: Uint8Array) => (onMessage ? onMessage(message) : early.push(message));
@@ -100,34 +100,55 @@ export async function openTunnelWebSocket(host: string, path: string, headers: s
       closed = true;
       clearTimeout(openTimer);
       const refusedStatus = socket.refusedStatus;
-      link.close();
+      link?.close();
+      link = null;
       socket.free();
       if (opened && onClose) onClose(code, reason);
       else if (opened) earlyClose = [code, reason];
       else if (refusedStatus !== undefined) reject(new HandshakeRefusedError(host, path, refusedStatus));
       else reject(new Error(`WebSocket to ${host}${path} did not open: ${reason}`));
     };
-    const link = new RelayLink(
-      host,
-      socket,
-      () => {
-        if (closed) return;
-        if (!opened && socket.isOpen) {
-          opened = true;
-          clearTimeout(openTimer);
-          resolve(channel);
-        }
-        for (const message of socket.takeMessages() as Uint8Array[]) {
+
+    try {
+      link = new RelayLink(
+        host,
+        socket,
+        () => {
           if (closed) return;
-          deliver(message);
-        }
-        // A message handler may have called `channel.close()` synchronously, freeing `socket`.
-        if (closed) return;
-        const code = socket.closeCode;
-        if (code !== undefined) finish(code, socket.closeReason || 'closed by the server');
-      },
-      (reason) => finish(1006, reason),
-    );
+          // If the server sent HTTP 101 and a WebSocket Close frame in the same TLS burst, `socket.isOpen` is already
+          // false while `socket.closeCode` is set; still treat the handshake as opened so close codes (4008, 4401)
+          // reach the caller via `earlyClose`.
+          if (!opened && (socket.isOpen || socket.closeCode !== undefined)) {
+            opened = true;
+            clearTimeout(openTimer);
+            resolve(channel);
+          }
+          for (const message of socket.takeMessages() as Uint8Array[]) {
+            if (closed) return;
+            deliver(message);
+          }
+          // A message handler may have called `channel.close()` synchronously, freeing `socket`.
+          if (closed) return;
+          const code = socket.closeCode;
+          if (code !== undefined) finish(code, socket.closeReason || 'closed by the server');
+        },
+        (reason) => finish(1006, reason),
+      );
+    } catch (error) {
+      closed = true;
+      socket.free();
+      reject(error);
+      return;
+    }
+
+    openTimer = setTimeout(() => {
+      if (opened || closed) return;
+      closed = true;
+      link?.close();
+      link = null;
+      socket.free();
+      reject(new NoAnswerError('Signal', REQUEST_TIME_LIMIT_S));
+    }, REQUEST_TIME_LIMIT_S * 1000);
   });
 }
 
@@ -144,6 +165,11 @@ export class SocketClosedError extends Error {
 /** Answers a request the server sends; returns the HTTP status to reply with. */
 export type ServerRequestHandler = (request: WebSocketRequestMessage) => number;
 
+export type SignalSocketHandlers = {
+  onServerRequest?: ServerRequestHandler;
+  onUnexpectedClose?: (code: number) => void;
+};
+
 export class SignalSocket {
   #channel: MessageChannel;
   #nextId = 1n;
@@ -151,25 +177,79 @@ export class SignalSocket {
     bigint,
     { resolve: (response: WebSocketResponseMessage) => void; reject: (error: Error) => void }
   >();
-  #keepalive: ReturnType<typeof setInterval>;
+  #keepalive: ReturnType<typeof setInterval> | null = null;
+  #closed = false;
   #closedByUs = false;
-  onServerRequest: ServerRequestHandler = () => 200;
-  /** Called when the server or the network closes the socket; not called after `close()`. */
-  onUnexpectedClose: (code: number) => void = () => undefined;
+  #onServerRequest: ServerRequestHandler | null = null;
+  #onUnexpectedClose: ((code: number) => void) | null = null;
+  #earlyRequests: WebSocketRequestMessage[] = [];
+  #earlyUnexpectedClose: number | null = null;
 
-  constructor(channel: MessageChannel, keepalivePath: string) {
+  constructor(channel: MessageChannel, keepalivePath: string, handlers: SignalSocketHandlers = {}) {
     this.#channel = channel;
+    if (handlers.onServerRequest) this.#onServerRequest = handlers.onServerRequest;
+    if (handlers.onUnexpectedClose) this.#onUnexpectedClose = handlers.onUnexpectedClose;
+
+    channel.onClose = (code) => this.#handleRemoteClose(code);
     channel.onMessage = (bytes) => this.#receive(bytes);
-    channel.onClose = (code) => {
+
+    if (!this.#closed) {
+      this.#keepalive = setInterval(() => {
+        if (this.#closed) return;
+        void this.request('GET', keepalivePath).catch((error: unknown) => {
+          // A timed-out keepalive means the TCP connection is half-open/dead; tear it down so callers reconnect.
+          if (error instanceof NoAnswerError && !this.#closed) {
+            this.#handleRemoteClose(1006);
+            this.#channel.close(1006);
+          }
+        });
+      }, KEEPALIVE_INTERVAL_MS);
+    }
+  }
+
+  get onServerRequest(): ServerRequestHandler {
+    return this.#onServerRequest ?? (() => 200);
+  }
+
+  set onServerRequest(handler: ServerRequestHandler) {
+    this.#onServerRequest = handler;
+    for (const request of this.#earlyRequests.splice(0)) {
+      if (this.#closed) break;
+      this.#answerServerRequest(request, handler);
+    }
+  }
+
+  /** Called when the server or the network closes the socket; not called after `close()`. */
+  get onUnexpectedClose(): (code: number) => void {
+    return this.#onUnexpectedClose ?? (() => undefined);
+  }
+
+  set onUnexpectedClose(handler: (code: number) => void) {
+    this.#onUnexpectedClose = handler;
+    if (this.#earlyUnexpectedClose !== null && !this.#closedByUs) {
+      const code = this.#earlyUnexpectedClose;
+      this.#earlyUnexpectedClose = null;
+      handler(code);
+    }
+  }
+
+  #stopKeepalive(): void {
+    if (this.#keepalive !== null) {
       clearInterval(this.#keepalive);
-      for (const { reject } of this.#pending.values()) reject(new SocketClosedError(code));
-      this.#pending.clear();
-      if (!this.#closedByUs) this.onUnexpectedClose(code);
-    };
-    this.#keepalive = setInterval(
-      () => void this.request('GET', keepalivePath).catch(() => undefined),
-      KEEPALIVE_INTERVAL_MS,
-    );
+      this.#keepalive = null;
+    }
+  }
+
+  #handleRemoteClose(code: number): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#stopKeepalive();
+    for (const { reject } of this.#pending.values()) reject(new SocketClosedError(code));
+    this.#pending.clear();
+    if (!this.#closedByUs) {
+      if (this.#onUnexpectedClose) this.#onUnexpectedClose(code);
+      else this.#earlyUnexpectedClose = code;
+    }
   }
 
   /** Sends a request; fails with a NoAnswerError when Signal does not answer within the request time limit. */
@@ -202,16 +282,43 @@ export class SignalSocket {
           reject(error);
         },
       });
-      this.#channel.send(toBinary(WebSocketMessageSchema, message));
+      try {
+        this.#channel.send(toBinary(WebSocketMessageSchema, message));
+      } catch (error) {
+        clearTimeout(timer);
+        this.#pending.delete(id);
+        reject(error);
+      }
     });
   }
 
   close(): void {
     this.#closedByUs = true;
-    clearInterval(this.#keepalive);
+    this.#closed = true;
+    this.#stopKeepalive();
     for (const { reject } of this.#pending.values()) reject(new SocketClosedError(1000));
     this.#pending.clear();
     this.#channel.close();
+  }
+
+  #answerServerRequest(request: WebSocketRequestMessage, handler: ServerRequestHandler): void {
+    const status = handler(request);
+    if (this.#closed) return;
+    const response = create(WebSocketResponseMessageSchema, {
+      id: request.id,
+      status,
+      message: status === 200 ? 'OK' : 'Error',
+    });
+    try {
+      this.#channel.send(
+        toBinary(
+          WebSocketMessageSchema,
+          create(WebSocketMessageSchema, { type: WebSocketMessage_Type.RESPONSE, response }),
+        ),
+      );
+    } catch {
+      // The channel closed before the reply went out.
+    }
   }
 
   #receive(bytes: Uint8Array): void {
@@ -220,18 +327,8 @@ export class SignalSocket {
       this.#pending.get(message.response.id)?.resolve(message.response);
       this.#pending.delete(message.response.id);
     } else if (message.type === WebSocketMessage_Type.REQUEST && message.request !== undefined) {
-      const status = this.onServerRequest(message.request);
-      const response = create(WebSocketResponseMessageSchema, {
-        id: message.request.id,
-        status,
-        message: status === 200 ? 'OK' : 'Error',
-      });
-      this.#channel.send(
-        toBinary(
-          WebSocketMessageSchema,
-          create(WebSocketMessageSchema, { type: WebSocketMessage_Type.RESPONSE, response }),
-        ),
-      );
+      if (this.#onServerRequest) this.#answerServerRequest(message.request, this.#onServerRequest);
+      else this.#earlyRequests.push(message.request);
     }
   }
 }
@@ -241,6 +338,11 @@ export class SignalSocket {
  * WebSocket upgrade with `headers` (for example Authorization). `keepalivePath` is `/v1/keepalive/provisioning`
  * on a linking socket and `/v1/keepalive` otherwise.
  */
-export async function connectChat(path: string, keepalivePath: string, headers: string[] = []): Promise<SignalSocket> {
-  return new SignalSocket(await openTunnelWebSocket(CHAT_HOST, path, headers), keepalivePath);
+export async function connectChat(
+  path: string,
+  keepalivePath: string,
+  headers: string[] = [],
+  handlers: SignalSocketHandlers = {},
+): Promise<SignalSocket> {
+  return new SignalSocket(await openTunnelWebSocket(CHAT_HOST, path, headers), keepalivePath, handlers);
 }

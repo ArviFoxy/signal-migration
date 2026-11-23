@@ -150,6 +150,42 @@ describe('messages to the account’s other devices', () => {
     expect(requests.some((r) => r.verb === 'GET' && r.path === `/v2/keys/${ACI}/1`)).toBe(true);
     expect(sent()[1].messages.find((m) => m.destinationDeviceId === 1)?.type).toBe(3);
   });
+
+  // Detects: concurrent OwnDevices.send() calls racing on initial #bundlesRead and issuing duplicate /v2/keys/*.
+  it('serializes concurrent send() calls so prekey bundles are fetched only once', async () => {
+    const data = await account([1, 2]);
+    const { chat, requests } = server(data, []);
+    const s = sender(data);
+    await Promise.all([s.send(chat, new Uint8Array([1])), s.send(chat, new Uint8Array([2]))]);
+    expect(requests.filter((r) => r.verb === 'GET' && r.path === `/v2/keys/${ACI}/*`)).toHaveLength(1);
+  });
+
+  // Detects: HTTP 429 rate-limit responses aborting bulk Note to Self sends instead of backing off.
+  it('retries PUT /v1/messages after a 429 Retry-After response', async () => {
+    const data = await account([1]);
+    let puts = 0;
+    const chat: ChatChannel = {
+      async request(verb, path) {
+        if (verb === 'GET') {
+          return {
+            status: 200,
+            message: 'OK',
+            headers: [],
+            body: new TextEncoder().encode(
+              JSON.stringify({ identityKey: base64(data.identity.publicKey), devices: [data.devices.get(1)!] }),
+            ),
+          };
+        }
+        puts++;
+        if (puts === 1) {
+          return { status: 429, message: 'Too Many Requests', headers: ['Retry-After: 0.01'], body: new Uint8Array() };
+        }
+        return { status: 200, message: 'OK', headers: [], body: new Uint8Array() };
+      },
+    };
+    await sender(data).send(chat, new Uint8Array([1]));
+    expect(puts).toBe(2);
+  });
 });
 
 describe('the identity of the account’s other devices', () => {

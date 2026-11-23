@@ -16,7 +16,16 @@ import {
 import { fromBase64, sameBytes, toBase64 } from '../core/bytes';
 import { randomBytes } from '../core/random';
 import { OwnDeviceSessions, randomInt } from '../wasm/signal_migration_wasm';
-import type { ChatChannel } from './transport';
+import { type ChatChannel, chatHeader } from './transport';
+
+const MAX_RATE_LIMIT_RETRIES = 8;
+const MAX_RETRY_WAIT_S = 60;
+
+function retryWaitMs(headerValue: string | undefined, attempt: number): number {
+  const seconds = Number(headerValue);
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, MAX_RETRY_WAIT_S) * 1000 + 200;
+  return Math.min(2 ** attempt, MAX_RETRY_WAIT_S) * 1000;
+}
 
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
 const parse = <T>(body: Uint8Array) => JSON.parse(new TextDecoder().decode(body)) as T;
@@ -98,6 +107,7 @@ export class OwnDevices {
   /** The other devices with a session. */
   #devices = new Set<number>();
   #bundlesRead = false;
+  #sendQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly sender: SenderIdentity) {
     this.#sessions = new OwnDeviceSessions(
@@ -153,11 +163,17 @@ export class OwnDevices {
   }
 
   /**
-   * Sends one message (a serialized Content) to every other device of the account. `timestamp` is the message's
-   * timestamp in milliseconds; a message that carries a timestamp of its own is sent with the same one, as Signal's
-   * apps do. `urgent` asks Signal to wake a sleeping phone for the message.
+   * Sends one message (a serialized Content) to every other device of the account. Calls are serialized so concurrent
+   * migration kinds never race on prekey bundle fetches or 409/410 device-list recovery. `timestamp` is the message's
+   * timestamp in milliseconds; `urgent` asks Signal to wake a sleeping phone for the message.
    */
-  async send(
+  send(chat: ChatChannel, content: Uint8Array, options: { timestamp?: number; urgent?: boolean } = {}): Promise<void> {
+    const run = this.#sendQueue.then(() => this.#sendSerialized(chat, content, options));
+    this.#sendQueue = run.catch(() => undefined);
+    return run;
+  }
+
+  async #sendSerialized(
     chat: ChatChannel,
     content: Uint8Array,
     { timestamp = Date.now(), urgent = true }: { timestamp?: number; urgent?: boolean } = {},
@@ -167,7 +183,9 @@ export class OwnDevices {
       this.#bundlesRead = true;
     }
     const padded = padMessageBody(content);
-    for (let attempt = 0; attempt < 4; attempt++) {
+    let deviceRetries = 0;
+    let rateRetries = 0;
+    for (;;) {
       const messages = [...this.#devices].map((deviceId) => {
         const encrypted = this.#activeSessions().encrypt(deviceId, padded);
         const message = {
@@ -184,23 +202,31 @@ export class OwnDevices {
         body: json({ messages, online: false, urgent, timestamp }),
       });
       if (response.status === 200) return;
-      if (response.status === 409) {
+      if (response.status === 429 && rateRetries < MAX_RATE_LIMIT_RETRIES) {
+        const waitMs = retryWaitMs(chatHeader(response.headers, 'Retry-After'), rateRetries++);
+        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        continue;
+      }
+      if (response.status === 409 && deviceRetries < 3) {
+        deviceRetries++;
         const { missingDevices = [], extraDevices = [] } = parse<{
           missingDevices?: number[];
           extraDevices?: number[];
         }>(response.body);
         for (const deviceId of extraDevices) this.#devices.delete(deviceId);
         for (const deviceId of missingDevices) await this.#startSessions(chat, deviceId);
-      } else if (response.status === 410) {
+      } else if (response.status === 410 && deviceRetries < 3) {
+        deviceRetries++;
         const { staleDevices = [] } = parse<{ staleDevices?: number[] }>(response.body);
         for (const deviceId of staleDevices) {
           this.#devices.delete(deviceId);
           await this.#startSessions(chat, deviceId);
         }
+      } else if (response.status === 409 || response.status === 410) {
+        throw new Error('your devices changed while the message was being sent; try again');
       } else {
         throw new Error(`sending to your other devices answered ${response.status}`);
       }
     }
-    throw new Error('your devices changed while the message was being sent; try again');
   }
 }

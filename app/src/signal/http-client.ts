@@ -22,17 +22,20 @@ export async function httpsRequest(
   const request = new TlsHttpRequest(host, method, path, headers, body);
   return new Promise((resolve, reject) => {
     let settled = false;
-    const timer = setTimeout(() => {
-      if (settled) return;
-      settled = true;
-      link.close();
+    let link: RelayLink | null = null;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      // Close the relay link BEFORE freeing the WASM request so `link.close()` can flush safely without UAF.
+      link?.close();
+      link = null;
       request.free();
-      reject(new NoAnswerError('Signal', REQUEST_TIME_LIMIT_S));
-    }, REQUEST_TIME_LIMIT_S * 1000);
+    };
+
     const settle = () => {
       if (settled || !request.isComplete) return false;
       settled = true;
-      clearTimeout(timer);
       const headerMap = new Map<string, string>();
       for (const line of request.rawHeaders()) {
         const colon = line.indexOf(':');
@@ -43,30 +46,44 @@ export async function httpsRequest(
         header: (name) => headerMap.get(name.toLowerCase()),
         body: request.body(),
       };
-      request.free();
+      cleanup();
       resolve(response);
       return true;
     };
-    const link = new RelayLink(
-      host,
-      request,
-      () => {
-        if (settle()) link.close();
-      },
-      (reason) => {
-        if (settled) return;
-        try {
-          request.streamEnded();
-        } catch {
-          // The stream ended mid-response; reported below.
-        }
-        if (!settle()) {
-          settled = true;
-          clearTimeout(timer);
-          request.free();
-          reject(new Error(`no complete response from ${host}: ${reason}`));
-        }
-      },
-    );
+
+    try {
+      link = new RelayLink(
+        host,
+        request,
+        () => {
+          settle();
+        },
+        (reason) => {
+          if (settled) return;
+          try {
+            request.streamEnded();
+          } catch {
+            // The stream ended mid-response; reported below.
+          }
+          if (!settle()) {
+            settled = true;
+            cleanup();
+            reject(new Error(`no complete response from ${host}: ${reason}`));
+          }
+        },
+      );
+    } catch (error) {
+      settled = true;
+      request.free();
+      reject(error);
+      return;
+    }
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new NoAnswerError('Signal', REQUEST_TIME_LIMIT_S));
+    }, REQUEST_TIME_LIMIT_S * 1000);
   });
 }

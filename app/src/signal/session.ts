@@ -23,9 +23,10 @@ export class SignalSession implements ChatChannel {
 
   static async open(credentials: DeviceCredentials): Promise<SignalSession> {
     const authorization = basicAuthorization(`${credentials.aci}.${credentials.deviceId}`, credentials.password);
-    const socket = await connectChat('/v1/websocket/', '/v1/keepalive', [authorization]);
     // Messages queued for this device are acknowledged and dropped: it exists only to install and upload packs.
-    socket.onServerRequest = () => 200;
+    const socket = await connectChat('/v1/websocket/', '/v1/keepalive', [authorization], {
+      onServerRequest: () => 200,
+    });
     return new SignalSession(socket, credentials.deviceId);
   }
 

@@ -81,11 +81,13 @@ export class SignalConnection implements SignalAccount {
 
   /** What sends to the account's other devices, with the sessions it has started with them. */
   async #toOwnDevices(): Promise<OwnDevices> {
+    if (this.#removed) throw new DeviceRemovedError();
     const { aci, deviceId } = this.#account.credentials;
     const { identity, registrationId } = this.#account;
     if (!identity || registrationId === undefined)
       throw new Error('this device was linked by an earlier version of the app and cannot message your phone');
     await loadSignalWasm();
+    if (this.#removed) throw new DeviceRemovedError();
     this.#ownDevices ??= new OwnDevices({ aci, deviceId, registrationId, identity });
     return this.#ownDevices;
   }
@@ -131,15 +133,27 @@ export class SignalConnection implements SignalAccount {
     return !this.#removed;
   }
 
-  #markRemoved(): void {
+  #markRemoved(notify: boolean): void {
     if (this.#removed) return;
     this.#removed = true;
+    const active = this.#session;
+    this.#session = null;
+    if (active)
+      void active.then(
+        (session) => session.close(),
+        () => undefined,
+      );
     this.#ownDevices?.free();
     this.#ownDevices = null;
     this.#account.storageServiceKey.fill(0);
     this.#account.identity?.privateKey.fill(0);
     this.#account.credentials.password = '';
-    this.onUnlinked();
+    if (notify) this.onUnlinked();
+  }
+
+  /** Closes any open connection, frees WASM sessions, and zeroes secrets in memory without unlinking on Signal. */
+  dispose(): void {
+    this.#markRemoved(false);
   }
 
   /**
@@ -151,20 +165,26 @@ export class SignalConnection implements SignalAccount {
     if (!this.#session) {
       const opening = SignalSession.open(this.#account.credentials).then(
         (session) => {
+          if (this.#removed) {
+            session.close();
+            throw new DeviceRemovedError();
+          }
           session.onUnexpectedClose = (code) => {
-            this.#session = null;
-            if (code === DEVICE_REMOVED) this.#markRemoved();
+            if (this.#session === opening) this.#session = null;
+            if (code === DEVICE_REMOVED) this.#markRemoved(true);
           };
           return session;
         },
         (error) => {
           if (!(error instanceof HandshakeRefusedError && error.status === LOGIN_REFUSED)) throw error;
-          this.#markRemoved();
+          this.#markRemoved(true);
           throw new DeviceRemovedError();
         },
       );
       this.#session = opening;
-      opening.catch(() => (this.#session = null));
+      opening.catch(() => {
+        if (this.#session === opening) this.#session = null;
+      });
     }
     return this.#session;
   }
@@ -180,9 +200,11 @@ export class SignalConnection implements SignalAccount {
   }
 
   async storage(): Promise<StorageClient> {
-    return this.withChat((chat) =>
-      StorageClient.open(chat, this.#account.storageServiceKey, this.deviceId, this.https),
-    );
+    const readKey = () => {
+      if (this.#removed) throw new DeviceRemovedError();
+      return this.#account.storageServiceKey.slice();
+    };
+    return this.withChat((chat) => StorageClient.open(chat, readKey, this.deviceId, this.https));
   }
 
   /**
@@ -192,12 +214,17 @@ export class SignalConnection implements SignalAccount {
   async unlink(): Promise<void> {
     if (this.#removed) return;
     try {
-      await (await this.session()).unlinkSelf();
+      const session = await this.session();
+      try {
+        await session.unlinkSelf();
+      } finally {
+        // unlinkSelf() always closes the underlying socket, so a subsequent retry must open a fresh session.
+        this.#session = null;
+      }
     } catch (error) {
       // Already removed: what unlinking is for has happened.
       if (!(error instanceof DeviceRemovedError)) throw error;
     }
-    this.#session = null;
-    this.#markRemoved();
+    this.#markRemoved(true);
   }
 }

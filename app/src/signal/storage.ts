@@ -4,7 +4,7 @@
 // The key derivations and encryption run in WebAssembly on libsignal's crates (crates/signal-wasm/src/crypto.rs),
 // following Signal Desktop's ts/services/storage.preload.ts for the read and write protocol.
 
-import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
+import { clone, create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import {
   ContactRecord_NameSchema,
   ContactRecordSchema,
@@ -85,6 +85,9 @@ const PROFILE_KEY_LENGTH = 32;
 /** How many records one read may ask for, as in Signal Desktop (ts/services/storageConstants.std.ts). */
 const MAX_READ_KEYS = 2500;
 
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const STORAGE_KEY_LENGTH = 32;
+
 /** An ID in the form with hyphens, from its 16 bytes. */
 function idFromBytes(bytes: Uint8Array): string {
   const digits = toHex(bytes);
@@ -94,20 +97,33 @@ function idFromBytes(bytes: Uint8Array): string {
 }
 
 export function bytesOfId(id: string): Uint8Array {
+  if (!UUID_PATTERN.test(id)) throw new Error(`invalid Signal UUID: ${id}`);
   return fromHex(id.replaceAll('-', ''));
 }
 
-/** The ID a record holds, which newer clients store as bytes and older ones as text. */
-const idOf = (text: string, bytes: Uint8Array) =>
-  text ? text.toLowerCase() : bytes.length === 16 ? idFromBytes(bytes) : null;
+/**
+ * The ID a record holds. Prefers the canonical 16-byte binary form and falls back to the legacy text field only
+ * when it is a well-formed hyphenated UUID.
+ */
+function idOf(text: string, bytes: Uint8Array): string | null {
+  if (bytes.length === 16) return idFromBytes(bytes);
+  return UUID_PATTERN.test(text) ? text.toLowerCase() : null;
+}
+
+export type StorageKeySource = Uint8Array | (() => Uint8Array);
 
 export class StorageClient {
   #authorization: string;
-  #storageServiceKey: Uint8Array;
+  #storageServiceKey: StorageKeySource;
   #deviceId: number;
   #https: HttpsRequest;
 
-  private constructor(authorization: string, storageServiceKey: Uint8Array, deviceId: number, https: HttpsRequest) {
+  private constructor(
+    authorization: string,
+    storageServiceKey: StorageKeySource,
+    deviceId: number,
+    https: HttpsRequest,
+  ) {
     this.#authorization = authorization;
     this.#storageServiceKey = storageServiceKey;
     this.#deviceId = deviceId;
@@ -120,7 +136,7 @@ export class StorageClient {
    */
   static async open(
     chat: ChatChannel,
-    storageServiceKey: Uint8Array,
+    storageServiceKey: StorageKeySource,
     deviceId: number,
     https: HttpsRequest = httpsRequest,
   ): Promise<StorageClient> {
@@ -135,44 +151,67 @@ export class StorageClient {
     return new StorageClient(basicAuthorization(username, password), storageServiceKey, deviceId, https);
   }
 
+  #readKey(): Uint8Array {
+    const key = typeof this.#storageServiceKey === 'function' ? this.#storageServiceKey() : this.#storageServiceKey;
+    if (key.length !== STORAGE_KEY_LENGTH || key.every((byte) => byte === 0)) {
+      throw new Error('the storage service key is missing or zeroed');
+    }
+    return key;
+  }
+
   async #request(method: string, path: string, body?: Uint8Array) {
     return this.#https(STORAGE_HOST, method, path, [this.#authorization, 'Content-Type: application/x-protobuf'], body);
   }
 
   async #readManifest(): Promise<{ version: bigint; manifest: ManifestRecord }> {
+    const storageKey = this.#readKey();
     const response = await this.#request('GET', '/v1/storage/manifest');
     if (response.status !== 200) throw new Error(`reading the storage manifest answered ${response.status}`);
     const stored = fromBinary(StorageManifestSchema, response.body);
     const manifest = fromBinary(
       ManifestRecordSchema,
-      decryptStorageBlob(storageManifestKey(this.#storageServiceKey, stored.version), stored.value),
+      decryptStorageBlob(storageManifestKey(storageKey, stored.version), stored.value),
     );
     return { version: stored.version, manifest };
+  }
+
+  /** Reads and decrypts every record of `type` listed in `manifest`, chunked to `MAX_READ_KEYS`. */
+  async #readRecords(
+    manifest: ManifestRecord,
+    type: ManifestRecord_Identifier_Type,
+  ): Promise<{ id: Uint8Array; record: StorageRecord }[]> {
+    const ids = manifest.identifiers.filter((id) => id.type === type).map((id) => id.raw);
+    const results: { id: Uint8Array; record: StorageRecord }[] = [];
+    for (let start = 0; start < ids.length; start += MAX_READ_KEYS) {
+      const response = await this.#request(
+        'PUT',
+        '/v1/storage/read',
+        toBinary(
+          ReadOperationSchema,
+          create(ReadOperationSchema, { readKey: ids.slice(start, start + MAX_READ_KEYS) }),
+        ),
+      );
+      if (response.status !== 200) throw new Error(`reading storage records answered ${response.status}`);
+      const storageKey = this.#readKey();
+      for (const item of fromBinary(StorageItemsSchema, response.body).items) {
+        const key = storageRecordKey(storageKey, manifest.recordIkm, item.key);
+        const record = fromBinary(StorageRecordSchema, decryptStorageBlob(key, item.value));
+        results.push({ id: item.key, record });
+      }
+    }
+    return results;
   }
 
   /** Reads the manifest and every sticker pack record it lists. */
   async readStickerPacks(): Promise<StickerPackSnapshot> {
     const { version, manifest } = await this.#readManifest();
-    const ids = manifest.identifiers
-      .filter((id) => id.type === ManifestRecord_Identifier_Type.STICKER_PACK)
-      .map((id) => id.raw);
     const packs: StoredStickerPack[] = [];
     const removed: RemovedStickerPack[] = [];
-    if (ids.length > 0) {
-      const response = await this.#request(
-        'PUT',
-        '/v1/storage/read',
-        toBinary(ReadOperationSchema, create(ReadOperationSchema, { readKey: ids })),
-      );
-      if (response.status !== 200) throw new Error(`reading storage records answered ${response.status}`);
-      for (const item of fromBinary(StorageItemsSchema, response.body).items) {
-        const key = storageRecordKey(this.#storageServiceKey, manifest.recordIkm, item.key);
-        const record = fromBinary(StorageRecordSchema, decryptStorageBlob(key, item.value));
-        if (record.record.case !== 'installedStickerPack') continue;
-        const pack: InstalledStickerPackRecord = record.record.value;
-        if (pack.deletedAtTimestamp !== 0n) removed.push({ recordId: item.key, packId: pack.packId });
-        else packs.push({ recordId: item.key, packId: pack.packId, packKey: pack.packKey, position: pack.position });
-      }
+    for (const { id, record } of await this.#readRecords(manifest, ManifestRecord_Identifier_Type.STICKER_PACK)) {
+      if (record.record.case !== 'installedStickerPack') continue;
+      const pack: InstalledStickerPackRecord = record.record.value;
+      if (pack.deletedAtTimestamp !== 0n) removed.push({ recordId: id, packId: pack.packId });
+      else packs.push({ recordId: id, packId: pack.packId, packKey: pack.packKey, position: pack.position });
     }
     return { version, manifest, packs, removed };
   }
@@ -203,35 +242,19 @@ export class StorageClient {
   /** Reads the manifest and the identifiers of every contact it lists. */
   async readContacts(): Promise<ContactSnapshot> {
     const { version, manifest } = await this.#readManifest();
-    const ids = manifest.identifiers
-      .filter((id) => id.type === ManifestRecord_Identifier_Type.CONTACT)
-      .map((id) => id.raw);
     const contacts: StoredContact[] = [];
     const knownAccounts: KnownAccount[] = [];
-    for (let start = 0; start < ids.length; start += MAX_READ_KEYS) {
-      const response = await this.#request(
-        'PUT',
-        '/v1/storage/read',
-        toBinary(
-          ReadOperationSchema,
-          create(ReadOperationSchema, { readKey: ids.slice(start, start + MAX_READ_KEYS) }),
-        ),
-      );
-      if (response.status !== 200) throw new Error(`reading storage records answered ${response.status}`);
-      for (const item of fromBinary(StorageItemsSchema, response.body).items) {
-        const key = storageRecordKey(this.#storageServiceKey, manifest.recordIkm, item.key);
-        const record = fromBinary(StorageRecordSchema, decryptStorageBlob(key, item.value));
-        if (record.record.case !== 'contact') continue;
-        const contact = record.record.value;
-        const accountId = idOf(contact.aci, contact.aciBinary);
-        if (accountId && contact.profileKey.length === PROFILE_KEY_LENGTH)
-          knownAccounts.push({ accountId, profileKey: contact.profileKey });
-        contacts.push({
-          accountId,
-          phoneNumberIdentity: idOf(contact.pni, contact.pniBinary),
-          phoneNumber: contact.e164 || null,
-        });
-      }
+    for (const { record } of await this.#readRecords(manifest, ManifestRecord_Identifier_Type.CONTACT)) {
+      if (record.record.case !== 'contact') continue;
+      const contact = record.record.value;
+      const accountId = idOf(contact.aci, contact.aciBinary);
+      if (accountId && contact.profileKey.length === PROFILE_KEY_LENGTH)
+        knownAccounts.push({ accountId, profileKey: contact.profileKey });
+      contacts.push({
+        accountId,
+        phoneNumberIdentity: idOf(contact.pni, contact.pniBinary),
+        phoneNumber: contact.e164 || null,
+      });
     }
     return { version, manifest, contacts, knownAccounts };
   }
@@ -273,13 +296,14 @@ export class StorageClient {
     records: { type: ManifestRecord_Identifier_Type; record: StorageRecord['record'] }[],
     removed: Uint8Array[],
   ): Promise<boolean> {
+    const storageKey = this.#readKey();
     const newVersion = snapshot.version + 1n;
     const removedIds = new Set(removed.map(toBase64));
     const identifiers = snapshot.manifest.identifiers.filter((id) => !removedIds.has(toBase64(id.raw)));
     const insertItem = [];
     for (const { type, record } of records) {
       const recordId = randomBytes(16);
-      const key = storageRecordKey(this.#storageServiceKey, snapshot.manifest.recordIkm, recordId);
+      const key = storageRecordKey(storageKey, snapshot.manifest.recordIkm, recordId);
       insertItem.push(
         create(StorageItemSchema, {
           key: recordId,
@@ -288,14 +312,13 @@ export class StorageClient {
       );
       identifiers.push(create(ManifestRecord_IdentifierSchema, { raw: recordId, type }));
     }
-    const manifest = create(ManifestRecordSchema, {
-      version: newVersion,
-      sourceDevice: this.#deviceId,
-      identifiers,
-      recordIkm: snapshot.manifest.recordIkm,
-    });
+    // Clone the existing manifest so unknown future protobuf fields ($unknown) survive our write.
+    const manifest = clone(ManifestRecordSchema, snapshot.manifest);
+    manifest.version = newVersion;
+    manifest.sourceDevice = this.#deviceId;
+    manifest.identifiers = identifiers;
     const encryptedManifest = encryptStorageBlob(
-      storageManifestKey(this.#storageServiceKey, newVersion),
+      storageManifestKey(storageKey, newVersion),
       toBinary(ManifestRecordSchema, manifest),
     );
     const operation = create(WriteOperationSchema, {
