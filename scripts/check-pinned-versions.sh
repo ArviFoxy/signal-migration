@@ -6,7 +6,7 @@
 set -euo pipefail
 
 scripts=$(dirname "$0")
-pinned() { sed -n "s/^$1=//p" "$scripts/build-webm-decoder.sh" "$scripts/build-boringssl-wasm.sh"; }
+pinned() { sed -n "s/^$1=//p" "$scripts/build-tdweb.sh" "$scripts/build-webm-decoder.sh" "$scripts/build-boringssl-wasm.sh"; }
 
 # The newest of a repository's release tags that match `pattern` (an extended regular expression).
 newest() { git ls-remote --tags --refs "$1" | sed 's|.*refs/tags/||' | grep -E "$2" | sort -V | tail -1; }
@@ -20,6 +20,7 @@ check() {
   [ "$pinned" = "$newest" ] || echo "$name: pinned $pinned, newest $newest"
 }
 
+check OpenSSL "$(pinned OPENSSL_TAG)" "$(newest https://github.com/openssl/openssl '^openssl-3\.5\.[0-9]+$')"
 check FFmpeg "$(pinned FFMPEG_TAG)" "$(newest https://github.com/FFmpeg/FFmpeg '^n[0-9]+\.[0-9]+(\.[0-9]+)?$')"
 check libvpx "$(pinned LIBVPX_TAG)" "$(newest https://chromium.googlesource.com/webm/libvpx '^v[0-9]+\.[0-9]+\.[0-9]+$')"
 check Emscripten "$(pinned EMSCRIPTEN_VERSION)" "$(newest https://github.com/emscripten-core/emsdk '^[0-9]+\.[0-9]+\.[0-9]+$')"
