@@ -23,6 +23,7 @@ import '../src/ui/migration-app';
 const never = <T>(): Promise<T> => new Promise<T>(() => undefined);
 
 const device: StoredDevice = { aci: 'fixture', deviceId: 3, password: '', storageServiceKey: new Uint8Array(32) };
+const deviceKey = 'fixture:3:0';
 
 // No work runs in a fixture (the workflow is not started), so the services are never called.
 const services = {
@@ -31,7 +32,14 @@ const services = {
 
 const signedIn: TelegramState = { kind: 'signed-in', method: 'qr', instance: 'fixture', attempt: 1, error: null };
 const notConnected: TelegramState = { kind: 'off', method: 'qr', signedOut: false, error: null };
-const linked: SignalState = { kind: 'linked', deviceName: 'Sticker migration', device, error: null, unlinks: 0 };
+const linked: SignalState = {
+  kind: 'linked',
+  deviceName: 'Sticker migration',
+  deviceKey,
+  device,
+  error: null,
+  unlinks: 0,
+};
 const notLinked: SignalState = {
   kind: 'off',
   deviceName: 'Sticker migration',
@@ -167,7 +175,7 @@ const read = (migration: StickerMigration): Session['packs'] => ({
   instance: 'fixture',
   attempt: 1,
   migration,
-  signalRead: device.deviceId,
+  signalRead: deviceKey,
   signalError: null,
   signalAttempt: 0,
 });
@@ -268,7 +276,7 @@ function foundFriends(): Extract<Session['friends'], { kind: 'found' }> {
   return {
     kind: 'found',
     instance: 'fixture',
-    deviceId: 3,
+    deviceKey,
     attempt: 1,
     search: { chats, found, contacts: [8, 6, 7, 1], looked: 214 },
     photos: new Map(),
@@ -456,7 +464,7 @@ const FIXTURES: Record<string, Fixture> = {
         friends: {
           kind: 'looking',
           instance: 'fixture',
-          deviceId: 3,
+          deviceKey,
           attempt: 1,
           progress: { part: 'telegram', groupsRead: 88, groups: 164, share: 0.55, people: 2310, secondsLeft: 95 },
         },
@@ -471,7 +479,7 @@ const FIXTURES: Record<string, Fixture> = {
         friends: {
           kind: 'looking',
           instance: 'fixture',
-          deviceId: 3,
+          deviceKey,
           attempt: 1,
           progress: { part: 'signal', phoneNumbers: 37 },
         },
@@ -525,7 +533,7 @@ const FIXTURES: Record<string, Fixture> = {
         friends: {
           kind: 'found',
           instance: 'fixture',
-          deviceId: 3,
+          deviceKey,
           attempt: 1,
           search: { chats: [], found: new Map(), contacts: [], looked: 214 },
           photos: new Map(),

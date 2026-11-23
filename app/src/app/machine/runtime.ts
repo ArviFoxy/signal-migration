@@ -20,7 +20,7 @@ import type { Work } from './work';
 
 export class Runtime extends EventTarget {
   state: AppState = { kind: 'locking' };
-  readonly #resources: Resources = { telegram: new Map(), devices: new Map() };
+  readonly #resources: Resources = { telegram: new Map(), devices: new Map(), linkedByStored: new WeakMap() };
   /** The work started, by key, until the state no longer describes it. */
   readonly #work = new Map<string, AbortController>();
   #queue: AppEvent[] = [];

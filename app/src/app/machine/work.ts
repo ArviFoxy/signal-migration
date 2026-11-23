@@ -9,6 +9,7 @@ import type { StickerMigration } from '../../kinds/stickers/migration';
 import type { NewContact } from '../../signal/storage';
 import type { StoredDevice } from '../services';
 import type { AppEvent } from './events';
+import type { DeviceKey } from './signal/state';
 import type { LoginQuery } from './telegram/state';
 
 export type Work =
@@ -27,23 +28,39 @@ export type Work =
   | { kind: 'tdlib-delete'; key: string; instance: string }
   /** Shows a QR code and links a Signal device when the phone scans it. */
   | { kind: 'signal-link'; key: string }
+  /** Owns the live SignalConnection while linked or unlinking, disposing it unconditionally when cancelled. */
+  | { kind: 'signal-device'; key: string; deviceKey: DeviceKey; device: StoredDevice }
   /** Reports when the device is unlinked from the phone. */
-  | { kind: 'signal-watch'; key: string; device: StoredDevice }
-  | { kind: 'signal-unlink'; key: string; device: StoredDevice }
+  | { kind: 'signal-watch'; key: string; deviceKey: DeviceKey; device: StoredDevice }
+  | { kind: 'signal-unlink'; key: string; deviceKey: DeviceKey; device: StoredDevice }
   /** Reads the Telegram packs and looks them up in the index. */
   | { kind: 'read-packs'; key: string; instance: string; deselected: string[] }
   | { kind: 'load-previews'; key: string; instance: string; migration: StickerMigration }
   /** Reads which packs the Signal account has. */
-  | { kind: 'read-signal'; key: string; migration: StickerMigration; device: StoredDevice }
+  | { kind: 'read-signal'; key: string; migration: StickerMigration; deviceKey: DeviceKey; device: StoredDevice }
   /** Reads the people of the Telegram account and looks for their Signal accounts. */
-  | { kind: 'find-friends'; key: string; instance: string; device: StoredDevice }
+  | { kind: 'find-friends'; key: string; instance: string; deviceKey: DeviceKey; device: StoredDevice }
   /** Reads the Telegram pictures of the people and groups a finished search shows. */
   | { kind: 'load-friend-photos'; key: string; instance: string; search: FriendSearch }
   /** Adds the chosen friends to the Signal contacts. */
-  | { kind: 'add-friends'; key: string; contacts: NewContact[]; device: StoredDevice }
+  | { kind: 'add-friends'; key: string; contacts: NewContact[]; deviceKey: DeviceKey; device: StoredDevice }
   /** Reads the messages of Telegram's Saved Messages. */
   | { kind: 'read-saved'; key: string; instance: string }
   /** Sends these saved messages (and any media they carry) to Signal's Note to Self, in their order. */
-  | { kind: 'copy-saved'; key: string; instance: string; messages: SavedMessage[]; device: StoredDevice }
+  | {
+      kind: 'copy-saved';
+      key: string;
+      instance: string;
+      messages: SavedMessage[];
+      deviceKey: DeviceKey;
+      device: StoredDevice;
+    }
   /** Migrates the selected packs. */
-  | { kind: 'run'; key: string; instance: string; migration: StickerMigration; device: StoredDevice };
+  | {
+      kind: 'run';
+      key: string;
+      instance: string;
+      migration: StickerMigration;
+      deviceKey: DeviceKey;
+      device: StoredDevice;
+    };

@@ -4,11 +4,18 @@
 //    ▲             │                                     │
 //    └──cancel─────┘                                     └──unlinked from the phone──▶ off
 //
-// The state holds the device as it is kept in the browser (StoredDevice), which is plain data; the runtime turns it
-// into a connection where work needs one. The device is forgotten only once Signal has confirmed the unlink, or
-// when the user chooses to forget it.
+// The state holds the device as it is kept in the browser (StoredDevice), which is plain data, paired with a unique
+// `deviceKey` (`${aci}:${deviceId}:${linkNonce}`) so switching accounts or re-linking never collides on a reused
+// numeric deviceId (e.g. 2). A dedicated `signal-device` work item owns the live SignalConnection while linked or
+// unlinking and disposes it unconditionally on exit (unlink, phone unlink, or Forget it).
 
 import type { StoredDevice } from '../../services';
+
+/** Unique lifetime identifier for one linked Signal device instance (`${aci}:${deviceId}:${linkNonce}`). */
+export type DeviceKey = string;
+
+export const deviceKeyOf = (device: StoredDevice, linkNonce: string): DeviceKey =>
+  `${device.aci}:${device.deviceId}:${linkNonce}`;
 
 /** Why the last device stopped being linked. `old-version`: it was linked by a version that could not message the
  * phone, and was unlinked to be linked again. */
@@ -22,8 +29,8 @@ export type SignalState =
   | (Base & { kind: 'off'; unlinked: UnlinkReason | null; error: string | null; attempts: number })
   /** Waiting for the phone to scan the code; `qrUrl` is null until Signal has sent the address for it. */
   | (Base & { kind: 'linking'; attempt: number; qrUrl: string | null })
-  | (Base & { kind: 'linked'; device: StoredDevice; error: string | null; unlinks: number })
-  | (Base & { kind: 'unlinking'; device: StoredDevice; reason: UnlinkReason; unlinks: number });
+  | (Base & { kind: 'linked'; deviceKey: DeviceKey; device: StoredDevice; error: string | null; unlinks: number })
+  | (Base & { kind: 'unlinking'; deviceKey: DeviceKey; device: StoredDevice; reason: UnlinkReason; unlinks: number });
 
 export type SignalEvent =
   // From the parent machine.

@@ -1,9 +1,9 @@
 // Reading the messages from Telegram.
 
-import type { Context, VariantHandlers } from '../core';
+import { type Context, type ExhaustiveVariantHandlers, IGNORE } from '../core';
 import type { SavedEvent, SavedState } from './state';
 
-export const reading: VariantHandlers<SavedState, 'reading', SavedEvent, Context> = {
+export const reading: ExhaustiveVariantHandlers<SavedState, 'reading', SavedEvent, Context> = {
   'saved/progress': (state, event) => ({ ...state, read: event.read }),
   'saved/read': (state, event) => ({
     kind: 'read',
@@ -17,4 +17,5 @@ export const reading: VariantHandlers<SavedState, 'reading', SavedEvent, Context
     attempt: state.attempt,
     error: `Reading your Saved Messages failed: ${event.error}`,
   }),
+  'saved/try-again': IGNORE,
 };

@@ -1,6 +1,6 @@
 // What each kind of work does (work.ts), over the app's services. This is the only part of the machine with side
 // effects. Work reports back only through `emit`; once `cancel` fires, what it still emits is dropped (runtime.ts),
-// and work that holds something (TDLib, a preview loader) lets go of it.
+// and work that holds something (TDLib, SignalConnection, a preview loader) lets go of it.
 
 import { errorMessage } from '../../core/errors';
 import { withTimeLimit } from '../../core/time-limit';
@@ -12,12 +12,15 @@ import type { TelegramFileRef } from '../../telegram/client';
 import type { AppServices, LinkedDevice, StoredDevice, TelegramSession } from '../services';
 import type { AppEvent } from './events';
 import { readRecord } from './record';
+import type { DeviceKey } from './signal/state';
 import type { Work } from './work';
 
-/** What running work shares: the TDLib clients by instance, the Signal connections by device ID. */
+/** What running work shares: TDLib clients by instance, and Signal connections by unique DeviceKey. */
 export type Resources = {
   telegram: Map<string, TelegramSession>;
-  devices: Map<number, LinkedDevice>;
+  devices: Map<DeviceKey, LinkedDevice>;
+  /** Handoff slot from `signal-link` to `signal-device` so a newly linked connection is adopted without re-opening. */
+  linkedByStored: WeakMap<StoredDevice, LinkedDevice>;
 };
 
 export type WorkContext = {
@@ -49,12 +52,18 @@ function sessionOf(resources: Resources, instance: string): TelegramSession {
   return session;
 }
 
-/** The connection to a kept device: the one linking made, or a new one from what the browser keeps. */
-function deviceOf({ services, resources }: WorkContext, stored: StoredDevice): LinkedDevice {
-  let device = resources.devices.get(stored.deviceId);
+/** The connection to a kept device lifetime: the one linking made, or restored from what the browser keeps. */
+function deviceOf({ services, resources }: WorkContext, key: DeviceKey, stored: StoredDevice): LinkedDevice {
+  let device = resources.devices.get(key);
   if (!device) {
-    device = services.signal.restore(stored);
-    resources.devices.set(stored.deviceId, device);
+    const freshlyLinked = resources.linkedByStored.get(stored);
+    if (freshlyLinked) {
+      resources.linkedByStored.delete(stored);
+      device = freshlyLinked;
+    } else {
+      device = services.signal.restore(stored);
+    }
+    resources.devices.set(key, device);
   }
   return device;
 }
@@ -93,15 +102,17 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       try {
         app = await services.telegram.app();
       } catch (error) {
-        emit({ type: 'telegram/start-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'telegram/start-failed', error: errorMessage(error) });
         return;
       }
       if (!app) {
-        emit({
-          type: 'telegram/start-failed',
-          error:
-            'The migration server has no Telegram app identity configured yet, so signing in to Telegram is not possible.',
-        });
+        if (!cancel.aborted) {
+          emit({
+            type: 'telegram/start-failed',
+            error:
+              'The migration server has no Telegram app identity configured yet, so signing in to Telegram is not possible.',
+          });
+        }
         return;
       }
       if (cancel.aborted) return;
@@ -122,7 +133,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await sessionOf(resources, work.instance).invoke(work.query);
         emit({ type: 'telegram/request-done' });
       } catch (error) {
-        emit({ type: 'telegram/request-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'telegram/request-failed', error: errorMessage(error) });
       }
       return;
     case 'tdlib-checkpoint':
@@ -130,7 +141,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await sessionOf(resources, work.instance).checkpoint();
         emit({ type: 'telegram/saved' });
       } catch (error) {
-        emit({ type: 'telegram/save-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'telegram/save-failed', error: errorMessage(error) });
       }
       return;
     case 'tdlib-logout':
@@ -138,7 +149,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await sessionOf(resources, work.instance).logOut();
         emit({ type: 'telegram/logged-out' });
       } catch (error) {
-        emit({ type: 'telegram/logout-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'telegram/logout-failed', error: errorMessage(error) });
       }
       return;
     case 'tdlib-delete':
@@ -158,20 +169,29 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           linking.signal,
         );
       } catch (error) {
-        if (!(error instanceof LinkingCancelledError)) emit({ type: 'signal/link-failed', error: errorMessage(error) });
+        if (!cancel.aborted && !(error instanceof LinkingCancelledError))
+          emit({ type: 'signal/link-failed', error: errorMessage(error) });
         return;
       }
       // Linked after the Signal step was left: the device is not wanted.
       if (cancel.aborted) {
         await device.unlink().catch(() => undefined);
+        device.dispose();
         return;
       }
-      resources.devices.set(device.deviceId, device);
+      resources.linkedByStored.set(device.stored, device);
       emit({ type: 'signal/linked', device: device.stored });
       return;
     }
+    case 'signal-device': {
+      const device = deviceOf(context, work.deviceKey, work.device);
+      await cancelled(cancel);
+      if (resources.devices.get(work.deviceKey) === device) resources.devices.delete(work.deviceKey);
+      device.dispose();
+      return;
+    }
     case 'signal-watch': {
-      const device = deviceOf(context, work.device);
+      const device = deviceOf(context, work.deviceKey, work.device);
       device.onUnlinked = () => emit({ type: 'signal/unlinked-from-phone' });
       await cancelled(cancel);
       device.onUnlinked = () => undefined;
@@ -179,51 +199,62 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
     }
     case 'signal-unlink':
       try {
-        await deviceOf(context, work.device).unlink();
-        resources.devices.delete(work.device.deviceId);
+        await deviceOf(context, work.deviceKey, work.device).unlink();
         emit({ type: 'signal/unlinked' });
       } catch (error) {
-        emit({ type: 'signal/unlink-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'signal/unlink-failed', error: errorMessage(error) });
       }
       return;
     case 'read-packs': {
       const migration = new StickerMigration(services.migration());
+      const onChange = () => {
+        if (!cancel.aborted && migration.readProgress) {
+          emit({ type: 'packs/progress', done: migration.readProgress.done, total: migration.readProgress.total });
+        }
+      };
+      migration.addEventListener('change', onChange);
       try {
-        await migration.readTelegram(sessionOf(resources, work.instance).source);
+        await migration.readTelegram(sessionOf(resources, work.instance).source, cancel);
+        cancel.throwIfAborted();
         for (const entry of migration.entries)
           if (work.deselected.includes(entry.pack.setId)) migration.setSelected(entry, false);
-        await migration.lookUpInIndex();
+        await migration.lookUpInIndex(cancel);
+        cancel.throwIfAborted();
         emit({ type: 'packs/read', migration });
       } catch (error) {
-        emit({ type: 'packs/read-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'packs/read-failed', error: errorMessage(error) });
+      } finally {
+        migration.removeEventListener('change', onChange);
       }
       return;
     }
     case 'load-previews': {
-      cancel.addEventListener('abort', () => work.migration.stopPreviews(), { once: true });
-      await work.migration.loadPreviews(sessionOf(resources, work.instance).source).catch(() => undefined);
+      await work.migration.loadPreviews(sessionOf(resources, work.instance).source, cancel).catch(() => undefined);
       return;
     }
     case 'read-signal':
       try {
-        await work.migration.readSignal(deviceOf(context, work.device));
-        emit({ type: 'packs/signal-read', deviceId: work.device.deviceId });
+        await work.migration.readSignal(deviceOf(context, work.deviceKey, work.device), cancel);
+        if (!cancel.aborted) emit({ type: 'packs/signal-read', deviceKey: work.deviceKey });
       } catch (error) {
-        emit({ type: 'packs/signal-failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'packs/signal-failed', error: errorMessage(error) });
       }
       return;
     case 'find-friends':
       try {
-        const device = deviceOf(context, work.device);
+        const device = deviceOf(context, work.deviceKey, work.device);
         const search = await findFriends(
           sessionOf(resources, work.instance).people,
           device,
           services.friends.sources(device),
-          (progress) => emit({ type: 'friends/progress', progress }),
+          (progress) => {
+            if (!cancel.aborted) emit({ type: 'friends/progress', progress });
+          },
+          cancel,
         );
-        emit({ type: 'friends/found', search });
+        if (!cancel.aborted) emit({ type: 'friends/found', search });
       } catch (error) {
-        emit({ type: 'friends/failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'friends/failed', error: errorMessage(error) });
       }
       return;
     case 'load-friend-photos': {
@@ -249,8 +280,8 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         Array.from({ length: PHOTOS_AT_ONCE }, async () => {
           for (let next = waiting.shift(); next && !cancel.aborted; next = waiting.shift()) {
             // A picture that cannot be read is left out; the row keeps its preview or its initials.
-            const data = await source.readPhoto(next[1]).catch(() => null);
-            if (data) emit({ type: 'friends/photo', of: next[0], data });
+            const data = await source.readPhoto(next[1], cancel).catch(() => null);
+            if (data && !cancel.aborted) emit({ type: 'friends/photo', of: next[0], data });
           }
         }),
       );
@@ -258,20 +289,20 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
     }
     case 'add-friends':
       try {
-        await addContacts(deviceOf(context, work.device), work.contacts);
-        emit({ type: 'run/friends-added', count: work.contacts.length });
+        await addContacts(deviceOf(context, work.deviceKey, work.device), work.contacts);
+        if (!cancel.aborted) emit({ type: 'run/friends-added', count: work.contacts.length });
       } catch (error) {
         if (!cancel.aborted) emit({ type: 'run/friends-failed', error: errorMessage(error) });
       }
       return;
     case 'read-saved':
       try {
-        const messages = await sessionOf(resources, work.instance).saved.readMessages((read) =>
-          emit({ type: 'saved/progress', read }),
-        );
-        emit({ type: 'saved/read', messages });
+        const messages = await sessionOf(resources, work.instance).saved.readMessages((read) => {
+          if (!cancel.aborted) emit({ type: 'saved/progress', read });
+        }, cancel);
+        if (!cancel.aborted) emit({ type: 'saved/read', messages });
       } catch (error) {
-        emit({ type: 'saved/failed', error: errorMessage(error) });
+        if (!cancel.aborted) emit({ type: 'saved/failed', error: errorMessage(error) });
       }
       return;
     case 'copy-saved': {
@@ -288,7 +319,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       };
       try {
         await copyToNoteToSelf(
-          deviceOf(context, work.device),
+          deviceOf(context, work.deviceKey, work.device),
           work.messages,
           (id) => {
             sent = id;
@@ -309,8 +340,12 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
     }
     case 'run':
       try {
-        await work.migration.run(deviceOf(context, work.device), sessionOf(resources, work.instance).source, cancel);
-        emit({ type: 'run/ended' });
+        await work.migration.run(
+          deviceOf(context, work.deviceKey, work.device),
+          sessionOf(resources, work.instance).source,
+          cancel,
+        );
+        if (!cancel.aborted) emit({ type: 'run/ended' });
       } catch (error) {
         if (!cancel.aborted) emit({ type: 'run/failed', error: errorMessage(error) });
       }

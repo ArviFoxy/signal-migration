@@ -4,9 +4,10 @@
 //                                      │
 //                                      └─▶ failed ─Try again─▶ looking
 //
-// A search belongs to one Telegram instance and one Signal device; another login or another device looks again.
+// A search belongs to one Telegram instance and one Signal device lifetime; another login or device looks again.
 
 import type { FriendSearch, SearchProgress } from '../../../kinds/friends/search';
+import type { DeviceKey } from '../signal/state';
 
 export type FriendsState =
   | { kind: 'none' }
@@ -14,7 +15,7 @@ export type FriendsState =
   | {
       kind: 'looking';
       instance: string;
-      deviceId: number;
+      deviceKey: DeviceKey;
       attempt: number;
       progress: SearchProgress | null;
     }
@@ -22,12 +23,12 @@ export type FriendsState =
   | {
       kind: 'found';
       instance: string;
-      deviceId: number;
+      deviceKey: DeviceKey;
       attempt: number;
       search: FriendSearch;
       photos: ReadonlyMap<string, Uint8Array>;
     }
-  | { kind: 'failed'; instance: string; deviceId: number; attempt: number; error: string };
+  | { kind: 'failed'; instance: string; deviceKey: DeviceKey; attempt: number; error: string };
 
 export type FriendsEvent =
   | { type: 'friends/progress'; progress: SearchProgress }

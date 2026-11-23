@@ -23,11 +23,13 @@ const isFriendsEvent = (event: AppEvent): event is FriendsEvent => event.type.st
 const isSavedEvent = (event: AppEvent): event is SavedEvent => event.type.startsWith('saved/');
 
 /** The notice an event brings, or the current one. */
-function noticeAfter(notice: string | null, event: AppEvent): string | null {
+function noticeAfter(notice: string | null, event: AppEvent, state: SessionState): string | null {
   if (event.type === 'telegram/fatal')
     return event.restarted
       ? `Telegram's library stopped after an internal error and was restarted. (TDLib: ${event.error})`
       : `Telegram's library stopped after an internal error. (TDLib: ${event.error})`;
+  if (event.type === 'signal/unlinked-from-phone' && state.signal.kind === 'linked')
+    return 'Signal was unlinked from your phone. Link it again to continue.';
   if (event.type === 'record/failed') return `This browser could not keep the migration's progress: ${event.error}`;
   if (event.type === 'dismiss') return null;
   return notice;
@@ -53,7 +55,7 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
     if (telegram.kind === 'off' || telegram.kind === 'signed-in') telegram = withoutError(telegram);
     if (signal.kind === 'off' || signal.kind === 'linked') signal = withoutError(signal);
   }
-  let notice = noticeAfter(state.notice, event);
+  let notice = noticeAfter(state.notice, event, state);
   // Telegram ended a login of this visit and the page has removed it: the sign-in that follows says why.
   if (state.telegram.kind === 'deleting' && state.telegram.byTelegram && telegram.kind === 'off')
     notice = 'Telegram ended the last login. Sign in again.';
@@ -97,39 +99,56 @@ export function stepOf(state: SessionState): Step {
 
 /**
  * The packs follow the login: read for each new signed-in instance, dropped when there is none. They are not read
- * at all when the user did not choose sticker packs.
+ * at all when the user did not choose sticker packs. When Signal is unlinked, `signalRead` is cleared so a newly
+ * linked account always re-reads its installed packs.
  */
 export function packsFollowLogin(session: Session): Session {
   const instance = session.chosen.stickers ? signedInInstance(session.telegram) : null;
   const packs = session.packs;
   const current = packs.kind === 'none' ? null : packs.instance;
-  if (instance === current) return session;
+  if (instance === current) {
+    if (
+      packs.kind === 'read' &&
+      session.signal.kind === 'off' &&
+      (packs.signalRead !== null || packs.signalError !== null)
+    ) {
+      return { ...session, packs: { ...packs, signalRead: null, signalError: null } };
+    }
+    return session;
+  }
   if (!instance && session.telegram.kind === 'saving') return session;
   const deselected =
     packs.kind === 'read'
       ? packs.migration.entries.filter((entry) => !entry.selected).map((entry) => entry.pack.setId)
       : session.deselected;
-  const next: PacksState = instance ? { kind: 'reading', instance, attempt: 1 } : { kind: 'none' };
+  const next: PacksState = instance ? { kind: 'reading', instance, attempt: 1, progress: null } : { kind: 'none' };
   return { ...session, packs: next, deselected };
 }
 
 /**
  * The friends follow both accounts: looked for once friends are chosen, Telegram is signed in and a Signal device is
- * linked, and again for another login or device. Without one of the three there is no search.
+ * linked, and again for another login or device lifetime. Without one of the three there is no search.
  */
 export function friendsFollowAccounts(session: Session): Session {
   const instance = signedInInstance(session.telegram);
-  const device = session.signal.kind === 'linked' ? session.signal.device : null;
+  const linked = session.signal.kind === 'linked' ? session.signal : null;
   const friends = session.friends;
-  if (!session.chosen.friends || !instance || !device) {
+  if (!session.chosen.friends || !instance || !linked) {
     if (friends.kind === 'none') return session;
     // A login being saved, or a device being unlinked at the end, is not gone yet.
     if (session.chosen.friends && (session.telegram.kind === 'saving' || session.signal.kind === 'unlinking'))
       return session;
     return { ...session, friends: { kind: 'none' } };
   }
-  if (friends.kind !== 'none' && friends.instance === instance && friends.deviceId === device.deviceId) return session;
-  const looking: FriendsState = { kind: 'looking', instance, deviceId: device.deviceId, attempt: 1, progress: null };
+  if (friends.kind !== 'none' && friends.instance === instance && friends.deviceKey === linked.deviceKey)
+    return session;
+  const looking: FriendsState = {
+    kind: 'looking',
+    instance,
+    deviceKey: linked.deviceKey,
+    attempt: 1,
+    progress: null,
+  };
   return { ...session, friends: looking };
 }
 
@@ -215,14 +234,15 @@ export function sessionWork(state: SessionState): Work[] {
   if (friends.kind === 'looking' && state.signal.kind === 'linked')
     work.push({
       kind: 'find-friends',
-      key: `find-friends:${friends.instance}:${friends.deviceId}:${friends.attempt}`,
+      key: `find-friends:${friends.instance}:${friends.deviceKey}:${friends.attempt}`,
       instance: friends.instance,
+      deviceKey: state.signal.deviceKey,
       device: state.signal.device,
     });
   if (friends.kind === 'found' && state.kind === 'setup')
     work.push({
       kind: 'load-friend-photos',
-      key: `friend-photos:${friends.instance}:${friends.deviceId}:${friends.attempt}`,
+      key: `friend-photos:${friends.instance}:${friends.deviceKey}:${friends.attempt}`,
       instance: friends.instance,
       search: friends.search,
     });
@@ -244,13 +264,14 @@ export function sessionWork(state: SessionState): Work[] {
       instance: packs.instance,
       migration: packs.migration,
     });
-  const device = state.signal.kind === 'linked' ? state.signal.device : null;
-  if (device && packs.signalRead !== device.deviceId && !packs.signalError)
+  const linked = state.signal.kind === 'linked' ? state.signal : null;
+  if (linked && packs.signalRead !== linked.deviceKey && !packs.signalError)
     work.push({
       kind: 'read-signal',
-      key: `read-signal:${device.deviceId}:${packs.signalAttempt}`,
+      key: `read-signal:${linked.deviceKey}:${packs.signalAttempt}`,
       migration: packs.migration,
-      device,
+      deviceKey: linked.deviceKey,
+      device: linked.device,
     });
   return work;
 }
