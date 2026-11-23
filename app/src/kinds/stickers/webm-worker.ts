@@ -1,6 +1,7 @@
 // Decodes video stickers (WebM) off the page's main thread, with the WebM decoder (webm-decoder.c, webm-decoding.ts).
 
 import createWebmDecoder, { type WebmDecoderModule } from 'webm-decoder';
+import { assetFile, assetUrl } from '../../core/assets';
 import { errorMessage } from '../../core/errors';
 import { probeWebm, renderWebm, WebmDecodeError } from './webm-decoding';
 
@@ -15,7 +16,8 @@ let decoder: Promise<WebmDecoderModule> | null = null;
 
 function loadDecoder(): Promise<WebmDecoderModule> {
   if (!decoder) {
-    const pending = createWebmDecoder({ locateFile: () => '/webm-decoder.wasm' });
+    const wasmUrl = assetUrl(assetFile('webmDecoderWasm'), import.meta.url);
+    const pending = createWebmDecoder({ locateFile: () => wasmUrl });
     decoder = pending.catch((error) => {
       if (decoder === pending) decoder = null;
       throw error;

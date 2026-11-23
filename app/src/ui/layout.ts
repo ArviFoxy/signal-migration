@@ -142,6 +142,20 @@ export const icons = {
       16,
       '#5B5F6A',
     ),
+  shield: (colour = 'currentColor', size = 16) =>
+    icon(svg`<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>`, size, colour),
+  shieldCheck: (colour = 'currentColor', size = 16) =>
+    icon(
+      svg`<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M9 12l2 2 4-4"></path>`,
+      size,
+      colour,
+    ),
+  shieldAlert: (colour = 'currentColor', size = 16) =>
+    icon(
+      svg`<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><path d="M12 8v4"></path><path d="M12 16h.01"></path>`,
+      size,
+      colour,
+    ),
 };
 
 /** A part of a connection diagram: one end or relay, or the link between two of them. */

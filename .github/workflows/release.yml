@@ -1,0 +1,104 @@
+# Builds the static web app fresh from source on a published release tag, generates a Sigstore-backed SLSA v1.0
+# build provenance attestation covering every deployed file, and deploys the static site to GitHub Pages.
+#
+# Repository settings that pair with this workflow:
+#   - Settings -> Pages -> Source: GitHub Actions
+#   - Settings -> Environments -> github-pages -> Deployment branches and tags: Selected -> tag rule `v*`
+#   - Settings -> Rules -> Rulesets: Tag protection for `v*`
+#   - Settings -> General -> Releases: Immutable releases enabled
+name: Release
+
+on:
+  release:
+    types: [published]
+
+permissions: {}
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build-and-attest:
+    runs-on: ubuntu-latest
+    # Fresh from-source builds of TDLib, the WebM decoder, BoringSSL, Rust WASM modules, and the web app.
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - name: Validate release tag
+        shell: bash
+        run: |
+          if [[ ! "${GITHUB_REF}" =~ ^refs/tags/v[^[:space:]/]+$ ]]; then
+            echo "Release ref '${GITHUB_REF}' must be a v* tag without slashes or whitespace" >&2
+            exit 1
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build static web app fresh from source
+        run: |
+          docker buildx build \
+            --no-cache \
+            --target pages \
+            --build-arg BACKEND_ORIGIN=https://signal.vixhole.fun \
+            --build-arg COMPRESS=0 \
+            --output "type=local,dest=${{ runner.temp }}/pages" \
+            .
+      - name: Prepare checksums for attestation
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "${{ runner.temp }}/pages"
+          if find . \( -name '*.br' -o -name '*.gz' \) | grep -q .; then
+            echo "Unexpected precompressed sidecar files in Pages output" >&2
+            exit 1
+          fi
+          touch .nojekyll
+          # Sorted relative paths without leading "./" so subject names match what browsers request.
+          while IFS= read -r file; do
+            sha256sum "$file"
+          done < <(LC_ALL=C find . -type f ! -name '.nojekyll' | sed 's|^\./||' | sort) > "${{ runner.temp }}/SHA256SUMS"
+      - name: Generate build provenance attestation
+        id: attest
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-checksums: ${{ runner.temp }}/SHA256SUMS
+      - name: Stage attestation bundle and metadata
+        env:
+          BUNDLE_PATH: ${{ steps.attest.outputs.bundle-path }}
+          ATTESTATION_ID: ${{ steps.attest.outputs.attestation-id }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BUNDLE_PATH" ] || [ ! -f "$BUNDLE_PATH" ]; then
+            echo "Missing attestation bundle at '$BUNDLE_PATH'" >&2
+            exit 1
+          fi
+          case "$ATTESTATION_ID" in
+            ''|*[!0-9]*) echo "Unexpected attestation ID: '$ATTESTATION_ID'" >&2; exit 1 ;;
+          esac
+          cp "$BUNDLE_PATH" "${{ runner.temp }}/pages/attestation.sigstore.json"
+          printf '{"attestationId":"%s"}\n' "$ATTESTATION_ID" > "${{ runner.temp }}/pages/attestation-meta.json"
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: ${{ runner.temp }}/pages
+
+  deploy:
+    needs: build-and-attest
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1

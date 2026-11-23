@@ -8,6 +8,7 @@
     "noEmit": true,
     "experimentalDecorators": true,
     "useDefineForClassFields": false,
+    "resolveJsonModule": true,
     "skipLibCheck": true,
     "allowJs": true
   },

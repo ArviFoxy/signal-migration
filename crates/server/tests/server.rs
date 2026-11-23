@@ -11,10 +11,11 @@ use signal_migration_server::index::{
     AddressLimiter, ENTRY_LEN, Index, OnSignal, SignalPacks, client_address, signal_cdn,
 };
 use signal_migration_server::relay::RelayTargets;
-use signal_migration_server::{ClientConfig, Config, TelegramApp, router};
+use signal_migration_server::{ClientConfig, Config, TelegramApp, parse_allowed_origins, router};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 /// Stands in for Signal's CDN. It has every pack unless a test says otherwise for a pack ID, counts how often it is
 /// asked, and answers only while `hold` is free.
@@ -88,7 +89,9 @@ async fn start_with_client_config(relay_targets: RelayTargets, client: ClientCon
     let index_path = dir.path().join("index.bin");
     let signal = FakeSignal::default();
     let config = Config {
-        static_dir: dir.path().to_path_buf(),
+        static_dir: Some(dir.path().to_path_buf()),
+        frontend_redirect_url: None,
+        allowed_origins: Vec::new(),
         index: Index::open(index_path.clone(), signal.packs()).await.unwrap(),
         relay_targets,
         client,
@@ -203,7 +206,9 @@ async fn appended_entry_is_read_back_and_persists_across_restart() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let config = Config {
-            static_dir: std::env::temp_dir(),
+            static_dir: Some(std::env::temp_dir()),
+            frontend_redirect_url: None,
+            allowed_origins: Vec::new(),
             index: reopened,
             relay_targets: RelayTargets::signal(),
             client: ClientConfig { telegram: None },
@@ -433,7 +438,9 @@ async fn trailing_partial_entry_is_truncated_on_open() {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base = listener.local_addr().unwrap().to_string();
     let config = Config {
-        static_dir: dir.path().to_path_buf(),
+        static_dir: Some(dir.path().to_path_buf()),
+        frontend_redirect_url: None,
+        allowed_origins: Vec::new(),
         index,
         relay_targets: RelayTargets::signal(),
         client: ClientConfig { telegram: None },
@@ -461,7 +468,9 @@ async fn trailing_partial_entry_is_truncated_on_open() {
     let listener2 = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let base2 = listener2.local_addr().unwrap().to_string();
     let config2 = Config {
-        static_dir: std::env::temp_dir(),
+        static_dir: Some(std::env::temp_dir()),
+        frontend_redirect_url: None,
+        allowed_origins: Vec::new(),
         index: reopened,
         relay_targets: RelayTargets::signal(),
         client: ClientConfig { telegram: None },
@@ -542,7 +551,9 @@ async fn a_signal_pack_is_listed_once() {
         _dir: tempfile::tempdir().unwrap(),
     };
     let config = Config {
-        static_dir: std::env::temp_dir(),
+        static_dir: Some(std::env::temp_dir()),
+        frontend_redirect_url: None,
+        allowed_origins: Vec::new(),
         index: reopened,
         relay_targets: RelayTargets::signal(),
         client: ClientConfig { telegram: None },
@@ -614,6 +625,173 @@ async fn two_entries_for_one_pack_that_arrive_together_give_one_entry() {
     answers.sort();
     assert_eq!(answers, [201, 409]);
     assert_eq!(server.index().await.len(), ENTRY_LEN);
+}
+
+/// Detects: CORS misconfiguration blocking GitHub Pages from reading `/v1/config` or reading/appending
+/// `/v1/sticker-packs/index`, or leaking CORS access to unlisted origins.
+#[tokio::test]
+async fn cors_allows_configured_origins_on_api_routes_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let signal = FakeSignal::default();
+    let allowed = parse_allowed_origins("https://arvifoxy.github.io, https://signal-migration.github.io").unwrap();
+    let config = Config {
+        static_dir: None,
+        frontend_redirect_url: Some("https://arvifoxy.github.io/signal-migration/".to_string()),
+        allowed_origins: allowed,
+        index: Index::open(dir.path().join("index.bin"), signal.packs()).await.unwrap(),
+        relay_targets: RelayTargets::signal(),
+        client: ClientConfig { telegram: None },
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    // Allowed origin receives CORS headers on GET /v1/config and OPTIONS preflight for POST /v1/sticker-packs/index.
+    let response = client
+        .get(format!("http://{base}/v1/config"))
+        .header("Origin", "https://arvifoxy.github.io")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+    assert_eq!(
+        response
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://arvifoxy.github.io")
+    );
+
+    let preflight = client
+        .request(
+            reqwest::Method::OPTIONS,
+            format!("http://{base}/v1/sticker-packs/index"),
+        )
+        .header("Origin", "https://signal-migration.github.io")
+        .header("Access-Control-Request-Method", "POST")
+        .header("Access-Control-Request-Headers", "content-type")
+        .send()
+        .await
+        .unwrap();
+    assert!(preflight.status().is_success());
+    assert_eq!(
+        preflight
+            .headers()
+            .get("access-control-allow-origin")
+            .and_then(|v| v.to_str().ok()),
+        Some("https://signal-migration.github.io")
+    );
+
+    // Unlisted origin does not get Access-Control-Allow-Origin.
+    let foreign = client
+        .get(format!("http://{base}/v1/config"))
+        .header("Origin", "https://evil.example")
+        .send()
+        .await
+        .unwrap();
+    assert!(foreign.headers().get("access-control-allow-origin").is_none());
+
+    // When STATIC_DIR is omitted and FRONTEND_REDIRECT_URL is set, GET / redirects to the frontend.
+    let root = client.get(format!("http://{base}/")).send().await.unwrap();
+    assert_eq!(root.status(), 307);
+    assert_eq!(
+        root.headers().get("location").and_then(|v| v.to_str().ok()),
+        Some("https://arvifoxy.github.io/signal-migration/")
+    );
+}
+
+/// Detects: the WebSocket relay allowing third-party origins when `ALLOWED_ORIGINS` is configured, or rejecting the
+/// configured frontend origin or a same-origin page.
+#[tokio::test]
+async fn relay_enforces_allowed_origins_when_configured() {
+    let echo = echo_server().await;
+    let dir = tempfile::tempdir().unwrap();
+    let signal = FakeSignal::default();
+    let targets = RelayTargets(Arc::new(HashMap::from([(
+        "chat.signal.org".to_string(),
+        echo.to_string(),
+    )])));
+    let config = Config {
+        static_dir: None,
+        frontend_redirect_url: None,
+        allowed_origins: parse_allowed_origins("https://arvifoxy.github.io").unwrap(),
+        index: Index::open(dir.path().join("index.bin"), signal.packs()).await.unwrap(),
+        relay_targets: targets,
+        client: ClientConfig { telegram: None },
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move {
+        axum::serve(
+            listener,
+            router(config).into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+
+    // Missing Origin is rejected.
+    let missing = tokio_tungstenite::connect_async(format!("ws://{base}/tunnel/chat.signal.org")).await;
+    assert!(missing.is_err(), "missing Origin must be rejected");
+
+    // Unlisted Origin is rejected.
+    let mut bad_req = format!("ws://{base}/tunnel/chat.signal.org")
+        .into_client_request()
+        .unwrap();
+    bad_req
+        .headers_mut()
+        .insert("Origin", "https://evil.example".parse().unwrap());
+    let bad = tokio_tungstenite::connect_async(bad_req).await;
+    assert!(bad.is_err(), "unlisted Origin must be rejected");
+
+    // Configured Origin is accepted.
+    let mut good_req = format!("ws://{base}/tunnel/chat.signal.org")
+        .into_client_request()
+        .unwrap();
+    good_req
+        .headers_mut()
+        .insert("Origin", "https://arvifoxy.github.io".parse().unwrap());
+    let (mut socket, _) = tokio_tungstenite::connect_async(good_req).await.unwrap();
+    socket.send(Message::Binary(b"ping".to_vec().into())).await.unwrap();
+    let reply = socket.next().await.unwrap().unwrap();
+    assert_eq!(reply, Message::Binary(b"ping".to_vec().into()));
+    let _ = socket.close(None).await;
+
+    // Same-origin (Origin matching Host) is also accepted.
+    let mut same_req = format!("ws://{base}/tunnel/chat.signal.org")
+        .into_client_request()
+        .unwrap();
+    same_req
+        .headers_mut()
+        .insert("Origin", format!("http://{base}").parse().unwrap());
+    let (mut same_socket, _) = tokio_tungstenite::connect_async(same_req).await.unwrap();
+    let _ = same_socket.close(None).await;
+
+    // API-only server without redirect returns 404 on /.
+    let root = reqwest::get(format!("http://{base}/")).await.unwrap();
+    assert_eq!(root.status(), 404);
+}
+
+/// Detects: invalid ALLOWED_ORIGINS entries (paths, trailing slashes, non-HTTP schemes) silently accepted.
+#[test]
+fn parse_allowed_origins_rejects_paths_and_non_http_schemes() {
+    assert!(parse_allowed_origins("https://arvifoxy.github.io/signal-migration").is_err());
+    assert!(parse_allowed_origins("https://arvifoxy.github.io/").is_err());
+    assert!(parse_allowed_origins("ftp://arvifoxy.github.io").is_err());
+    let parsed = parse_allowed_origins(" https://arvifoxy.github.io , http://127.0.0.1:8080 ").unwrap();
+    assert_eq!(parsed.len(), 2);
 }
 
 /// Checks the question to Signal's CDN against the real one. It needs the network, and SIGNAL_PACK_ID with the 32

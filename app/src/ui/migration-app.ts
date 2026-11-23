@@ -7,6 +7,8 @@
 
 import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property } from 'lit/decorators.js';
+import { ATTESTATIONS_URL } from '../attestation/config';
+import type { BuildVerification } from '../attestation/verify';
 import type { SignalState, UnlinkReason } from '../app/machine/signal';
 import type { TelegramState } from '../app/machine/telegram';
 import type { Step, Workflow } from '../app/workflow';
@@ -60,6 +62,7 @@ const UNLINKED: Partial<Record<UnlinkReason, string>> = {
 @customElement('migration-app')
 export class MigrationApp extends LightElement {
   @property({ attribute: false }) workflow!: Workflow;
+  @property({ attribute: false }) build: BuildVerification = { kind: 'unverified', url: ATTESTATIONS_URL };
   #onChange = () => this.requestUpdate();
   #shownStep: string | undefined;
 
@@ -122,6 +125,7 @@ export class MigrationApp extends LightElement {
         .placement=${placement}
         .clearTarget=${clearId}
         .canClear=${w.canClear}
+        .build=${this.build}
         @telegram-sign-out=${() => w.signOutOfTelegram()}
         @signal-unlink=${() => w.unlinkSignal()}
       ></connections-panel>

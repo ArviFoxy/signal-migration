@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -17,6 +17,14 @@ use tokio::net::TcpStream;
 /// Signal host name → upstream address. Only these names can be tunnelled to.
 #[derive(Clone)]
 pub struct RelayTargets(pub Arc<HashMap<String, String>>);
+
+/// Relay configuration shared with `/tunnel/{host}`.
+#[derive(Clone)]
+pub struct RelayState {
+    pub targets: RelayTargets,
+    /// When non-empty, WebSocket upgrades must carry an `Origin` matching one of these origins or the request's `Host`.
+    pub allowed_origins: Arc<Vec<HeaderValue>>,
+}
 
 impl RelayTargets {
     /// The Signal hosts the migration app needs, each reached on port 443.
@@ -36,12 +44,41 @@ impl RelayTargets {
     }
 }
 
+fn origin_allowed(headers: &HeaderMap, allowed_origins: &[HeaderValue]) -> bool {
+    if allowed_origins.is_empty() {
+        return true;
+    }
+    let Some(origin) = headers.get(header::ORIGIN) else {
+        return false;
+    };
+    if allowed_origins.iter().any(|allowed| allowed == origin) {
+        return true;
+    }
+    let Ok(origin_str) = origin.to_str() else {
+        return false;
+    };
+    let Some(origin_host) = origin_str
+        .strip_prefix("https://")
+        .or_else(|| origin_str.strip_prefix("http://"))
+    else {
+        return false;
+    };
+    headers
+        .get(header::HOST)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|host| host.eq_ignore_ascii_case(origin_host))
+}
+
 pub async fn tunnel(
-    State(targets): State<RelayTargets>,
+    State(state): State<RelayState>,
     Path(host): Path<String>,
+    headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    let Some(upstream) = targets.0.get(&host).cloned() else {
+    if !origin_allowed(&headers, &state.allowed_origins) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let Some(upstream) = state.targets.0.get(&host).cloned() else {
         return StatusCode::FORBIDDEN.into_response();
     };
     upgrade.on_upgrade(move |socket| relay(socket, upstream))

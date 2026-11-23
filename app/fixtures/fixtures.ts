@@ -9,6 +9,8 @@ import type { SignalState } from '../src/app/machine/signal';
 import type { TelegramState } from '../src/app/machine/telegram';
 import type { AppServices, StoredDevice } from '../src/app/services';
 import { Workflow } from '../src/app/workflow';
+import { ATTESTATIONS_URL } from '../src/attestation/config';
+import type { BuildVerification } from '../src/attestation/verify';
 import type { FriendSearch } from '../src/kinds/friends/search';
 import type { ChatEntry, Person } from '../src/kinds/friends/telegram-people';
 import type { SavedMessage } from '../src/kinds/saved/messages';
@@ -137,9 +139,18 @@ function showCard(app: MigrationApp, connection: string): void {
   Object.assign(card.style, { visibility: 'visible', opacity: '1' });
 }
 
+const verifiedBuild: BuildVerification = {
+  kind: 'verified',
+  tag: 'v1.0.0',
+  commit: '0123456789abcdef0123456789abcdef01234567',
+  url: `${ATTESTATIONS_URL}/12345678`,
+};
+
 type Fixture = {
   /** The state the fixture shows. */
   state(): Promise<AppState> | AppState;
+  /** The build verification state to display; defaults to a verified release. */
+  build?: BuildVerification;
   /** One step the user takes once the screen shows (a scroll, for example). */
   then?(app: MigrationApp): void;
 };
@@ -706,6 +717,14 @@ const FIXTURES: Record<string, Fixture> = {
       attempt: 1,
     }),
   },
+  'build-unverified': {
+    state: () => setup('start'),
+    build: { kind: 'unverified', url: ATTESTATIONS_URL },
+  },
+  'build-failed': {
+    state: () => setup('start'),
+    build: { kind: 'failed', reason: 'SHA-256 mismatch for main.js', url: ATTESTATIONS_URL },
+  },
 };
 
 declare global {
@@ -724,6 +743,7 @@ const app = document.querySelector('migration-app') as MigrationApp;
 const workflow = new Workflow(services);
 workflow.state = await fixture.state();
 app.workflow = workflow;
+app.build = fixture.build ?? verifiedBuild;
 await app.updateComplete;
 await document.fonts.ready;
 // QR codes are drawn asynchronously, and the step elements render in the frames after the app.

@@ -12,6 +12,8 @@
 // rate are lowered until the file fits the size limit.
 
 import lottie from 'lottie-web/build/player/lottie_light_canvas';
+import { buildVerifier } from '../../attestation/runtime';
+import { assetFile, assetUrl } from '../../core/assets';
 import { plainWebp } from './plain-webp';
 import { withTimeLimit } from '../../core/time-limit';
 import type { StickerFormat } from './telegram-packs';
@@ -102,36 +104,60 @@ export type Animation = {
 /** A worker that answers requests by ID, started on first use. */
 class WorkerChannel {
   #worker: Worker | null = null;
+  #starting: Promise<Worker> | null = null;
+  #generation = 0;
   #nextId = 0;
   readonly #pending = new Map<number, { resolve: (result: never) => void; reject: (error: Error) => void }>();
 
   constructor(
-    private readonly url: string,
+    private readonly file: string,
     /** What the worker is, for the error when it fails as a whole. */
     private readonly name: string,
+    /** Additional static files this worker loads, verified before the worker starts. */
+    private readonly extraFiles: readonly string[] = [],
   ) {}
 
-  request<T>(message: object, transfer: Transferable[] = []): Promise<T> {
-    if (!this.#worker) {
-      const worker = new Worker(this.url, { type: 'module' });
-      worker.onmessage = (event: MessageEvent<{ id: number; result?: never; error?: string }>) => {
-        const request = this.#pending.get(event.data.id);
-        this.#pending.delete(event.data.id);
-        if (event.data.error !== undefined) request?.reject(new ConversionError(event.data.error));
-        else request?.resolve(event.data.result as never);
-      };
-      worker.onerror = (event) => this.stop(new ConversionError(`${this.name} failed: ${event.message}`));
-      this.#worker = worker;
+  async #ensureWorker(): Promise<Worker> {
+    if (this.#worker) return this.#worker;
+    if (!this.#starting) {
+      const generation = ++this.#generation;
+      const pending = (async () => {
+        for (const file of [this.file, ...this.extraFiles]) {
+          await buildVerifier.verifyAsset(file, import.meta.url);
+        }
+        if (this.#generation !== generation) throw new ConversionError(`${this.name} was stopped`);
+        const worker = new Worker(assetUrl(this.file, import.meta.url), { type: 'module' });
+        worker.onmessage = (event: MessageEvent<{ id: number; result?: never; error?: string }>) => {
+          const request = this.#pending.get(event.data.id);
+          this.#pending.delete(event.data.id);
+          if (event.data.error !== undefined) request?.reject(new ConversionError(event.data.error));
+          else request?.resolve(event.data.result as never);
+        };
+        worker.onerror = (event) => this.stop(new ConversionError(`${this.name} failed: ${event.message}`));
+        this.#worker = worker;
+        return worker;
+      })();
+      this.#starting = pending;
+      pending.catch(() => {
+        if (this.#starting === pending) this.#starting = null;
+      });
     }
+    return this.#starting;
+  }
+
+  async request<T>(message: object, transfer: Transferable[] = []): Promise<T> {
+    const worker = await this.#ensureWorker();
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve: resolve as (result: never) => void, reject });
-      this.#worker!.postMessage({ id, ...message }, transfer);
+      worker.postMessage({ id, ...message }, transfer);
     });
   }
 
   /** Stops the worker and fails every request waiting for it; the next request starts a new worker. */
   stop(error: Error): void {
+    this.#generation++;
+    this.#starting = null;
     this.#worker?.terminate();
     this.#worker = null;
     for (const request of this.#pending.values()) request.reject(error);
@@ -139,8 +165,8 @@ class WorkerChannel {
   }
 }
 
-const encoder = new WorkerChannel('/apng-worker.js', 'the animation encoder');
-const videoDecoder = new WorkerChannel('/webm-worker.js', 'the video decoder');
+const encoder = new WorkerChannel(assetFile('apngWorker'), 'the animation encoder');
+const videoDecoder = new WorkerChannel(assetFile('webmWorker'), 'the video decoder', [assetFile('webmDecoderWasm')]);
 
 /** Asks the worker that encodes and reads animated PNG files (apng-worker.ts). */
 export const askPngWorker = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>

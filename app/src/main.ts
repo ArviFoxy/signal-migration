@@ -3,6 +3,7 @@
 
 import { realServices } from './app/services';
 import { Workflow } from './app/workflow';
+import { buildVerifier } from './attestation/runtime';
 import type { MigrationApp } from './ui/migration-app';
 import './ui/migration-app';
 import { connectRouter } from './ui/router';
@@ -10,5 +11,10 @@ import { connectRouter } from './ui/router';
 const workflow = new Workflow(realServices);
 const app = document.querySelector('migration-app') as MigrationApp;
 app.workflow = workflow;
+app.build = buildVerifier.state;
+buildVerifier.addEventListener('change', () => {
+  app.build = buildVerifier.state;
+});
 connectRouter(workflow);
+void buildVerifier.start();
 workflow.start();
