@@ -322,4 +322,155 @@ describe('the people of a Telegram account', () => {
     ]);
     expect(reported.map((progress) => progress.share)).toEqual([0, 200 / 450, 400 / 450, 1]);
   });
+
+  // Detects: rawInvoke AND withChats both wrapping calls in patiently(), amplifying 429 retries from 3 to 15 (4x4).
+  it('retries a persistent 429 flood wait once per outer layer (4 total attempts, not 16)', async () => {
+    const requests: string[] = [];
+    const invoke = (async (query: { _: string }) => {
+      requests.push(query._);
+      switch (query._) {
+        case 'getMe':
+          return { id: SELF };
+        case 'getContacts':
+          return { user_ids: [] };
+        case 'loadChats':
+          if (requests.filter((r) => r === 'loadChats').length > 1) throw new TelegramError(404, 'Not Found');
+          return { _: 'ok' };
+        case 'getChats':
+          return { chat_ids: [100] };
+        case 'getChat':
+          return { title: 'Flooded', type: { _: 'chatTypeSupergroup', supergroup_id: 100, is_channel: false } };
+        case 'getSupergroup':
+          return { member_count: 10 };
+        case 'getSupergroupMembers':
+          throw new TelegramError(429, 'Too Many Requests: retry after 0');
+        default:
+          throw new Error(`unexpected ${query._}`);
+      }
+    }) as unknown as Td.Invoke;
+
+    const source = peopleOf({ invoke, run: 1, readFileRef: async () => new Uint8Array() });
+    await expect(source.readPeople(() => undefined)).rejects.toThrow(/Too Many Requests/);
+    expect(requests.filter((r) => r === 'getSupergroupMembers')).toHaveLength(4);
+  });
+
+  // Detects: overlapping offset pages in getSupergroupMembers duplicating a member ID and inflating memberCount.
+  it('deduplicates member IDs when supergroup member pages overlap', async () => {
+    const requests: string[] = [];
+    const page1 = [2, 3];
+    const page2 = [3, 6];
+    let pageCalls = 0;
+    const invoke = (async (query: { _: string; user_id?: number }) => {
+      requests.push(query._);
+      switch (query._) {
+        case 'getMe':
+          return { id: SELF };
+        case 'getContacts':
+          return { user_ids: [] };
+        case 'loadChats':
+          if (requests.filter((r) => r === 'loadChats').length > 1) throw new TelegramError(404, 'Not Found');
+          return { _: 'ok' };
+        case 'getChats':
+          return { chat_ids: [100] };
+        case 'getChat':
+          return { title: 'Shifting', type: { _: 'chatTypeSupergroup', supergroup_id: 100, is_channel: false } };
+        case 'getSupergroup':
+          return { member_count: 300 };
+        case 'getSupergroupMembers': {
+          const members = (pageCalls++ === 0 ? page1 : page2).map((user_id) => ({
+            member_id: { _: 'messageSenderUser', user_id },
+          }));
+          return { total_count: 300, members };
+        }
+        case 'getUser': {
+          const u = USERS[query.user_id!];
+          return {
+            first_name: u.name[0],
+            last_name: u.name[1],
+            phone_number: u.phone ?? '',
+            type: { _: 'userTypeRegular' },
+          };
+        }
+        default:
+          throw new Error(`unexpected ${query._}`);
+      }
+    }) as unknown as Td.Invoke;
+
+    const source = peopleOf({ invoke, run: 1, readFileRef: async () => new Uint8Array() });
+    const { chats } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([{ kind: 'group', chatId: 100, title: 'Shifting', memberIds: [2, 3, 6], memberCount: 3 }]);
+  });
+
+  // Detects: blindly prefixing '+' onto already-prefixed, leading-zero, too-short, or non-digit Telegram phone strings.
+  it('normalizes and validates Telegram phone numbers before emitting E.164', async () => {
+    const { source } = account(
+      {
+        [SELF]: USERS[SELF],
+        10: { name: ['Plus', 'Already'], phone: '+12025550110' },
+        11: { name: ['Leading', 'Zero'], phone: '0012025550111' },
+        12: { name: ['Junk', 'Text'], phone: 'not-a-number' },
+        13: { name: ['Too', 'Short'], phone: '1234' },
+        14: { name: ['Valid', 'Bare'], phone: '12025550114' },
+      },
+      [{ private: 10 }, { private: 11 }, { private: 12 }, { private: 13 }, { private: 14 }],
+    );
+    const { people } = await source.readPeople(() => undefined);
+    expect(people.get(10)?.phoneNumber).toBe('+12025550110');
+    expect(people.get(11)?.phoneNumber).toBeNull();
+    expect(people.get(12)?.phoneNumber).toBeNull();
+    expect(people.get(13)?.phoneNumber).toBeNull();
+    expect(people.get(14)?.phoneNumber).toBe('+12025550114');
+  });
+
+  // Detects: TDLib restarting between getChat and getUser causing getUser to answer 400 User not found in the fresh
+  // run and silently drop the friend instead of reloading chats and retrying.
+  it('reloads chats instead of dropping a private-chat friend when TDLib restarts before getUser', async () => {
+    let run = 1;
+    let loaded = false;
+    let restarted = false;
+    const invoke = (async (query: { _: string; user_id?: number }) => {
+      switch (query._) {
+        case 'getMe':
+          return { id: SELF };
+        case 'getContacts':
+          return { user_ids: [] };
+        case 'loadChats':
+          if (loaded) throw new TelegramError(404, 'Not Found');
+          loaded = true;
+          return { _: 'ok' };
+        case 'getChats':
+          return { chat_ids: [100] };
+        case 'getChat':
+          if (!loaded) throw new TelegramError(400, 'Chat not found');
+          if (!restarted) {
+            restarted = true;
+            // Restart right after getChat succeeds, wiping the in-memory user cache of TDLib.
+            run++;
+            loaded = false;
+          }
+          return { title: '', type: { _: 'chatTypePrivate', user_id: 2 } };
+        case 'getUser':
+          if (!loaded) throw new TelegramError(400, 'User not found');
+          return {
+            first_name: 'Mara',
+            last_name: 'Lindqvist',
+            phone_number: '12025550102',
+            type: { _: 'userTypeRegular' },
+          };
+        default:
+          throw new Error(`unexpected ${query._}`);
+      }
+    }) as unknown as Td.Invoke;
+
+    const source = peopleOf({
+      invoke,
+      get run() {
+        return run;
+      },
+      readFileRef: async () => new Uint8Array(),
+    });
+    const { chats, people } = await source.readPeople(() => undefined);
+    expect(chats).toEqual([{ kind: 'person', userId: 2 }]);
+    expect(people.get(2)?.givenName).toBe('Mara');
+  });
 });

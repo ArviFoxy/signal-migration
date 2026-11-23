@@ -1,6 +1,55 @@
 --- a/src/worker.js
 +++ b/src/worker.js
-@@ -803,6 +803,10 @@
+@@ -423,18 +423,37 @@
+       log.debug('SYNC: skip');
+       return;
+     }
+-    this.syncActive++;
+-    const start = performance.now();
+-    await new Promise((resolve, reject) => {
+-      this.FS.syncfs(false, () => {
+-        const syncfs_time = (performance.now() - start) / 1000;
+-        this.syncfs_total_time += syncfs_time;
+-        log.debug('SYNC: ' + syncfs_time);
+-        log.debug('SYNC total: ' + this.syncfs_total_time);
+-        resolve();
++    const run = async () => {
++      this.syncActive++;
++      const start = performance.now();
++      try {
++        await new Promise((resolve, reject) => {
++          this.FS.syncfs(false, err => {
++            const syncfs_time = (performance.now() - start) / 1000;
++            this.syncfs_total_time += syncfs_time;
++            log.debug('SYNC: ' + syncfs_time);
++            log.debug('SYNC total: ' + this.syncfs_total_time);
++            if (err) {
++              reject(err);
++            } else {
++              resolve();
++            }
++          });
++        });
++      } finally {
++        this.syncActive--;
++      }
++    };
++    const prev = this.syncQueue || Promise.resolve();
++    const next = prev.then(run, run);
++    this.syncQueue = next.catch(() => {});
++    if (force) {
++      await next;
++    } else {
++      await next.catch(err => {
++        log.error('SYNC error: ', err);
+       });
+-    });
+-    this.syncActive--;
++    }
+   }
+   async close() {
+     clearInterval(this.syncfsInterval);
+@@ -803,6 +822,10 @@
        this.readFilePart(query);
        return;
      }
@@ -11,20 +60,35 @@
      if (query['@type'] === 'deleteIdbKey') {
        this.deleteIdbKey(query);
        return;
-@@ -812,6 +816,16 @@
+@@ -810,6 +833,31 @@
+     query = this.prepareQuery(query);
+     this.td_functions.td_send(this.client_id, JSON.stringify(query));
      this.scheduleReceiveSoon();
-   }
- 
++  }
++
 +  // Copies TDLib's database directory to IndexedDB now, then answers with ok. TDLib writes an event to its binlog
 +  // file up to 1 ms after the event happens (FLUSH_TIMEOUT in tddb/td/db/binlog/ConcurrentBinlog.cpp), so TDLib's
 +  // due timers are run first.
 +  async syncDatabase(query) {
-+    await new Promise(resolve => setTimeout(resolve, 10));
-+    this.receive();
-+    await this.tdfs.dbFileSystem.sync(true);
-+    this.callback({ '@type': 'ok', '@extra': query['@extra'] });
-+  }
-+
++    try {
++      await new Promise(resolve => setTimeout(resolve, 10));
++      if (this.wasFatalError || this.isClosing) {
++        throw new Error('TDLib is closing');
++      }
++      this.receive();
++      if (this.wasFatalError || this.isClosing) {
++        throw new Error('TDLib is closing');
++      }
++      await this.tdfs.dbFileSystem.sync(true);
++      this.callback({ '@type': 'ok', '@extra': query['@extra'] });
++    } catch (error) {
++      this.callback({
++        '@type': 'error',
++        '@extra': query['@extra'],
++        code: 500,
++        message: error ? String(error) : 'syncDatabase failed'
++      });
++    }
+   }
+ 
    execute(query) {
-     try {
-       const res = this.td_functions.td_execute(JSON.stringify(query));

@@ -6,14 +6,14 @@
 // TDLib restarted since the history was read.
 
 import type * as Td from 'tdlib-types';
-import { type TelegramClient, untilNotRestarted } from '../../telegram/client';
+import { type TelegramClient, TelegramRestartedError, untilNotRestarted } from '../../telegram/client';
 import { patiently } from '../../telegram/patiently';
 import { type SavedMedia, type SavedMessage, savedMessageOf } from './messages';
 
 /** Where the saved messages and their media come from: the user's account in the app, simulated data in tests. */
 export interface SavedSource {
   /** Every message of Saved Messages, oldest first. `onProgress` gets the number of messages read so far. */
-  readMessages(onProgress: (read: number) => void): Promise<SavedMessage[]>;
+  readMessages(onProgress: (read: number) => void, cancel?: AbortSignal): Promise<SavedMessage[]>;
   /**
    * Downloads `media` and passes its exact byte length and a chunked reader to `use`, deleting the local copy once
    * `use` completes. Optional in text-only test doubles.
@@ -21,50 +21,65 @@ export interface SavedSource {
   withMedia?<T>(
     media: Pick<SavedMedia, 'file' | 'size'>,
     use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
+    cancel?: AbortSignal,
   ): Promise<T>;
 }
 
 const MESSAGES_PER_REQUEST = 100;
 
-export function savedMessagesOf(client: Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'>): SavedSource {
+export function savedMessagesOf(
+  client: Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'> & Partial<Pick<TelegramClient, 'invokeInRun'>>,
+): SavedSource {
   const invoke = ((query: { _: string }) => client.invoke(query as never)) as Td.Invoke;
+  const invokeInRun = async <T extends Td.$FunctionName>(
+    run: number,
+    query: { readonly _: T } & Td.$FunctionInputByName[T],
+  ): Promise<Td.$FunctionResultByName[T]> => {
+    if (client.invokeInRun) return client.invokeInRun(run, query as never) as Promise<Td.$FunctionResultByName[T]>;
+    if (client.run !== run) throw new TelegramRestartedError();
+    const result = (await client.invoke(query as never)) as Td.$FunctionResultByName[T];
+    if (client.run !== run) throw new TelegramRestartedError();
+    return result;
+  };
 
   return {
-    async readMessages(onProgress) {
-      const me = await patiently(() => untilNotRestarted(() => invoke({ _: 'getMe' })));
+    async readMessages(onProgress, cancel) {
+      cancel?.throwIfAborted();
+      const me = await patiently(() => untilNotRestarted(() => invoke({ _: 'getMe' })), cancel);
       let chatRun = -1;
       let chatId = 0;
-      const ensureChat = async () => {
-        if (chatRun === client.run) return chatId;
-        const run = client.run;
+      const ensureChat = async (run: number) => {
+        if (chatRun === run) return chatId;
         // The chat with oneself is Saved Messages. With use_chat_info_database off, a fresh TDLib run needs the chat
         // created in memory before getChatHistory can read it.
-        const chat = await invoke({ _: 'createPrivateChat', user_id: me.id, force: false });
-        if (client.run === run) {
-          chatRun = run;
-          chatId = chat.id;
-        }
+        const chat = await invokeInRun(run, { _: 'createPrivateChat', user_id: me.id, force: false });
+        chatRun = run;
+        chatId = chat.id;
         return chat.id;
       };
       const byId = new Map<number, SavedMessage>();
       let from = 0;
       for (;;) {
+        cancel?.throwIfAborted();
         let pageRun = 0;
-        const page = await patiently(() =>
-          untilNotRestarted(async () => {
-            const id = await ensureChat();
-            const before = client.run;
-            const result = await invoke({
-              _: 'getChatHistory',
-              chat_id: id,
-              from_message_id: from,
-              offset: 0,
-              limit: MESSAGES_PER_REQUEST,
-              only_local: false,
-            });
-            pageRun = client.run === before ? before : 0;
-            return result;
-          }),
+        const page = await patiently(
+          () =>
+            untilNotRestarted(async () => {
+              cancel?.throwIfAborted();
+              const run = client.run;
+              const id = await ensureChat(run);
+              const result = await invokeInRun(run, {
+                _: 'getChatHistory',
+                chat_id: id,
+                from_message_id: from,
+                offset: 0,
+                limit: MESSAGES_PER_REQUEST,
+                only_local: false,
+              });
+              pageRun = run;
+              return result;
+            }),
+          cancel,
         );
         const messages = (page.messages ?? []).filter((message): message is Td.message => message != null);
         if (messages.length === 0) break;
@@ -78,8 +93,8 @@ export function savedMessagesOf(client: Pick<TelegramClient, 'invoke' | 'run' | 
       return [...byId.values()].sort((a, b) => a.id - b.id);
     },
 
-    withMedia(media, use) {
-      return patiently(() => client.withFileRef(media.file, use));
+    withMedia(media, use, cancel) {
+      return patiently(() => client.withFileRef(media.file, use, undefined, cancel), cancel);
     },
   };
 }

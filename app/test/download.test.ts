@@ -2,6 +2,7 @@
 
 import type * as Td from 'tdlib-types';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { TelegramRestartedError } from '../src/telegram/client';
 import { downloadWithStallLimit } from '../src/telegram/download';
 
 type File = { size: number; expected_size: number; local: { downloaded_size: number } };
@@ -57,5 +58,40 @@ describe('downloading a Telegram file', () => {
     finish();
     await outcome;
     expect(done).toBe(true);
+  });
+
+  // Detects: TelegramRestartedError being masked as DownloadStalledError when downloadFile fails during a getFile poll.
+  it('propagates TelegramRestartedError instead of DownloadStalledError when download fails during getFile poll', async () => {
+    vi.useFakeTimers();
+    let rejectDownload!: (error: Error) => void;
+    const downloadPromise = new Promise<void>((_, reject) => (rejectDownload = reject));
+    const invoke = (async (query: { _: string }) => {
+      if (query._ === 'downloadFile') return downloadPromise;
+      if (query._ === 'getFile') {
+        // Simulate restart happening while getFile is in flight right as the stall limit expires.
+        rejectDownload(new TelegramRestartedError());
+        return new Promise(() => undefined);
+      }
+      return { _: 'ok' };
+    }) as unknown as Td.Invoke;
+
+    const outcome = downloadWithStallLimit(invoke, 7, 1000, 1000);
+    outcome.catch(() => undefined);
+    await vi.advanceTimersByTimeAsync(2500);
+    await expect(outcome).rejects.toBeInstanceOf(TelegramRestartedError);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // Detects: an aborted caller leaving a Telegram download running in TDLib instead of cancelling it immediately.
+  it('cancels the download immediately when the caller AbortSignal aborts', async () => {
+    vi.useFakeTimers();
+    const { invoke, requests } = tdlib(() => 0, new Promise(() => undefined), 1024);
+    const controller = new AbortController();
+    const outcome = downloadWithStallLimit(invoke, 7, 60_000, 5_000, controller.signal);
+    outcome.catch(() => undefined);
+    controller.abort();
+    await expect(outcome).rejects.toThrow(/abort/i);
+    expect(requests).toContain('cancelDownloadFile');
+    expect(vi.getTimerCount()).toBe(0);
   });
 });
