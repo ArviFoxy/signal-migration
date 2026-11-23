@@ -12,8 +12,28 @@
 set -euo pipefail
 
 FFMPEG_TAG=n9.0.2
+FFMPEG_COMMIT=946fcce07b6dcd0331c8cc609192aeff5e1924f8
 LIBVPX_TAG=v1.17.0
+LIBVPX_COMMIT=6df3ec34557879fff673706f4a1d9fbd0f3a6f0e
 EMSCRIPTEN_VERSION=7.0.0
+EMSDK_COMMIT=1693ce7359fc9694f198694f902a2cc061239b86
+
+clone_pinned() {
+  local url=$1 tag=$2 commit=$3 dest=$4
+  if [ -d "$dest" ]; then
+    local actual
+    actual=$(git -C "$dest" rev-parse HEAD)
+    [ "$actual" = "$commit" ] || { echo "$dest commit mismatch: expected $commit, got $actual" >&2; exit 1; }
+    return
+  fi
+  local tmp="$dest.tmp"
+  rm -rf "$tmp"
+  git clone --depth 1 --branch "$tag" "$url" "$tmp"
+  local actual
+  actual=$(git -C "$tmp" rev-parse HEAD)
+  [ "$actual" = "$commit" ] || { echo "$url ($tag) commit mismatch: expected $commit, got $actual" >&2; exit 1; }
+  mv "$tmp" "$dest"
+}
 
 repo=$(cd "$(dirname "$0")/.." && pwd)
 out=$repo/build/webm-decoder
@@ -24,14 +44,14 @@ mkdir -p "$src" "$prefix"
 
 if [ -z "${EMSDK:-}" ]; then
   EMSDK=$repo/build/emsdk-webm
-  [ -d "$EMSDK" ] || git clone https://github.com/emscripten-core/emsdk.git "$EMSDK"
+  clone_pinned https://github.com/emscripten-core/emsdk.git "$EMSCRIPTEN_VERSION" "$EMSDK_COMMIT" "$EMSDK"
   "$EMSDK/emsdk" install "$EMSCRIPTEN_VERSION"
   "$EMSDK/emsdk" activate "$EMSCRIPTEN_VERSION"
 fi
 source "$EMSDK/emsdk_env.sh" >/dev/null 2>&1
 
-[ -d "$src/libvpx" ] || git clone --depth 1 --branch "$LIBVPX_TAG" https://chromium.googlesource.com/webm/libvpx "$src/libvpx"
-[ -d "$src/ffmpeg" ] || git clone --depth 1 --branch "$FFMPEG_TAG" https://github.com/FFmpeg/FFmpeg "$src/ffmpeg"
+clone_pinned https://chromium.googlesource.com/webm/libvpx "$LIBVPX_TAG" "$LIBVPX_COMMIT" "$src/libvpx"
+clone_pinned https://github.com/FFmpeg/FFmpeg "$FFMPEG_TAG" "$FFMPEG_COMMIT" "$src/ffmpeg"
 
 jobs=$(nproc)
 

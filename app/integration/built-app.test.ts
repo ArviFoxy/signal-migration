@@ -55,7 +55,7 @@ beforeAll(async () => {
 afterAll(async () => {
   await chrome?.close();
   await server?.stop();
-  await new Promise<void>((resolve) => subpathServer?.close(() => resolve()));
+  if (subpathServer) await new Promise<void>((resolve) => subpathServer.close(() => resolve()));
 });
 
 const unexpectedFailures = (requests: string[]) =>
@@ -107,4 +107,74 @@ it('starts and compiles WebAssembly modules when hosted under a subpath', async 
   }
   expect(unexpectedFailures(tab.failedRequests), 'requests that failed under subpath').toEqual([]);
   expect(tab.errors, 'uncaught errors in the page under subpath').toEqual([]);
+});
+
+// Detects: CSP misconfiguration breaking app startup, workers, or WASM, or failing to block external stylesheets,
+// images, or scripts (defense-in-depth for sticker rendering and static hosting on GitHub Pages).
+it('enforces strict CSP without startup violations and blocks external subresources', async () => {
+  for (const [label, url] of [
+    ['server', server.base],
+    ['subpath', subpathBase],
+  ] as const) {
+    const tab = await chrome.openTab();
+    await tab.send('Page.enable');
+    await tab.send('Page.addScriptToEvaluateOnNewDocument', {
+      source: `
+        window.__cspViolations = [];
+        document.addEventListener('securitypolicyviolation', (event) => {
+          window.__cspViolations.push({
+            directive: event.effectiveDirective,
+            blockedURI: event.blockedURI,
+          });
+        });
+      `,
+    });
+    await tab.navigate(url);
+    const rendered = await tab.waitFor("document.querySelector('migration-app')?.childElementCount > 0");
+    expect(rendered, `${label}: app rendered`).toBe(true);
+    const settled = await tab.waitFor("document.body.textContent?.includes('Unverified build')");
+    expect(settled, `${label}: build check settled`).toBe(true);
+
+    const startup = (await tab.evaluate(`({
+      hasMetaCsp: Boolean(document.querySelector('meta[http-equiv="Content-Security-Policy"]')),
+      referrer: document.querySelector('meta[name="referrer"]')?.getAttribute('content') ?? null,
+      violations: window.__cspViolations.slice(),
+    })`)) as { hasMetaCsp: boolean; referrer: string | null; violations: { directive: string; blockedURI: string }[] };
+    expect(startup.hasMetaCsp, `${label}: meta CSP present`).toBe(true);
+    expect(startup.referrer, `${label}: no-referrer meta present`).toBe('no-referrer');
+    expect(startup.violations, `${label}: zero CSP violations during startup`).toEqual([]);
+
+    // Inject external stylesheet, image, and script probes and verify CSP blocks every one of them.
+    const blocked = (await tab.evaluate(`(async () => {
+      const before = window.__cspViolations.length;
+      const link = document.createElement('link');
+      link.rel = 'stylesheet';
+      link.href = 'https://example.invalid/csp-probe.css';
+      const img = document.createElement('img');
+      img.src = 'https://example.invalid/csp-probe.png';
+      const script = document.createElement('script');
+      script.src = 'https://example.invalid/csp-probe.js';
+      document.head.append(link, script);
+      document.body.append(img);
+      const deadline = Date.now() + 2000;
+      while (window.__cspViolations.length - before < 3 && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      return window.__cspViolations.slice(before);
+    })()`)) as { directive: string; blockedURI: string }[];
+
+    expect(
+      blocked.some((v) => v.blockedURI.includes('csp-probe.css') && v.directive.startsWith('style-src')),
+      `${label}: blocked external stylesheet (${JSON.stringify(blocked)})`,
+    ).toBe(true);
+    expect(
+      blocked.some((v) => v.blockedURI.includes('csp-probe.png') && v.directive === 'img-src'),
+      `${label}: blocked external image (${JSON.stringify(blocked)})`,
+    ).toBe(true);
+    expect(
+      blocked.some((v) => v.blockedURI.includes('csp-probe.js') && v.directive.startsWith('script-src')),
+      `${label}: blocked external script (${JSON.stringify(blocked)})`,
+    ).toBe(true);
+    expect(tab.errors, `${label}: uncaught errors`).toEqual([]);
+  }
 });

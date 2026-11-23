@@ -105,18 +105,32 @@ async fn client_config(State(config): State<ClientConfig>) -> Json<ClientConfig>
     Json(config)
 }
 
-/// Unhashed app assets (index.html, attestation files) must revalidate on deploy; successful content-hashed fonts are immutable.
-async fn cache_headers(request: Request, next: Next) -> Response {
+const SECURITY_CSP: &str = "default-src 'none'; script-src 'self' 'wasm-unsafe-eval' blob:; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self'; worker-src 'self' blob:; connect-src 'self' blob: https://*.web.telegram.org wss://*.web.telegram.org https://cdn-ca.signal.org; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'none'";
+
+/// Unhashed app assets (index.html, attestation files) must revalidate on deploy; successful content-hashed fonts are
+/// immutable. Every HTTP response also carries baseline security headers (CSP, nosniff, no-referrer).
+async fn response_headers(request: Request, next: Next) -> Response {
     let is_hashed_font = request.uri().path().starts_with("/fonts/");
     let mut response = next.run(request).await;
-    if !response.headers().contains_key(header::CACHE_CONTROL) {
-        let value = if is_hashed_font && response.status().is_success() {
+    let is_success = response.status().is_success();
+    let headers = response.headers_mut();
+    if !headers.contains_key(header::CACHE_CONTROL) {
+        let value = if is_hashed_font && is_success {
             HeaderValue::from_static("public, max-age=31536000, immutable")
         } else {
             HeaderValue::from_static("no-cache")
         };
-        response.headers_mut().insert(header::CACHE_CONTROL, value);
+        headers.insert(header::CACHE_CONTROL, value);
     }
+    headers
+        .entry(header::X_CONTENT_TYPE_OPTIONS)
+        .or_insert_with(|| HeaderValue::from_static("nosniff"));
+    headers
+        .entry(header::REFERRER_POLICY)
+        .or_insert_with(|| HeaderValue::from_static("no-referrer"));
+    headers
+        .entry(header::CONTENT_SECURITY_POLICY)
+        .or_insert_with(|| HeaderValue::from_static(SECURITY_CSP));
     response
 }
 
@@ -158,5 +172,5 @@ pub fn router_with_relay_limits(config: Config, relay_limits: relay::RelayLimits
     } else if let Some(target) = config.frontend_redirect_url {
         app = app.route("/", get(move || async move { Redirect::temporary(&target) }));
     }
-    app.layer(middleware::from_fn(cache_headers))
+    app.layer(middleware::from_fn(response_headers))
 }

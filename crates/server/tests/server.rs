@@ -1072,6 +1072,48 @@ async fn cancelled_append_keeps_disk_and_memory_consistent() {
     assert_eq!(disk, memory);
 }
 
+/// Detects: missing CSP, X-Content-Type-Options, or Referrer-Policy headers on static and API responses.
+#[tokio::test]
+async fn responses_include_security_headers() {
+    let server = start(RelayTargets::signal()).await;
+    let static_dir = server.index_path.parent().unwrap();
+    std::fs::write(static_dir.join("index.html"), b"<!doctype html><title>ok</title>").unwrap();
+    let client = reqwest::Client::new();
+
+    for path in ["/", "/v1/config"] {
+        let response = client
+            .get(format!("http://{}{path}", server.base))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "missing nosniff on {path}"
+        );
+        assert_eq!(
+            response.headers().get("referrer-policy").and_then(|v| v.to_str().ok()),
+            Some("no-referrer"),
+            "missing no-referrer on {path}"
+        );
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(csp.contains("default-src 'none'"), "CSP on {path}: {csp}");
+        assert!(
+            csp.contains("script-src 'self' 'wasm-unsafe-eval' blob:"),
+            "CSP on {path}: {csp}"
+        );
+        assert!(csp.contains("object-src 'none'"), "CSP on {path}: {csp}");
+        assert!(csp.contains("frame-ancestors 'none'"), "CSP on {path}: {csp}");
+    }
+}
+
 /// Checks the question to Signal's CDN against the real one. It needs the network, and SIGNAL_PACK_ID with the 32
 /// hexadecimal digits of a sticker pack that exists: `SIGNAL_PACK_ID=... cargo test -- --ignored`.
 #[tokio::test]

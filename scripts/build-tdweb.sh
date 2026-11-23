@@ -13,10 +13,22 @@
 # without it, emsdk is cloned into build/emsdk and 3.1.1 is installed there.
 set -euo pipefail
 
+EMSDK_VERSION=7.0.0
+EMSDK_COMMIT=1693ce7359fc9694f198694f902a2cc061239b86
+OPENSSL_ARCHIVE=OpenSSL_1_1_0l.tar.gz
+OPENSSL_SHA256=e2acf0cf58d9bff2b42f2dc0aee79340c8ffe2c5e45d3ca4533dd5d4f5775b1d
+
 repo=$(cd "$(dirname "$0")/.." && pwd)
 if [ -z "${EMSDK:-}" ]; then
   EMSDK=$repo/build/emsdk
-  [ -d "$EMSDK" ] || git clone https://github.com/emscripten-core/emsdk.git "$EMSDK"
+  if [ ! -d "$EMSDK" ]; then
+    tmp="$EMSDK.tmp"
+    rm -rf "$tmp"
+    git clone --depth 1 --branch "$EMSDK_VERSION" https://github.com/emscripten-core/emsdk.git "$tmp"
+    actual=$(git -C "$tmp" rev-parse HEAD)
+    [ "$actual" = "$EMSDK_COMMIT" ] || { echo "emsdk commit mismatch: expected $EMSDK_COMMIT, got $actual" >&2; exit 1; }
+    mv "$tmp" "$EMSDK"
+  fi
   "$EMSDK/emsdk" install 3.1.1
   "$EMSDK/emsdk" activate 3.1.1
 fi
@@ -25,6 +37,16 @@ source "$EMSDK/emsdk_env.sh" >/dev/null 2>&1
 td=$repo/third_party/td
 web=$td/example/web
 cd "$web"
+# Pre-fetch and SHA-256-verify OpenSSL before TDLib's build-openssl.sh runs so it never curls an unverified tarball.
+if [ ! -f "$OPENSSL_ARCHIVE" ]; then
+  tmp="$OPENSSL_ARCHIVE.tmp"
+  rm -f "$tmp"
+  curl -fsSLo "$tmp" "https://github.com/openssl/openssl/archive/$OPENSSL_ARCHIVE"
+  echo "$OPENSSL_SHA256  $tmp" | sha256sum -c -
+  mv "$tmp" "$OPENSSL_ARCHIVE"
+else
+  echo "$OPENSSL_SHA256  $OPENSSL_ARCHIVE" | sha256sum -c -
+fi
 [ -f build/crypto/lib/libcrypto.a ] || ./build-openssl.sh
 
 crypto=$web/build/crypto

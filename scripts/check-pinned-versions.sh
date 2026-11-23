@@ -28,8 +28,9 @@ check wasi-sdk "$(pinned WASI_SDK_RELEASE)" "$(newest https://github.com/WebAsse
 repo=$(cd "$scripts/.." && pwd)
 pinned_root=$(jq -S -c . "$repo/app/src/attestation/trusted-root.json" | sha256sum | cut -c1-12)
 tuf_base=https://tuf-repo-cdn.sigstore.dev
-snap_ver=$(curl -fsSL "$tuf_base/timestamp.json" | jq -r '.signed.meta["snapshot.json"].version')
-tgt_ver=$(curl -fsSL "$tuf_base/${snap_ver}.snapshot.json" | jq -r '.signed.meta["targets.json"].version')
-root_hash=$(curl -fsSL "$tuf_base/${tgt_ver}.targets.json" | jq -r '.signed.targets["trusted_root.json"].hashes.sha256')
-newest_root=$(curl -fsSL "$tuf_base/targets/${root_hash}.trusted_root.json" | jq -S -c . | sha256sum | cut -c1-12)
+fetch() { curl -fsSL --connect-timeout 10 --max-time 30 "$1"; }
+snap_ver=$(fetch "$tuf_base/timestamp.json" | jq -r '.signed.meta["snapshot.json"].version')
+tgt_ver=$(fetch "$tuf_base/${snap_ver}.snapshot.json" | jq -r '.signed.meta["targets.json"].version')
+root_hash=$(fetch "$tuf_base/${tgt_ver}.targets.json" | jq -r '.signed.targets["trusted_root.json"].hashes.sha256')
+newest_root=$(fetch "$tuf_base/targets/${root_hash}.trusted_root.json" | jq -S -c . | sha256sum | cut -c1-12)
 check sigstore-trusted-root "$pinned_root" "$newest_root"

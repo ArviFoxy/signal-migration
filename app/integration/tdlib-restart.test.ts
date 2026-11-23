@@ -45,7 +45,7 @@ beforeAll(async () => {
   });
   fs.writeFileSync(
     path.join(root, 'index.html'),
-    '<!doctype html><meta charset="utf-8"><script type="module" src="/tdlib-restart-page.js"></script>',
+    '<!doctype html><meta charset="utf-8"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'self\' \'wasm-unsafe-eval\' blob:; worker-src \'self\' blob:; connect-src \'self\' blob: https://*.web.telegram.org wss://*.web.telegram.org"><script type="module" src="/tdlib-restart-page.js"></script>',
   );
   server = http.createServer((request, response) => {
     const pathname = new URL(request.url ?? '/', 'http://x').pathname;
