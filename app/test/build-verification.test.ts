@@ -121,6 +121,7 @@ describe('Sigstore build attestation verification', () => {
     const subpath = new URL('https://arvifoxy.github.io/signal-migration/');
     expect(relativeAssetPath('./main-abc.js', subpath)).toBe('main-abc.js');
     expect(relativeAssetPath('./fonts/inter.woff2', subpath)).toBe('fonts/inter.woff2');
+    expect(relativeAssetPath('./main-abc.js?v=evil', subpath)).toBeNull();
     expect(relativeAssetPath('https://arvifoxy.github.io/other/main.js', subpath)).toBeNull();
     expect(relativeAssetPath('https://evil.example/main.js', subpath)).toBeNull();
   });
@@ -228,5 +229,154 @@ describe('BuildVerifier runtime', () => {
 
     await verifier.start(fakeDocument(['./main-11111111.js', 'https://evil.example/inject.js'], []), base);
     expect(verifier.state.kind).toBe('failed');
+  });
+
+  // Detects: concurrent verifyAndFetch failing closed when a sibling call detects a tampered asset and clears #subjects.
+  it('fails closed on concurrent verifyAndFetch when another concurrent verification fails', async () => {
+    const htmlBytes = bytesOf('<html></html>');
+    const jsBytes = bytesOf('console.log("ok")');
+    const goodWasm = bytesOf('good-wasm');
+    const badWasm = bytesOf('tampered-wasm');
+    const subjects = new Map([
+      ['index.html', await sha256Hex(htmlBytes)],
+      ['main-11111111.js', await sha256Hex(jsBytes)],
+      ['a.wasm', await sha256Hex(goodWasm)],
+      ['b.wasm', await sha256Hex(goodWasm)],
+    ]);
+
+    let releaseB!: () => void;
+    const gateB = new Promise<void>((resolve) => (releaseB = resolve));
+    const baseFetch = fakeFetch({
+      [`${base}attestation.sigstore.json`]: { body: '{}' },
+      [`${base}index.html`]: { body: htmlBytes },
+      [`${base}main-11111111.js`]: { body: jsBytes },
+      [`${base}a.wasm`]: { body: badWasm },
+      [`${base}b.wasm`]: { body: badWasm },
+    });
+    const gatedFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith('b.wasm')) await gateB;
+      return baseFetch(input, init);
+    }) as typeof fetch;
+
+    const verifier = new BuildVerifier(DEFAULT_ATTESTATION_POLICY, gatedFetch, async () => ({
+      tag: 'v0.1.0',
+      ref: 'refs/tags/v0.1.0',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+      subjects,
+    }));
+    await verifier.start(fakeDocument(['./main-11111111.js'], []), base);
+    expect(verifier.state.kind).toBe('verified');
+
+    const first = verifier.verifyAndFetch('a.wasm', `${base}main-11111111.js`);
+    const second = verifier.verifyAndFetch('b.wasm', `${base}main-11111111.js`);
+    await expect(first).rejects.toThrow(/SHA-256/);
+    expect(verifier.state.kind).toBe('failed');
+
+    releaseB();
+    await expect(second).rejects.toThrow(/Refusing to load|SHA-256/);
+  });
+
+  // Detects: a stalled optional attestation-meta.json blocking startup verification and every lazy WASM load forever.
+  it('does not block startup verification if optional attestation-meta.json hangs', async () => {
+    const htmlBytes = bytesOf('<html></html>');
+    const jsBytes = bytesOf('console.log("ok")');
+    const subjects = new Map([
+      ['index.html', await sha256Hex(htmlBytes)],
+      ['main-11111111.js', await sha256Hex(jsBytes)],
+    ]);
+    const baseFetch = fakeFetch({
+      [`${base}attestation.sigstore.json`]: { body: '{}' },
+      [`${base}index.html`]: { body: htmlBytes },
+      [`${base}main-11111111.js`]: { body: jsBytes },
+    });
+    const hangingMetaFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith('attestation-meta.json')) return new Promise<Response>(() => undefined);
+      return baseFetch(input, init);
+    }) as typeof fetch;
+
+    const verifier = new BuildVerifier(DEFAULT_ATTESTATION_POLICY, hangingMetaFetch, async () => ({
+      tag: 'v0.1.0',
+      ref: 'refs/tags/v0.1.0',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+      subjects,
+    }));
+    const outcome = await Promise.race([
+      verifier.start(fakeDocument(['./main-11111111.js'], []), base).then(() => 'started'),
+      new Promise<string>((resolve) => setTimeout(() => resolve('hung'), 200)),
+    ]);
+    expect(outcome).toBe('started');
+    expect(verifier.state.kind).toBe('verified');
+  });
+
+  // Detects: verifyAsset skipping re-verification on subsequent calls (e.g., after a worker or TDLib crash restart).
+  it('re-verifies assets on subsequent verifyAsset calls rather than caching forever', async () => {
+    const htmlBytes = bytesOf('<html></html>');
+    const jsBytes = bytesOf('console.log("ok")');
+    const goodWorker = bytesOf('good-worker');
+    const badWorker = bytesOf('tampered-worker');
+    const subjects = new Map([
+      ['index.html', await sha256Hex(htmlBytes)],
+      ['main-11111111.js', await sha256Hex(jsBytes)],
+      ['tdweb.worker.js', await sha256Hex(goodWorker)],
+    ]);
+    let workerFetches = 0;
+    const baseFetch = fakeFetch({
+      [`${base}attestation.sigstore.json`]: { body: '{}' },
+      [`${base}index.html`]: { body: htmlBytes },
+      [`${base}main-11111111.js`]: { body: jsBytes },
+    });
+    const rotatingFetch: typeof fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith('tdweb.worker.js')) {
+        workerFetches++;
+        const body = workerFetches === 1 ? goodWorker : badWorker;
+        return new Response(body as Uint8Array<ArrayBuffer>, { status: 200 });
+      }
+      return baseFetch(input, init);
+    }) as typeof fetch;
+
+    const verifier = new BuildVerifier(DEFAULT_ATTESTATION_POLICY, rotatingFetch, async () => ({
+      tag: 'v0.1.0',
+      ref: 'refs/tags/v0.1.0',
+      commit: '0123456789abcdef0123456789abcdef01234567',
+      subjects,
+    }));
+    await verifier.start(fakeDocument(['./main-11111111.js'], []), base);
+    await expect(verifier.verifyAsset('tdweb.worker.js', `${base}main-11111111.js`)).resolves.toBeUndefined();
+    await expect(verifier.verifyAsset('tdweb.worker.js', `${base}main-11111111.js`)).rejects.toThrow(/SHA-256/);
+    expect(verifier.state.kind).toBe('failed');
+  });
+
+  // Detects: resolveWorkerInput issuing an unverified second fetch instead of creating a Blob URL from verified bytes.
+  it('returns a verified Blob URL from resolveWorkerInput when attested', async () => {
+    const htmlBytes = bytesOf('<html></html>');
+    const jsBytes = bytesOf('console.log("ok")');
+    const workerBytes = bytesOf('self.onmessage = () => {};');
+    const subjects = new Map([
+      ['index.html', await sha256Hex(htmlBytes)],
+      ['main-11111111.js', await sha256Hex(jsBytes)],
+      ['apng-worker.js', await sha256Hex(workerBytes)],
+    ]);
+    const verifier = new BuildVerifier(
+      DEFAULT_ATTESTATION_POLICY,
+      fakeFetch({
+        [`${base}attestation.sigstore.json`]: { body: '{}' },
+        [`${base}index.html`]: { body: htmlBytes },
+        [`${base}main-11111111.js`]: { body: jsBytes },
+        [`${base}apng-worker.js`]: { body: workerBytes },
+      }),
+      async () => ({
+        tag: 'v0.1.0',
+        ref: 'refs/tags/v0.1.0',
+        commit: '0123456789abcdef0123456789abcdef01234567',
+        subjects,
+      }),
+    );
+    await verifier.start(fakeDocument(['./main-11111111.js'], []), base);
+    const worker = await verifier.resolveWorkerInput('apng-worker.js', `${base}main-11111111.js`);
+    expect(worker.url.startsWith('blob:')).toBe(true);
+    worker.revoke();
   });
 });

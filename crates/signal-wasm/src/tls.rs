@@ -4,6 +4,7 @@
 //! `Transport` is the in-memory socket: the page pushes received ciphertext in and takes ciphertext to send out.
 
 use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::io::{ErrorKind, Read, Write};
 use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
@@ -41,7 +42,7 @@ fn config() -> Arc<ClientConfig> {
 
 #[derive(Default)]
 pub struct Buffers {
-    pub incoming: Vec<u8>,
+    pub incoming: VecDeque<u8>,
     pub outgoing: Vec<u8>,
 }
 
@@ -55,10 +56,7 @@ impl Read for Transport {
         if buffers.incoming.is_empty() {
             return Err(ErrorKind::WouldBlock.into());
         }
-        let n = buf.len().min(buffers.incoming.len());
-        buf[..n].copy_from_slice(&buffers.incoming[..n]);
-        buffers.incoming.drain(..n);
-        Ok(n)
+        buffers.incoming.read(buf)
     }
 }
 
@@ -74,7 +72,7 @@ impl Write for Transport {
 
 impl Transport {
     pub fn push_received(&self, data: &[u8]) {
-        self.0.borrow_mut().incoming.extend_from_slice(data);
+        self.0.borrow_mut().incoming.extend(data);
     }
     pub fn take_outgoing(&self) -> Vec<u8> {
         std::mem::take(&mut self.0.borrow_mut().outgoing)

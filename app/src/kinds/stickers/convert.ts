@@ -13,7 +13,7 @@
 
 import lottie from 'lottie-web/build/player/lottie_light_canvas';
 import { buildVerifier } from '../../attestation/runtime';
-import { assetFile, assetUrl } from '../../core/assets';
+import { assetFile } from '../../core/assets';
 import { plainWebp } from './plain-webp';
 import { withTimeLimit } from '../../core/time-limit';
 import type { StickerFormat } from './telegram-packs';
@@ -104,6 +104,7 @@ export type Animation = {
 /** A worker that answers requests by ID, started on first use. */
 class WorkerChannel {
   #worker: Worker | null = null;
+  #revokeUrl: (() => void) | null = null;
   #starting: Promise<Worker> | null = null;
   #generation = 0;
   #nextId = 0;
@@ -113,8 +114,8 @@ class WorkerChannel {
     private readonly file: string,
     /** What the worker is, for the error when it fails as a whole. */
     private readonly name: string,
-    /** Additional static files this worker loads, verified before the worker starts. */
-    private readonly extraFiles: readonly string[] = [],
+    /** Optional WASM module initialized inside the worker (verified `ArrayBuffer` when attested). */
+    private readonly wasmFile?: string,
   ) {}
 
   async #ensureWorker(): Promise<Worker> {
@@ -122,11 +123,15 @@ class WorkerChannel {
     if (!this.#starting) {
       const generation = ++this.#generation;
       const pending = (async () => {
-        for (const file of [this.file, ...this.extraFiles]) {
-          await buildVerifier.verifyAsset(file, import.meta.url);
+        const [workerInput, wasmInput] = await Promise.all([
+          buildVerifier.resolveWorkerInput(this.file, import.meta.url),
+          this.wasmFile ? buildVerifier.resolveWasmInput(this.wasmFile, import.meta.url) : Promise.resolve(null),
+        ]);
+        if (this.#generation !== generation) {
+          workerInput.revoke();
+          throw new ConversionError(`${this.name} was stopped`);
         }
-        if (this.#generation !== generation) throw new ConversionError(`${this.name} was stopped`);
-        const worker = new Worker(assetUrl(this.file, import.meta.url), { type: 'module' });
+        const worker = new Worker(workerInput.url, { type: 'module' });
         worker.onmessage = (event: MessageEvent<{ id: number; result?: never; error?: string }>) => {
           const request = this.#pending.get(event.data.id);
           this.#pending.delete(event.data.id);
@@ -134,7 +139,23 @@ class WorkerChannel {
           else request?.resolve(event.data.result as never);
         };
         worker.onerror = (event) => this.stop(new ConversionError(`${this.name} failed: ${event.message}`));
+        worker.onmessageerror = () => this.stop(new ConversionError(`${this.name} returned an unreadable message`));
         this.#worker = worker;
+        this.#revokeUrl = workerInput.revoke;
+        if (wasmInput !== null) {
+          const initId = this.#nextId++;
+          await new Promise<void>((resolve, reject) => {
+            this.#pending.set(initId, { resolve: () => resolve(), reject });
+            if (wasmInput instanceof ArrayBuffer) {
+              worker.postMessage({ id: initId, kind: 'init', wasmBinary: wasmInput }, [wasmInput]);
+            } else {
+              worker.postMessage({ id: initId, kind: 'init', wasmUrl: wasmInput.href });
+            }
+          });
+          if (this.#generation !== generation || this.#worker !== worker) {
+            throw new ConversionError(`${this.name} was stopped`);
+          }
+        }
         return worker;
       })();
       this.#starting = pending;
@@ -147,10 +168,16 @@ class WorkerChannel {
 
   async request<T>(message: object, transfer: Transferable[] = []): Promise<T> {
     const worker = await this.#ensureWorker();
+    if (this.#worker !== worker) throw new ConversionError(`${this.name} was stopped`);
     const id = this.#nextId++;
     return new Promise<T>((resolve, reject) => {
       this.#pending.set(id, { resolve: resolve as (result: never) => void, reject });
-      worker.postMessage({ id, ...message }, transfer);
+      try {
+        worker.postMessage({ id, ...message }, transfer);
+      } catch (error) {
+        this.#pending.delete(id);
+        reject(error instanceof Error ? error : new ConversionError(String(error)));
+      }
     });
   }
 
@@ -160,13 +187,15 @@ class WorkerChannel {
     this.#starting = null;
     this.#worker?.terminate();
     this.#worker = null;
+    this.#revokeUrl?.();
+    this.#revokeUrl = null;
     for (const request of this.#pending.values()) request.reject(error);
     this.#pending.clear();
   }
 }
 
 const encoder = new WorkerChannel(assetFile('apngWorker'), 'the animation encoder');
-const videoDecoder = new WorkerChannel(assetFile('webmWorker'), 'the video decoder', [assetFile('webmDecoderWasm')]);
+const videoDecoder = new WorkerChannel(assetFile('webmWorker'), 'the video decoder', assetFile('webmDecoderWasm'));
 
 /** Asks the worker that encodes and reads animated PNG files (apng-worker.ts). */
 export const askPngWorker = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>

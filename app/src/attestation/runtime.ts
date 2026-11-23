@@ -5,11 +5,13 @@
 // against the signed in-toto subject list.
 //
 // When a release is attested, lazy WebAssembly modules and workers are verified against the same signed subject list
-// before instantiation (`verifyAndFetch` / `verifyAsset`), failing closed on any mismatch. When no attestation file
-// exists (HTTP 404, such as local development), the build is reported as unverified and asset loads proceed normally.
+// before instantiation (`verifyAndFetch` / `resolveWasmInput` / `resolveWorkerInput` / `verifyAsset`), failing closed
+// on any mismatch. When no attestation file exists (HTTP 404, such as local development), the build is reported as
+// unverified and asset loads proceed normally.
 
 import { assetUrl } from '../core/assets';
 import { errorMessage } from '../core/errors';
+import { SERVER_TIME_LIMIT_S, withFetchTimeLimit } from '../core/time-limit';
 import { ATTESTATIONS_URL } from './config';
 import {
   type AttestationPolicy,
@@ -23,7 +25,13 @@ import {
 const BUNDLE_PATH = 'attestation.sigstore.json';
 const META_PATH = 'attestation-meta.json';
 
-/** Extracts the relative deployed path of a URL within `baseDir`, or null if outside `baseDir`. */
+type Phase =
+  | { kind: 'checking' }
+  | { kind: 'unverified' }
+  | { kind: 'verified'; subjects: ReadonlyMap<string, string>; tag: string; commit: string }
+  | { kind: 'failed'; reason: string };
+
+/** Extracts the relative deployed path of a URL within `baseDir`, or null if outside `baseDir` or carrying a query. */
 export function relativeAssetPath(url: string, baseDir: URL): string | null {
   let resolved: URL;
   try {
@@ -32,6 +40,7 @@ export function relativeAssetPath(url: string, baseDir: URL): string | null {
     return null;
   }
   if (resolved.origin !== baseDir.origin) return null;
+  if (resolved.search !== '') return null;
   if (!resolved.pathname.startsWith(baseDir.pathname)) return null;
   const rel = resolved.pathname.slice(baseDir.pathname.length);
   return rel.length > 0 && !rel.startsWith('/') ? rel : null;
@@ -52,9 +61,7 @@ export function documentEntryAssets(doc: Document, baseDir: URL): { paths: strin
 }
 
 export class BuildVerifier extends EventTarget {
-  #state: BuildVerification = { kind: 'checking' };
-  #subjects: ReadonlyMap<string, string> | null = null;
-  #verifiedAssets = new Set<string>();
+  #phase: Phase = { kind: 'checking' };
   #startup: Promise<void> | null = null;
   #url: string = ATTESTATIONS_URL;
 
@@ -62,23 +69,50 @@ export class BuildVerifier extends EventTarget {
     private readonly policy: AttestationPolicy = DEFAULT_ATTESTATION_POLICY,
     private readonly fetchImpl: typeof fetch = (input, init) => fetch(input, init),
     private readonly verifyBundle: typeof verifyAttestationBundle = verifyAttestationBundle,
+    private readonly timeLimitS: number = SERVER_TIME_LIMIT_S,
   ) {
     super();
   }
 
   get state(): BuildVerification {
-    return this.#state;
+    switch (this.#phase.kind) {
+      case 'checking':
+        return { kind: 'checking' };
+      case 'unverified':
+        return { kind: 'unverified', url: ATTESTATIONS_URL };
+      case 'verified':
+        return { kind: 'verified', tag: this.#phase.tag, commit: this.#phase.commit, url: this.#url };
+      case 'failed':
+        return { kind: 'failed', reason: this.#phase.reason, url: this.#url };
+    }
   }
 
-  #setState(next: BuildVerification): void {
-    this.#state = next;
+  #setPhase(next: Phase): void {
+    this.#phase = next;
     this.dispatchEvent(new Event('change'));
   }
 
   #fail(reason: string): void {
-    this.#subjects = null;
-    this.#verifiedAssets.clear();
-    this.#setState({ kind: 'failed', reason, url: this.#url });
+    this.#setPhase({ kind: 'failed', reason });
+  }
+
+  #fetchBounded<T>(url: string, init: RequestInit, consume: (response: Response) => Promise<T>): Promise<T> {
+    return withFetchTimeLimit('The migration server', this.timeLimitS, url, init, consume, this.fetchImpl);
+  }
+
+  /** Fetches the optional attestation link ID in the background so a slow metadata request never blocks startup. */
+  #loadMetaUrl(baseDir: URL): void {
+    void this.#fetchBounded(new URL(META_PATH, baseDir).href, { cache: 'no-cache' }, async (response) =>
+      response.ok ? ((await response.json()) as unknown) : null,
+    )
+      .then((meta) => {
+        const nextUrl = parseAttestationUrl(meta, ATTESTATIONS_URL);
+        if (nextUrl !== this.#url) {
+          this.#url = nextUrl;
+          this.dispatchEvent(new Event('change'));
+        }
+      })
+      .catch(() => undefined);
   }
 
   /** Starts startup verification once and returns its completion promise. */
@@ -90,23 +124,21 @@ export class BuildVerifier extends EventTarget {
   async #runStartup(doc: Document, pageHref: string): Promise<void> {
     const baseDir = new URL('./', pageHref);
     try {
-      const bundleResponse = await this.fetchImpl(new URL(BUNDLE_PATH, baseDir).href, { cache: 'no-cache' });
-      if (bundleResponse.status === 404) {
-        this.#setState({ kind: 'unverified', url: ATTESTATIONS_URL });
-        return;
-      }
-      if (!bundleResponse.ok) {
-        this.#fail(`fetching ${BUNDLE_PATH} answered ${bundleResponse.status}`);
+      const bundle = await this.#fetchBounded(
+        new URL(BUNDLE_PATH, baseDir).href,
+        { cache: 'no-cache' },
+        async (response) => {
+          if (response.status === 404) return null;
+          if (!response.ok) throw new Error(`fetching ${BUNDLE_PATH} answered ${response.status}`);
+          return (await response.json()) as unknown;
+        },
+      );
+      if (bundle === null) {
+        this.#setPhase({ kind: 'unverified' });
         return;
       }
 
-      const [bundle, meta] = await Promise.all([
-        bundleResponse.json() as Promise<unknown>,
-        this.fetchImpl(new URL(META_PATH, baseDir).href, { cache: 'no-cache' })
-          .then((response) => (response.ok ? (response.json() as Promise<unknown>) : null))
-          .catch(() => null),
-      ]);
-      this.#url = parseAttestationUrl(meta, ATTESTATIONS_URL);
+      this.#loadMetaUrl(baseDir);
 
       const verified = await this.verifyBundle(bundle, this.policy);
 
@@ -119,42 +151,49 @@ export class BuildVerifier extends EventTarget {
       }
 
       await Promise.all(
-        paths.map(async (relPath) => {
-          const response = await this.fetchImpl(new URL(relPath, baseDir).href);
-          if (!response.ok) throw new Error(`fetching '${relPath}' answered ${response.status}`);
-          await verifyFileDigest(relPath, await response.arrayBuffer(), verified.subjects);
-          this.#verifiedAssets.add(relPath);
-        }),
+        paths.map((relPath) =>
+          this.#fetchBounded(new URL(relPath, baseDir).href, {}, async (response) => {
+            if (!response.ok) throw new Error(`fetching '${relPath}' answered ${response.status}`);
+            await verifyFileDigest(relPath, await response.arrayBuffer(), verified.subjects);
+          }),
+        ),
       );
 
-      this.#subjects = verified.subjects;
-      this.#setState({ kind: 'verified', tag: verified.tag, commit: verified.commit, url: this.#url });
+      this.#setPhase({ kind: 'verified', subjects: verified.subjects, tag: verified.tag, commit: verified.commit });
     } catch (error) {
       this.#fail(errorMessage(error));
     }
   }
 
+  #throwIfFailed(file: string): void {
+    if (this.#phase.kind === 'failed') {
+      throw new Error(`Refusing to load '${file}': ${this.#phase.reason}`);
+    }
+  }
+
   /**
    * Fetches `file` (relative to the app's assets) and, when the build is attested, verifies its SHA-256 against the
-   * signed provenance statement before returning its bytes. Fails closed if verification already failed or disagrees.
+   * signed provenance statement before returning its bytes. Fails closed if verification already failed or disagrees,
+   * even across concurrent calls.
    */
   async verifyAndFetch(file: string, baseUrl: string = import.meta.url): Promise<ArrayBuffer> {
     if (this.#startup) await this.#startup;
-    if (this.#state.kind === 'failed') {
-      throw new Error(`Refusing to load '${file}': ${this.#state.reason}`);
-    }
-    const response = await this.fetchImpl(assetUrl(file, baseUrl));
-    if (!response.ok) throw new Error(`fetching '${file}' answered ${response.status}`);
-    const bytes = await response.arrayBuffer();
-    if (this.#subjects !== null) {
+    const phase = this.#phase;
+    this.#throwIfFailed(file);
+    const bytes = await this.#fetchBounded(assetUrl(file, baseUrl), {}, async (response) => {
+      if (!response.ok) throw new Error(`fetching '${file}' answered ${response.status}`);
+      return response.arrayBuffer();
+    });
+    this.#throwIfFailed(file);
+    if (phase.kind === 'verified') {
       try {
-        await verifyFileDigest(file, bytes, this.#subjects);
-        this.#verifiedAssets.add(file);
+        await verifyFileDigest(file, bytes, phase.subjects);
       } catch (error) {
         const reason = errorMessage(error);
         this.#fail(reason);
         throw new Error(`Refusing to load '${file}': ${reason}`);
       }
+      this.#throwIfFailed(file);
     }
     return bytes;
   }
@@ -167,26 +206,47 @@ export class BuildVerifier extends EventTarget {
   async resolveWasmInput(file: string, baseUrl: string = import.meta.url): Promise<ArrayBuffer | URL> {
     if (!this.#startup) return new URL(assetUrl(file, baseUrl));
     await this.#startup;
-    if (this.#state.kind === 'failed') {
-      throw new Error(`Refusing to load '${file}': ${this.#state.reason}`);
+    if (this.#phase.kind === 'failed') {
+      throw new Error(`Refusing to load '${file}': ${this.#phase.reason}`);
     }
-    if (this.#subjects !== null) {
+    if (this.#phase.kind === 'verified') {
       return this.verifyAndFetch(file, baseUrl);
     }
     return new URL(assetUrl(file, baseUrl));
   }
 
   /**
-   * Checks `file` against the signed provenance statement (at most once per filename) when the build is attested.
-   * No-op when `start()` was never called or no attestation exists (local development).
+   * Returns a verified `Blob` URL for a self-contained worker bundle when running an attested build (avoiding a second
+   * unverified network fetch), or the asset URL when running unattested. Callers invoke `revoke()` when terminating.
+   */
+  async resolveWorkerInput(
+    file: string,
+    baseUrl: string = import.meta.url,
+  ): Promise<{ url: string; revoke: () => void }> {
+    if (!this.#startup) return { url: assetUrl(file, baseUrl), revoke: () => undefined };
+    await this.#startup;
+    if (this.#phase.kind === 'failed') {
+      throw new Error(`Refusing to load '${file}': ${this.#phase.reason}`);
+    }
+    if (this.#phase.kind === 'verified') {
+      const bytes = await this.verifyAndFetch(file, baseUrl);
+      const url = URL.createObjectURL(new Blob([bytes], { type: 'text/javascript' }));
+      return { url, revoke: () => URL.revokeObjectURL(url) };
+    }
+    return { url: assetUrl(file, baseUrl), revoke: () => undefined };
+  }
+
+  /**
+   * Checks `file` against the signed provenance statement when the build is attested. Re-verifies on every call so
+   * worker or TDLib restarts do not rely on a stale check. No-op when `start()` was never called or unattested.
    */
   async verifyAsset(file: string, baseUrl: string = import.meta.url): Promise<void> {
     if (!this.#startup) return;
     await this.#startup;
-    if (this.#state.kind === 'failed') {
-      throw new Error(`Refusing to load '${file}': ${this.#state.reason}`);
+    if (this.#phase.kind === 'failed') {
+      throw new Error(`Refusing to load '${file}': ${this.#phase.reason}`);
     }
-    if (this.#subjects === null || this.#verifiedAssets.has(file)) return;
+    if (this.#phase.kind !== 'verified') return;
     await this.verifyAndFetch(file, baseUrl);
   }
 }

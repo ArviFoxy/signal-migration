@@ -806,7 +806,7 @@ fn parse_allowed_origins_rejects_paths_and_non_http_schemes() {
 fn parse_allowed_origins_normalizes_case_and_rejects_empty_commas_and_userinfo() {
     assert!(parse_allowed_origins(",").is_err());
     assert!(parse_allowed_origins(" , , ").is_err());
-    assert!(parse_allowed_origins("https://user@example.com").is_err());
+    assert!(parse_allowed_origins("https://user@127.0.0.1").is_err());
     assert!(parse_allowed_origins("https://example.com evil").is_err());
     assert!(parse_allowed_origins("http:example.com").is_err());
     assert!(parse_allowed_origins("http:").is_err());

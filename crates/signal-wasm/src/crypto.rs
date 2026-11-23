@@ -159,26 +159,43 @@ pub fn decrypt_sticker_file(data: &[u8], pack_key: &[u8]) -> Result<Vec<u8>, JsE
     aes_256_cbc_decrypt(ciphertext, &aes_key, iv).map_err(js_error)
 }
 
+fn checked_padded_attachment_size(plaintext_len: u32) -> Result<u32, String> {
+    if plaintext_len <= 541 {
+        return Ok(541);
+    }
+    let exponent = (plaintext_len as f64).ln() / 1.05_f64.ln();
+    let padded_f64 = 1.05_f64.powf(exponent.ceil()).floor();
+    if !padded_f64.is_finite() || padded_f64 > u32::MAX as f64 {
+        return Err("attachment padded size overflows u32".to_string());
+    }
+    Ok((padded_f64 as u32).max(541).max(plaintext_len))
+}
+
+fn checked_encrypted_attachment_size(plaintext_len: u32) -> Result<u32, String> {
+    let padded = checked_padded_attachment_size(plaintext_len)?;
+    let blocks = (padded / 16)
+        .checked_add(1)
+        .ok_or_else(|| "attachment size overflows u32".to_string())?;
+    let cbc = blocks
+        .checked_mul(16)
+        .ok_or_else(|| "attachment size overflows u32".to_string())?;
+    cbc.checked_add(16 + 32)
+        .ok_or_else(|| "attachment size overflows u32".to_string())
+}
+
 /// Signal's padded plaintext length for an attachment of `plaintext_len` bytes:
 /// `max(541, floor(1.05 ^ ceil(log_1.05(plaintext_len))))` (Signal Desktop `logPadSize.std.ts`,
 /// Signal Android `PaddingInputStream.getPaddedSize`).
 #[wasm_bindgen(js_name = paddedAttachmentSize)]
-pub fn padded_attachment_size(plaintext_len: u32) -> u32 {
-    if plaintext_len <= 541 {
-        return 541;
-    }
-    let exponent = (plaintext_len as f64).ln() / 1.05_f64.ln();
-    let padded = 1.05_f64.powf(exponent.ceil()).floor() as u32;
-    padded.max(541).max(plaintext_len)
+pub fn padded_attachment_size(plaintext_len: u32) -> Result<u32, JsError> {
+    checked_padded_attachment_size(plaintext_len).map_err(js_error)
 }
 
 /// Exact encrypted byte length uploaded to Signal's CDN for an attachment of `plaintext_len` bytes:
 /// 16-byte IV + AES-256-CBC(padded plaintext, PKCS#7) + 32-byte HMAC-SHA256.
 #[wasm_bindgen(js_name = encryptedAttachmentSize)]
-pub fn encrypted_attachment_size(plaintext_len: u32) -> u32 {
-    let padded = padded_attachment_size(plaintext_len);
-    let cbc = (padded / 16 + 1) * 16;
-    16 + cbc + 32
+pub fn encrypted_attachment_size(plaintext_len: u32) -> Result<u32, JsError> {
+    checked_encrypted_attachment_size(plaintext_len).map_err(js_error)
 }
 
 /// The trailing bytes and metadata produced when `AttachmentEncryptor.finish()` runs.
@@ -213,12 +230,13 @@ pub struct AttachmentEncryptor {
 #[wasm_bindgen]
 impl AttachmentEncryptor {
     #[wasm_bindgen(constructor)]
-    pub fn new(plaintext_size: u32) -> AttachmentEncryptor {
+    pub fn new(plaintext_size: u32) -> Result<AttachmentEncryptor, JsError> {
+        checked_encrypted_attachment_size(plaintext_size).map_err(js_error)?;
         let key: [u8; 64] = random_bytes();
         let iv: [u8; 16] = random_bytes();
         let cipher = Encryptor::<Aes256>::new_from_slices(&key[..32], &iv).expect("32-byte key and 16-byte IV");
         let mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&key[32..]).expect("32-byte HMAC key");
-        AttachmentEncryptor {
+        Ok(AttachmentEncryptor {
             key,
             iv,
             iv_emitted: false,
@@ -230,7 +248,7 @@ impl AttachmentEncryptor {
             written: 0,
             expected_plaintext: plaintext_size,
             finished: false,
-        }
+        })
     }
 
     /// Encrypts one plaintext chunk, returning the ciphertext bytes produced so far (prepended with the IV on the
@@ -266,7 +284,8 @@ impl AttachmentEncryptor {
         }
         self.finished = true;
 
-        let padded_len = padded_attachment_size(self.expected_plaintext);
+        let padded_len = checked_padded_attachment_size(self.expected_plaintext).map_err(js_error)?;
+        let ciphertext_size = checked_encrypted_attachment_size(self.expected_plaintext).map_err(js_error)?;
         let pad_zeros = (padded_len - self.expected_plaintext) as usize;
         let extra_iv = if self.iv_emitted { 0 } else { 16 };
         let mut tail = Vec::with_capacity(extra_iv + pad_zeros + 16 + 32);
@@ -296,7 +315,7 @@ impl AttachmentEncryptor {
             tail,
             key: self.key.to_vec(),
             digest,
-            ciphertext_size: encrypted_attachment_size(self.expected_plaintext),
+            ciphertext_size,
         })
     }
 }
@@ -388,12 +407,12 @@ mod tests {
     // Detects: divergence from Signal's logarithmic padding buckets (PaddingInputStream.java / logPadSize.std.ts).
     #[test]
     fn padded_attachment_sizes_match_signal() {
-        assert_eq!(padded_attachment_size(0), 541);
-        assert_eq!(padded_attachment_size(1), 541);
-        assert_eq!(padded_attachment_size(541), 541);
-        assert_eq!(padded_attachment_size(542), 568);
-        assert_eq!(padded_attachment_size(1000), 1020);
-        assert_eq!(padded_attachment_size(10_000), 10_110);
+        assert_eq!(padded_attachment_size(0).unwrap(), 541);
+        assert_eq!(padded_attachment_size(1).unwrap(), 541);
+        assert_eq!(padded_attachment_size(541).unwrap(), 541);
+        assert_eq!(padded_attachment_size(542).unwrap(), 568);
+        assert_eq!(padded_attachment_size(1000).unwrap(), 1020);
+        assert_eq!(padded_attachment_size(10_000).unwrap(), 10_110);
     }
 
     // Detects: block-boundary or streaming bugs in AttachmentEncryptor compared to one-shot Signal AES-CBC + HMAC + SHA-256.
@@ -403,7 +422,7 @@ mod tests {
             let plaintext: Vec<u8> = (0..len).map(|i| (i * 31 + 7) as u8).collect();
 
             // Streaming with irregular chunk sizes (3, 13, 16, 257 bytes).
-            let mut enc = AttachmentEncryptor::new(len as u32);
+            let mut enc = AttachmentEncryptor::new(len as u32).unwrap();
             let mut streamed = Vec::new();
             let mut offset = 0;
             for step in [3usize, 13, 16, 257].into_iter().cycle() {
@@ -419,7 +438,7 @@ mod tests {
 
             // One-shot reference using signal_crypto directly with the generated key and IV.
             let iv = &streamed[..16];
-            let padded_len = padded_attachment_size(len as u32) as usize;
+            let padded_len = padded_attachment_size(len as u32).unwrap() as usize;
             let mut padded = plaintext.clone();
             padded.resize(padded_len, 0);
             let cbc = aes_256_cbc_encrypt(&padded, &finished.key[..32], iv).unwrap();
@@ -429,7 +448,7 @@ mod tests {
             let expected_digest = Sha256::digest(&expected).to_vec();
 
             assert_eq!(finished.key.len(), 64);
-            assert_eq!(streamed.len(), encrypted_attachment_size(len as u32) as usize);
+            assert_eq!(streamed.len(), encrypted_attachment_size(len as u32).unwrap() as usize);
             assert_eq!(finished.ciphertext_size as usize, streamed.len());
             assert_eq!(streamed, expected);
             assert_eq!(finished.digest, expected_digest);
@@ -438,5 +457,13 @@ mod tests {
                 plaintext
             );
         }
+    }
+
+    // Detects: u32 overflow / wraparound when attachment size approaches u32::MAX.
+    #[test]
+    fn rejects_u32_overflow_in_attachment_size() {
+        assert!(checked_encrypted_attachment_size(u32::MAX).is_err());
+        assert!(checked_encrypted_attachment_size(u32::MAX - 47).is_err());
+        assert!(checked_encrypted_attachment_size(100 * 1024 * 1024).is_ok());
     }
 }

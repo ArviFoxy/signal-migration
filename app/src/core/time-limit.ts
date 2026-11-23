@@ -31,7 +31,25 @@ export const REQUEST_TIME_LIMIT_S = 60;
 /** How long the migration server may take to answer one request. */
 export const SERVER_TIME_LIMIT_S = 30;
 
-/** `fetch`, given up after `seconds` with a NoAnswerError naming `party`. */
+function combineSignals(first: AbortSignal | null | undefined, second: AbortSignal): AbortSignal {
+  if (!first) return second;
+  if ('any' in AbortSignal && typeof AbortSignal.any === 'function') {
+    return AbortSignal.any([first, second]);
+  }
+  const combined = new AbortController();
+  const forward = (source: AbortSignal) => {
+    if (!combined.signal.aborted) combined.abort(source.reason);
+  };
+  if (first.aborted) forward(first);
+  else if (second.aborted) forward(second);
+  else {
+    first.addEventListener('abort', () => forward(first), { once: true });
+    second.addEventListener('abort', () => forward(second), { once: true });
+  }
+  return combined.signal;
+}
+
+/** `fetch`, given up after `seconds` with a NoAnswerError naming `party`. Composes any caller-supplied `init.signal`. */
 export function fetchWithTimeLimit(
   party: Party,
   seconds: number,
@@ -39,7 +57,32 @@ export function fetchWithTimeLimit(
   init: RequestInit = {},
 ): Promise<Response> {
   const controller = new AbortController();
-  return withTimeLimit(fetch(url, { ...init, signal: controller.signal }), seconds * 1000, () => {
+  const signal = combineSignals(init.signal, controller.signal);
+  return withTimeLimit(fetch(url, { ...init, signal }), seconds * 1000, () => {
+    controller.abort();
+    return new NoAnswerError(party, seconds);
+  });
+}
+
+/**
+ * Fetches `url` and runs `consume(response)` (for example reading `arrayBuffer()` or `json()`) under one shared
+ * deadline, aborting the underlying fetch if either response headers or body reading stall past `seconds`.
+ */
+export function withFetchTimeLimit<T>(
+  party: Party,
+  seconds: number,
+  url: string,
+  init: RequestInit,
+  consume: (response: Response) => Promise<T>,
+  fetchImpl: typeof fetch = (input, options) => fetch(input, options),
+): Promise<T> {
+  const controller = new AbortController();
+  const signal = combineSignals(init.signal, controller.signal);
+  const work = (async () => {
+    const response = await fetchImpl(url, { ...init, signal });
+    return consume(response);
+  })();
+  return withTimeLimit(work, seconds * 1000, () => {
     controller.abort();
     return new NoAnswerError(party, seconds);
   });

@@ -14,7 +14,12 @@
 
 import { toHex } from '../../core/bytes';
 import { serverHttpUrl } from '../../core/server';
-import { fetchWithTimeLimit, REQUEST_TIME_LIMIT_S, SERVER_TIME_LIMIT_S } from '../../core/time-limit';
+import {
+  fetchWithTimeLimit,
+  REQUEST_TIME_LIMIT_S,
+  SERVER_TIME_LIMIT_S,
+  withFetchTimeLimit,
+} from '../../core/time-limit';
 import { fromBinary } from '@bufbuild/protobuf';
 import { type StickerPack, StickerPackSchema } from '../../gen/Stickers_pb';
 import { loadSignalWasm } from '../../signal/wasm';
@@ -60,10 +65,17 @@ const fetchServer = (path: string, init?: RequestInit) =>
 
 /** The index on the server that served this page. */
 export const httpIndexBackend: IndexBackend = {
-  async read(from) {
-    const response = await fetchServer(`/v1/sticker-packs/index?from=${from}`);
-    if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
-    return new Uint8Array(await response.arrayBuffer());
+  read(from) {
+    return withFetchTimeLimit(
+      'The migration server',
+      SERVER_TIME_LIMIT_S,
+      serverHttpUrl(`/v1/sticker-packs/index?from=${from}`),
+      {},
+      async (response) => {
+        if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
+        return new Uint8Array(await response.arrayBuffer());
+      },
+    );
   },
   async add(entry) {
     const response = await fetchServer('/v1/sticker-packs/index', {
@@ -77,26 +89,23 @@ export const httpIndexBackend: IndexBackend = {
 };
 
 /** A file of a pack on Signal's public CDN; null when the CDN has no such file. */
-async function fromPublicCdn(packId: Uint8Array, file: string): Promise<Response | null> {
-  const response = await fetchWithTimeLimit(
+function fromPublicCdn(packId: Uint8Array, file: string): Promise<Uint8Array | null> {
+  return withFetchTimeLimit(
     'Signal',
     REQUEST_TIME_LIMIT_S,
     `${PUBLIC_CDN}/stickers/${toHex(packId)}/${file}`,
+    {},
+    async (response) => {
+      if (response.status === 403 || response.status === 404) return null;
+      if (!response.ok) throw new Error(`Signal's CDN answered ${response.status} for a file of a sticker pack`);
+      return new Uint8Array(await response.arrayBuffer());
+    },
   );
-  if (response.status === 403 || response.status === 404) return null;
-  if (!response.ok) throw new Error(`Signal's CDN answered ${response.status} for a file of a sticker pack`);
-  return response;
 }
 
-export const manifestFromPublicCdn: ManifestSource = async (packId) => {
-  const response = await fromPublicCdn(packId, 'manifest.proto');
-  return response && new Uint8Array(await response.arrayBuffer());
-};
+export const manifestFromPublicCdn: ManifestSource = (packId) => fromPublicCdn(packId, 'manifest.proto');
 
-export const stickerFromPublicCdn: StickerSource = async (packId, number) => {
-  const response = await fromPublicCdn(packId, `full/${number}`);
-  return response && new Uint8Array(await response.arrayBuffer());
-};
+export const stickerFromPublicCdn: StickerSource = (packId, number) => fromPublicCdn(packId, `full/${number}`);
 
 /** Whether the manifest decrypts and parses with `packKey` (the decryption checks its MAC). */
 async function manifestOpens(manifest: Uint8Array, packKey: Uint8Array): Promise<boolean> {

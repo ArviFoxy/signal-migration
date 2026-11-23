@@ -19,10 +19,11 @@ fn error(reason: impl std::fmt::Display) -> JsError {
 }
 
 fn time_from_unix_seconds(unix_seconds: f64) -> Result<SystemTime, JsError> {
-    if !unix_seconds.is_finite() || unix_seconds < 0.0 {
-        return Err(error("the time of the check is not a time after 1970"));
-    }
-    Ok(SystemTime::UNIX_EPOCH + Duration::from_secs_f64(unix_seconds))
+    let duration = Duration::try_from_secs_f64(unix_seconds)
+        .map_err(|_| error("the time of the check is not a valid time after 1970"))?;
+    SystemTime::UNIX_EPOCH
+        .checked_add(duration)
+        .ok_or_else(|| error("the time of the check is out of range"))
 }
 
 /// The ID of the enclave code that Signal's contact discovery runs in production.
@@ -77,5 +78,48 @@ impl EnclaveConnection {
     /// Decrypts a message from the enclave.
     pub fn receive(&mut self, encrypted: &[u8]) -> Result<Vec<u8>, JsError> {
         self.0.recv(encrypted).map_err(error)
+    }
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use super::*;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    #[wasm_bindgen_test]
+    fn rejects_huge_and_invalid_unix_timestamps_without_panicking() {
+        assert!(time_from_unix_seconds(1e30).is_err());
+        assert!(time_from_unix_seconds(f64::NAN).is_err());
+        assert!(time_from_unix_seconds(f64::INFINITY).is_err());
+        assert!(time_from_unix_seconds(-1.0).is_err());
+        assert!(time_from_unix_seconds(1_700_000_000.0).is_ok());
+    }
+
+    #[wasm_bindgen_test]
+    fn wasi_shims_handle_null_and_zero_length_safely() {
+        unsafe {
+            assert_eq!(
+                system_calls::__imported_wasi_snapshot_preview1_random_get(core::ptr::null_mut(), 0),
+                0
+            );
+            assert_eq!(
+                system_calls::__imported_wasi_snapshot_preview1_random_get(core::ptr::null_mut(), 4),
+                28
+            );
+            assert_eq!(
+                system_calls::__imported_wasi_snapshot_preview1_clock_time_get(0, 0, core::ptr::null_mut()),
+                28
+            );
+            let mut written = 99usize;
+            assert_eq!(
+                system_calls::__imported_wasi_snapshot_preview1_fd_write(99, core::ptr::null(), 0, &mut written),
+                8
+            );
+            assert_eq!(
+                system_calls::__imported_wasi_snapshot_preview1_fd_write(2, core::ptr::null(), 0, &mut written),
+                0
+            );
+            assert_eq!(written, 0);
+        }
     }
 }
