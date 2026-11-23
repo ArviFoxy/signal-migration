@@ -1,9 +1,11 @@
 # Telegram to Signal Migration 🔒🦊
 
 A web app for moving data from Telegram to Signal: sticker packs, Telegram friends who are on Signal, and Saved
-Messages (copied into Signal's Note to Self). Everything runs in the browser. The static frontend can be built and
-hosted on GitHub Pages with signed build provenance, while the Rust server relays encrypted traffic to Signal, keeps a
-shared index of uploaded sticker packs, and optionally serves the static files itself.
+Messages (copied into Signal's Note to Self). Everything runs in the browser, and the Rust server relays encrypted
+traffic to Signal and keeps a shared index of uploaded sticker packs. The web app does not trust the backend server,
+treating it as a potential attacker for confidentiality and integrity. Instead, the static frontend is built and
+attested by GitHub Actions and hosted on GitHub Pages, proving that the delivered code matches this repository without
+requiring the backend server to be trusted or attested.
 
 ## Parts
 
@@ -180,20 +182,10 @@ When the migration finishes, the app unlinks the Signal device, signs out of Tel
 
 ## Verified builds
 
-The browser app does not assume the backend server is honest or uncompromised; it treats the server as a potential
-attacker with respect to confidentiality and integrity (excluding availability and the traffic metadata listed above). Even if the backend server is
-malicious, the browser app enforces its security boundaries itself: it connects to Telegram directly over MTProto, runs
-its own TLS session to Signal inside the relay pinned to Signal's root certificates, verifies Signal's contact
-discovery enclave attestation before encrypting phone numbers, and decrypts and visually compares every listed sticker
-pack copy against the original from Telegram before installing it. The server also supplies `/v1/config` (the Telegram
-client `api_id`, `api_hash`, and `testDc`), which can control which Telegram client app name appears in Active Sessions
-or direct logins to Telegram's test servers, but does not let the server read or intercept Telegram traffic or
-credentials.
-
-Because the browser code itself enforces these guarantees, the main way a malicious backend server could defeat them is
-by serving modified JavaScript or WebAssembly. Attesting the static frontend and hosting it on GitHub Pages removes the
-backend server from code delivery, so the backend server does not need to be attested for users to rely on those
-guarantees.
+The web app does not assume the backend server is honest or uncompromised; it enforces confidentiality and integrity in
+the browser itself (outside availability and the traffic metadata described above). A malicious server could only break
+those guarantees by serving modified code, so hosting the static frontend on GitHub Pages with signed build provenance
+removes the server from code delivery without requiring the server itself to be attested.
 
 Publishing a `v*` release triggers `.github/workflows/release.yml`, which builds the web app fresh from source on a
 GitHub-hosted runner (without reusing cached build outputs), signs a single SLSA v1.0 build provenance attestation
