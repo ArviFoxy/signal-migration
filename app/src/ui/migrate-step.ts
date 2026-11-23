@@ -5,9 +5,30 @@
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { MigrationRunStatus } from '../app/workflow';
-import type { PackEntry, PackState } from '../kinds/stickers/migration';
+import type { PackEntry, PackState, StickerMigration } from '../kinds/stickers/migration';
 import { conversionDescription, formatDuration, MigrationView } from '../kinds/stickers/ui/view';
-import { icons, primaryButton, progressBar, secondaryButton, stepHeader, stickyBar, stickyFooter } from './layout';
+import {
+  assertNever,
+  icons,
+  primaryButton,
+  progressBar,
+  secondaryButton,
+  stepHeader,
+  stickyBar,
+  stickyFooter,
+} from './layout';
+
+export type MigrateFriends =
+  { kind: 'looking' } | { kind: 'failed' } | { kind: 'ready'; toAdd: number; added: number | null };
+
+export type MigrateSaved = { kind: 'reading' } | { kind: 'failed' } | { kind: 'ready'; toCopy: number; copied: number };
+
+type MigrateStepView =
+  | { kind: 'finished'; migration: StickerMigration | null }
+  | { kind: 'ending'; migration: StickerMigration | null }
+  | { kind: 'without-packs' }
+  | { kind: 'reading-packs'; failed: boolean }
+  | { kind: 'packs'; migration: StickerMigration };
 
 type Filter = 'all' | 'active' | 'waiting' | 'done' | 'failed';
 
@@ -81,9 +102,9 @@ export class MigrateStep extends MigrationView {
   /** Whether sticker packs are among what the user chose to move. */
   @property({ attribute: false }) stickers = true;
   /** The friends chosen to be added and how many the run has added, once it has; null when friends are not chosen. */
-  @property({ attribute: false }) friends: { toAdd: number; added: number | null } | null = null;
-  /** The saved messages to copy and how many of them are in Signal, or 'reading' after a reload; null if not chosen. */
-  @property({ attribute: false }) saved: { toCopy: number; copied: number } | 'reading' | null = null;
+  @property({ attribute: false }) friends: MigrateFriends | null = null;
+  /** The saved messages to copy and how many of them are in Signal, or loading/failed; null if not chosen. */
+  @property({ attribute: false }) saved: MigrateSaved | null = null;
   @state() private filter: Filter = 'all';
   /** Where the current pack's row is: in the list's view, or above or below it. */
   @state() private currentIs: 'in-view' | 'above' | 'below' = 'in-view';
@@ -273,26 +294,29 @@ export class MigrateStep extends MigrationView {
   /** The footer's actions; the footer is always there, so that nothing moves when the migration ends. */
   private actions(failedPacks: number) {
     const run = this.run;
-    const jump = html`<span></span>`;
+    const spacer = html`<span></span>`;
     if (run.finished) {
-      return html`${jump}<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>
+      return html`${spacer}<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>
           Start over
         </button>`;
     }
     if (run.ending) {
-      return html`${jump}<button type="button" class=${primaryButton} disabled>Finishing…</button>`;
+      return html`${spacer}<button type="button" class=${primaryButton} disabled>Finishing…</button>`;
     }
     if (!run.ended) {
-      return html`${jump}<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
+      return html`${spacer}<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
           Back to start
         </button>`;
     }
+    const back = html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
+      Back to start
+    </button>`;
     const retry = run.canRetry
       ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
           ${failedPacks > 0 ? 'Retry failed packs' : 'Try again'}
         </button>`
       : nothing;
-    return html`${jump}<span class="flex gap-3"
+    return html`${back}<span class="flex gap-3"
         >${retry}<button type="button" class=${primaryButton} @click=${() => this.emit('finish')}>Finish</button></span
       >`;
   }
@@ -330,15 +354,29 @@ export class MigrateStep extends MigrationView {
   private friendsBlock() {
     const friends = this.friends;
     if (!friends) return nothing;
-    const count = `${friends.toAdd} friend${friends.toAdd === 1 ? '' : 's'}`;
-    const text =
-      friends.toAdd === 0
-        ? 'Nobody to add'
-        : friends.added !== null
-          ? `${count} added to your Signal contacts`
-          : this.run.failed
-            ? `${count} not added to your Signal contacts yet`
-            : `Adding ${count} to your Signal contacts…`;
+    let text: string;
+    switch (friends.kind) {
+      case 'looking':
+        text = 'Looking for your friends…';
+        break;
+      case 'failed':
+        text = 'Could not look up your friends';
+        break;
+      case 'ready': {
+        const count = `${friends.toAdd} friend${friends.toAdd === 1 ? '' : 's'}`;
+        text =
+          friends.toAdd === 0
+            ? 'Nobody to add'
+            : friends.added !== null
+              ? `${count} added to your Signal contacts`
+              : this.run.failed
+                ? `${count} not added to your Signal contacts yet`
+                : `Adding ${count} to your Signal contacts…`;
+        break;
+      }
+      default:
+        return assertNever(friends);
+    }
     return html`<section
       aria-label="Friends"
       class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
@@ -352,69 +390,58 @@ export class MigrateStep extends MigrationView {
   private savedBlock() {
     const saved = this.saved;
     if (!saved) return nothing;
-    if (saved === 'reading') {
-      return html`<section
-        aria-label="Saved Messages"
-        class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
-      >
-        <span class="text-sm font-semibold">Saved Messages</span>
-        <span class="text-sm text-muted">Reading your Saved Messages…</span>
-      </section>`;
+    switch (saved.kind) {
+      case 'reading':
+        return html`<section
+          aria-label="Saved Messages"
+          class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+        >
+          <span class="text-sm font-semibold">Saved Messages</span>
+          <span class="text-sm text-muted">Reading your Saved Messages…</span>
+        </section>`;
+      case 'failed':
+        return html`<section
+          aria-label="Saved Messages"
+          class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+        >
+          <span class="text-sm font-semibold">Saved Messages</span>
+          <span class="text-sm text-muted">Could not read your Saved Messages</span>
+        </section>`;
+      case 'ready': {
+        const count = `${saved.toCopy.toLocaleString('en')} message${saved.toCopy === 1 ? '' : 's'}`;
+        const done = saved.copied >= saved.toCopy;
+        const text =
+          saved.toCopy === 0
+            ? 'Nothing to copy'
+            : done
+              ? `${count} copied to Note to Self`
+              : `${saved.copied.toLocaleString('en')} of ${count} copied to Note to Self`;
+        return html`<section
+          aria-label="Saved Messages"
+          class="flex flex-col gap-2 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+        >
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-sm font-semibold">Saved Messages</span>
+            <span class="text-sm text-muted tabular-nums">${text}</span>
+          </div>
+          ${saved.toCopy === 0 || done ? nothing : progressBar('Saved messages copied', saved.copied, saved.toCopy)}
+        </section>`;
+      }
+      default:
+        return assertNever(saved);
     }
-    const count = `${saved.toCopy.toLocaleString('en')} message${saved.toCopy === 1 ? '' : 's'}`;
-    const done = saved.copied >= saved.toCopy;
-    const text =
-      saved.toCopy === 0
-        ? 'Nothing to copy'
-        : done
-          ? `${count} copied to Note to Self`
-          : `${saved.copied.toLocaleString('en')} of ${count} copied to Note to Self`;
-    return html`<section
-      aria-label="Saved Messages"
-      class="flex flex-col gap-2 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
-    >
-      <div class="flex items-center justify-between gap-3">
-        <span class="text-sm font-semibold">Saved Messages</span>
-        <span class="text-sm text-muted tabular-nums">${text}</span>
-      </div>
-      ${saved.toCopy === 0 || done ? nothing : progressBar('Saved messages copied', saved.copied, saved.toCopy)}
-    </section>`;
   }
 
-  /** The migration without sticker packs: friends, saved messages or both. */
-  private withoutPacks() {
-    const run = this.run;
-    const title = run.finished ? 'Done and logged out' : run.ending ? 'Migration finished' : 'Migrating';
-    const description = run.finished
-      ? 'Logged out of Telegram and Signal. Nothing is kept in your browser.'
-      : run.ending
-        ? 'Logging out of Telegram and Signal…'
-        : 'Keep this tab open until it finishes.';
-    const action = run.finished
-      ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('restart')}>Start over</button>`
-      : run.ending
-        ? html`<button type="button" class=${primaryButton} disabled>Finishing…</button>`
-        : run.failed
-          ? html`<button type="button" class=${primaryButton} @click=${() => this.emit('retry')}>Try again</button>`
-          : html`<button type="button" class=${secondaryButton} @click=${() => this.emit('back-to-start')}>
-              Back to start
-            </button>`;
-    return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
-    ${stickyFooter(html`<span></span>${action}`)}`;
+  private view(): MigrateStepView {
+    const migration = this.stickers ? this.migration : null;
+    if (this.run.finished) return { kind: 'finished', migration };
+    if (this.run.ending) return { kind: 'ending', migration };
+    if (!this.stickers) return { kind: 'without-packs' };
+    if (!migration) return { kind: 'reading-packs', failed: this.run.failed };
+    return { kind: 'packs', migration };
   }
 
-  render() {
-    if (!this.stickers) return this.withoutPacks();
-    const run = this.run;
-    const migration = this.migration;
-    if (!migration)
-      return run.finished
-        ? stepHeader(
-            this.position,
-            'Done and logged out',
-            'Logged out of Telegram and Signal. Nothing is kept in your browser.',
-          )
-        : stepHeader(this.position, 'Migrating', 'Reading your packs from Telegram…');
+  private renderWithPacks(migration: StickerMigration, title: string, description: string) {
     const selected = migration.selected;
     const stickersEnded = migration.phase === 'done' || migration.phase === 'stopped';
     const done = selected.filter((entry) => entry.state === 'in-signal').length;
@@ -433,16 +460,6 @@ export class MigrateStep extends MigrationView {
       { id: 'done', label: 'Installed' },
       { id: 'failed', label: 'Failed' },
     ];
-    const description = run.finished
-      ? 'Logged out of Telegram and Signal. Nothing is kept in your browser.'
-      : run.ending
-        ? 'Logging out of Telegram and Signal…'
-        : 'Keep this tab open until the uploads finish. After a reload, it continues where it stopped.';
-    const title = run.finished
-      ? 'Done and logged out'
-      : run.completed || run.ending
-        ? 'Migration finished'
-        : 'Migrating';
 
     return html`${stepHeader(this.position, title, description)}
     ${stickyBar(
@@ -492,5 +509,45 @@ export class MigrateStep extends MigrationView {
           </div>`
     }
     ${stickyFooter(this.actions(failed))}`;
+  }
+
+  render() {
+    const view = this.view();
+    switch (view.kind) {
+      case 'finished': {
+        const title = 'Done and logged out';
+        const description = 'Logged out of Telegram and Signal. Nothing is kept in your browser.';
+        if (view.migration) return this.renderWithPacks(view.migration, title, description);
+        return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
+        ${stickyFooter(this.actions(0))}`;
+      }
+      case 'ending': {
+        const title = 'Migration finished';
+        const description = 'Logging out of Telegram and Signal…';
+        if (view.migration) return this.renderWithPacks(view.migration, title, description);
+        return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
+        ${stickyFooter(this.actions(0))}`;
+      }
+      case 'without-packs':
+        return html`${stepHeader(this.position, 'Migrating', 'Keep this tab open until it finishes.')}
+        ${this.friendsBlock()} ${this.savedBlock()} ${stickyFooter(this.actions(0))}`;
+      case 'reading-packs':
+        return html`${stepHeader(
+          this.position,
+          'Migrating',
+          view.failed
+            ? 'The migration stopped before your packs finished reading.'
+            : 'Reading your packs from Telegram…',
+        )}
+        ${this.friendsBlock()} ${this.savedBlock()} ${stickyFooter(this.actions(0))}`;
+      case 'packs':
+        return this.renderWithPacks(
+          view.migration,
+          this.run.completed ? 'Migration finished' : 'Migrating',
+          'Keep this tab open until the uploads finish. After a reload, it continues where it stopped.',
+        );
+      default:
+        return assertNever(view);
+    }
   }
 }

@@ -34,10 +34,11 @@ export class PhoneInput extends LightElement {
     this.emit('phone', this.value);
   }
 
-  #onInput(event: InputEvent): void {
+  #onInput(event: Event): void {
     const input = event.target as HTMLInputElement;
+    const inputType = 'inputType' in event && typeof event.inputType === 'string' ? event.inputType : '';
     // Formatting while deleting would put back the space or bracket just deleted.
-    if (event.inputType.startsWith('delete')) {
+    if (inputType.startsWith('delete')) {
       this.text = input.value;
     } else {
       const field = typed(this.country, input.value);
@@ -101,7 +102,7 @@ export class PhoneInput extends LightElement {
         ?disabled=${this.disabled}
         .value=${this.text}
         placeholder=${exampleFor(this.country)}
-        @input=${(event: InputEvent) => this.#onInput(event)}
+        @input=${(event: Event) => this.#onInput(event)}
         class="min-w-0 flex-1 rounded-r-[10px] bg-transparent px-3.5 text-[15px] tracking-wide placeholder:text-line-strong focus:outline-none"
       />
     </div>`;

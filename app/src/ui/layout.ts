@@ -51,7 +51,13 @@ export const primaryButton =
   'inline-flex min-h-11 cursor-pointer items-center justify-center rounded-[10px] bg-accent px-6 text-[15px] font-semibold text-white hover:bg-accent-strong disabled:cursor-default disabled:opacity-50';
 export const secondaryButton =
   'inline-flex min-h-11 cursor-pointer items-center justify-center rounded-[10px] bg-white px-[22px] text-[15px] font-semibold text-ink ring-1 ring-line-strong ring-inset hover:bg-panel disabled:cursor-default disabled:opacity-50';
-export const linkButton = 'cursor-pointer text-sm font-medium text-accent underline hover:text-accent-strong';
+export const linkButton =
+  'cursor-pointer text-sm font-medium text-accent underline hover:text-accent-strong disabled:cursor-default disabled:opacity-50';
+
+/** Compile-time exhaustiveness guard for discriminated UI view-models. */
+export function assertNever(value: never): never {
+  throw new Error(`Unexpected view variant: ${JSON.stringify(value)}`);
+}
 
 /** The eyebrow, title and description at the top of a step. `position` is null for a screen outside the step list. */
 export function stepHeader(
