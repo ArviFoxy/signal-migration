@@ -1,7 +1,8 @@
+import '../../wasm';
 import { fromBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 import { StickerPackSchema } from '../../../src/gen/Stickers_pb';
-import { manifestFor, multipartBody, type UploadFormItem } from '../../../src/kinds/stickers/upload';
+import { manifestFor, multipartBody, type UploadFormItem, uploadStickerPack } from '../../../src/kinds/stickers/upload';
 
 const item: UploadFormItem = {
   id: 0,
@@ -75,5 +76,54 @@ describe('manifestFor', () => {
       [1, '😾'],
     ]);
     expect(manifest.cover?.id).toBe(0);
+  });
+});
+
+describe('uploadStickerPack CDN retries', () => {
+  // Detects: a single transient 429 or 503 from Signal CDN aborting a 200-sticker pack upload instead of retrying.
+  it('retries transient 429 and 503 CDN POST responses', async () => {
+    const form = {
+      packId: '0123456789abcdef0123456789abcdef',
+      manifest: { ...item, key: 'stickers/0123456789abcdef0123456789abcdef/manifest.proto' },
+      stickers: [item],
+    };
+    const chat = {
+      async request() {
+        return {
+          status: 200,
+          message: 'OK',
+          headers: [],
+          body: new TextEncoder().encode(JSON.stringify(form)),
+        };
+      },
+    };
+    let stickerPosts = 0;
+    const https = async (_host: string, _method: string, _path: string, _headers?: string[], body?: Uint8Array) => {
+      const text = new TextDecoder().decode(body);
+      if (text.includes('full/0')) {
+        stickerPosts++;
+        if (stickerPosts === 1) {
+          return {
+            status: 429,
+            header: (name: string) => (name.toLowerCase() === 'retry-after' ? '0' : undefined),
+            body: new Uint8Array(),
+          };
+        }
+        if (stickerPosts === 2) {
+          return { status: 503, header: () => undefined, body: new Uint8Array() };
+        }
+      }
+      return { status: 204, header: () => undefined, body: new Uint8Array() };
+    };
+
+    const packId = await uploadStickerPack(
+      chat,
+      { title: 'Cats', stickers: [{ image: new Uint8Array([1, 2, 3]), emoji: '😺' }] },
+      new Uint8Array(32).fill(7),
+      undefined,
+      https,
+    );
+    expect(packId).toHaveLength(16);
+    expect(stickerPosts).toBe(3);
   });
 });

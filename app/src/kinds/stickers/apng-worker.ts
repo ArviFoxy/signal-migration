@@ -22,6 +22,10 @@ type CompareRequest = { id: number; compare: { key: number; frames: ArrayBuffer[
 /** What the worker answers to an open request. */
 export type OpenedPng = { key: number; width: number; height: number; delays: number[]; frameCount: number };
 
+const MAX_PNG_SIZE = 512;
+const MAX_PNG_FRAMES = 300;
+const MAX_DECODED_RGBA_BYTES = 160 * 1024 * 1024;
+
 const opened = new Map<number, { frames: ArrayBuffer[]; width: number; height: number }>();
 
 self.onmessage = (event: MessageEvent<EncodeRequest | OpenRequest | CompareRequest>) => {
@@ -30,8 +34,26 @@ self.onmessage = (event: MessageEvent<EncodeRequest | OpenRequest | CompareReque
     (self as unknown as Worker).postMessage({ id: request.id, ...message }, transfer);
   try {
     if ('open' in request) {
-      const image = UPNG.decode(request.open);
-      const frames = UPNG.toRGBA8(image);
+      let image: ReturnType<typeof UPNG.decode>;
+      let frames: ArrayBuffer[];
+      try {
+        image = UPNG.decode(request.open);
+        const frameCount = Math.max(1, image.frames.length);
+        if (
+          image.width < 1 ||
+          image.height < 1 ||
+          image.width > MAX_PNG_SIZE ||
+          image.height > MAX_PNG_SIZE ||
+          frameCount > MAX_PNG_FRAMES ||
+          image.width * image.height * 4 * frameCount > MAX_DECODED_RGBA_BYTES
+        ) {
+          return reply({ result: null });
+        }
+        frames = UPNG.toRGBA8(image);
+      } catch {
+        // An untrusted PNG from the index that fails to decode is simply rejected as not a faithful copy.
+        return reply({ result: null });
+      }
       opened.set(request.id, { frames, width: image.width, height: image.height });
       const result: OpenedPng = {
         key: request.id,

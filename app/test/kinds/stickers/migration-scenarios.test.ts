@@ -578,3 +578,84 @@ describe('cancellation', () => {
     expect(await alice.installedTitles()).toEqual(['A', 'B']);
   });
 });
+
+describe('selection, retry, and account reset edge cases', () => {
+  // Detects: setSelected allowing an empty (0-sticker) Telegram pack to be selected and later crash upload.
+  it('does not allow selecting a pack with zero stickers', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('Empty', 0), world.pack('A')]);
+    const page = alice.openPage();
+    await page.readTelegram();
+    expect(page.entry('Empty').selected).toBe(false);
+    page.migration.setSelected(page.entry('Empty'), true);
+    expect(page.entry('Empty').selected).toBe(false);
+  });
+
+  // Detects: retryFailed() overwriting a failed index-install pack's state to 'to-upload' instead of 'available'.
+  it('preserves available state on retryFailed for a pack planned for install from the index', async () => {
+    const world = new StickerWorld();
+    const packA = world.pack('A');
+    const bob = world.user([packA]);
+    await bob.visit(); // Bob uploads pack A to the index.
+
+    const alice = world.user([packA]);
+    const page = alice.openPage();
+    await page.readTelegram();
+    await page.linkSignal();
+    expect(page.entry('A').state).toBe('available');
+
+    // Trigger failure via alice's telegram failing once during run:
+    const brokenTelegram = {
+      readPacks: (onProgress: (d: number, t: number) => void) => alice.stickers.readPacks(onProgress),
+      readFile: async () => {
+        throw new Error('temporary network drop');
+      },
+    };
+    await page.migration.run(page.account!, brokenTelegram);
+    expect(page.entry('A').state).toBe('failed');
+    page.migration.retryFailed();
+    expect(page.entry('A').state).toBe('available');
+  });
+
+  // Detects: readSignal leaving stale 'in-signal' state from an earlier Signal account when re-reading another account.
+  it('resets stale in-signal entries when readSignal reads a different Signal account', async () => {
+    const world = new StickerWorld();
+    const packA = world.pack('A');
+    const alice = world.user([packA]);
+    const page = await alice.visit();
+    expect(page.entry('A').state).toBe('in-signal');
+
+    // Switch to a brand new Signal account that does NOT have pack A installed.
+    const bob = world.user([packA]);
+    const bobAccount = bob.linkDevice();
+    await page.migration.readSignal(bobAccount);
+    expect(page.entry('A').state).toBe('to-upload');
+    expect(page.entry('A').packId).toBeNull();
+  });
+
+  // Detects: deselecting a pack after a failed/cancelled run leaving it in uploadProgress.total forever.
+  it('reconciles planned uploads with currently selected packs on a subsequent run', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const page = alice.openPage();
+    await page.readTelegram();
+    await page.linkSignal();
+
+    const failB = {
+      readPacks: (onProgress: (d: number, t: number) => void) => alice.stickers.readPacks(onProgress),
+      async readFile(fileId: number) {
+        const bytes = await alice.stickers.readFile(fileId);
+        if (new TextDecoder().decode(bytes).includes(' of B ')) throw new Error('boom');
+        return bytes;
+      },
+    };
+    await page.migration.run(page.account!, failB);
+    expect(page.entry('B').state).toBe('failed');
+    expect(page.migration.uploadProgress).toEqual({ done: 1, total: 2 });
+
+    // User deselects B and runs again: uploadProgress must reflect only selected packs (1/1).
+    page.migration.setSelected(page.entry('B'), false);
+    await page.migration.run(page.account!, alice.stickers);
+    expect(page.migration.uploadProgress).toEqual({ done: 1, total: 1 });
+  });
+});

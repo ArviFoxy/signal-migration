@@ -50,27 +50,27 @@ export type AddResult = 'added' | 'busy';
 /** The index server's three operations. */
 export interface IndexBackend {
   /** Entries from number `from` on, concatenated; at most the server's page size. */
-  read(from: number): Promise<Uint8Array>;
+  read(from: number, cancel?: AbortSignal): Promise<Uint8Array>;
   add(entry: Uint8Array): Promise<AddResult>;
 }
 
 /** Reads a pack's encrypted manifest from Signal's CDN; null when the CDN has no such pack. */
-export type ManifestSource = (packId: Uint8Array) => Promise<Uint8Array | null>;
+export type ManifestSource = (packId: Uint8Array, cancel?: AbortSignal) => Promise<Uint8Array | null>;
 
 /** Reads one encrypted sticker file of a pack from Signal's CDN; null when the CDN has no such file. */
-export type StickerSource = (packId: Uint8Array, number: number) => Promise<Uint8Array | null>;
+export type StickerSource = (packId: Uint8Array, number: number, cancel?: AbortSignal) => Promise<Uint8Array | null>;
 
 const fetchServer = (path: string, init?: RequestInit) =>
   fetchWithTimeLimit('The migration server', SERVER_TIME_LIMIT_S, serverHttpUrl(path), init);
 
 /** The index on the server that served this page. */
 export const httpIndexBackend: IndexBackend = {
-  read(from) {
+  read(from, cancel) {
     return withFetchTimeLimit(
       'The migration server',
       SERVER_TIME_LIMIT_S,
       serverHttpUrl(`/v1/sticker-packs/index?from=${from}`),
-      {},
+      cancel ? { signal: cancel } : {},
       async (response) => {
         if (!response.ok) throw new Error(`reading the sticker pack index answered ${response.status}`);
         return new Uint8Array(await response.arrayBuffer());
@@ -89,12 +89,12 @@ export const httpIndexBackend: IndexBackend = {
 };
 
 /** A file of a pack on Signal's public CDN; null when the CDN has no such file. */
-function fromPublicCdn(packId: Uint8Array, file: string): Promise<Uint8Array | null> {
+function fromPublicCdn(packId: Uint8Array, file: string, cancel?: AbortSignal): Promise<Uint8Array | null> {
   return withFetchTimeLimit(
     'Signal',
     REQUEST_TIME_LIMIT_S,
     `${PUBLIC_CDN}/stickers/${toHex(packId)}/${file}`,
-    {},
+    cancel ? { signal: cancel } : {},
     async (response) => {
       if (response.status === 403 || response.status === 404) return null;
       if (!response.ok) throw new Error(`Signal's CDN answered ${response.status} for a file of a sticker pack`);
@@ -103,9 +103,11 @@ function fromPublicCdn(packId: Uint8Array, file: string): Promise<Uint8Array | n
   );
 }
 
-export const manifestFromPublicCdn: ManifestSource = (packId) => fromPublicCdn(packId, 'manifest.proto');
+export const manifestFromPublicCdn: ManifestSource = (packId, cancel) =>
+  fromPublicCdn(packId, 'manifest.proto', cancel);
 
-export const stickerFromPublicCdn: StickerSource = (packId, number) => fromPublicCdn(packId, `full/${number}`);
+export const stickerFromPublicCdn: StickerSource = (packId, number, cancel) =>
+  fromPublicCdn(packId, `full/${number}`, cancel);
 
 /** Whether the manifest decrypts and parses with `packKey` (the decryption checks its MAC). */
 async function manifestOpens(manifest: Uint8Array, packKey: Uint8Array): Promise<boolean> {
@@ -141,9 +143,10 @@ export class PackIndex {
   }
 
   /** Reads the entries added since the last read. */
-  async refresh(): Promise<void> {
+  async refresh(cancel?: AbortSignal): Promise<void> {
     for (;;) {
-      const body = await this.#backend.read(this.#entryCount);
+      cancel?.throwIfAborted();
+      const body = await this.#backend.read(this.#entryCount, cancel);
       const count = Math.floor(body.length / ENTRY_LENGTH);
       for (let i = 0; i < count; i++) {
         const entry = body.subarray(i * ENTRY_LENGTH, (i + 1) * ENTRY_LENGTH);
@@ -161,8 +164,8 @@ export class PackIndex {
   }
 
   /** A pack's manifest from Signal's CDN, decrypted with `packKey`; null when it is missing or does not decrypt. */
-  async manifest(packId: Uint8Array, packKey: Uint8Array): Promise<StickerPack | null> {
-    const encrypted = await this.#manifests(packId);
+  async manifest(packId: Uint8Array, packKey: Uint8Array, cancel?: AbortSignal): Promise<StickerPack | null> {
+    const encrypted = await this.#manifests(packId, cancel);
     if (!encrypted) return null;
     await loadSignalWasm();
     try {
@@ -188,10 +191,12 @@ export class PackIndex {
   async *#copiesToCompare(
     lookupKey: Uint8Array,
     packKey: Uint8Array,
+    cancel?: AbortSignal,
   ): AsyncGenerator<{ packId: Uint8Array; manifest: Uint8Array }> {
     const listed = this.candidates(lookupKey);
     const usable = async (packId: Uint8Array) => {
-      const manifest = await this.#manifests(packId);
+      cancel?.throwIfAborted();
+      const manifest = await this.#manifests(packId, cancel);
       return manifest && (await manifestOpens(manifest, packKey)) ? { packId, manifest } : null;
     };
     let found = 0;
@@ -223,15 +228,18 @@ export class PackIndex {
     pack: { lookupKey: Uint8Array; packKey: Uint8Array; original: OriginalPack },
     pictures: PictureComparison,
     onProgress: (done: number, total: number) => void = () => undefined,
+    cancel?: AbortSignal,
   ): Promise<Uint8Array | null> {
+    cancel?.throwIfAborted();
     await loadSignalWasm();
-    for await (const copy of this.#copiesToCompare(pack.lookupKey, pack.packKey)) {
+    for await (const copy of this.#copiesToCompare(pack.lookupKey, pack.packKey, cancel)) {
+      cancel?.throwIfAborted();
       const key = `${toHex(copy.packId)}:${toHex(pack.packKey)}`;
       let faithful = this.#compared.get(key);
       if (faithful === undefined) {
         const files = { manifest: async () => copy.manifest, sticker: this.#stickers };
         onProgress(0, pack.original.stickers.length);
-        faithful = await isFaithfulCopy(copy.packId, pack.packKey, pack.original, files, pictures, onProgress);
+        faithful = await isFaithfulCopy(copy.packId, pack.packKey, pack.original, files, pictures, onProgress, cancel);
         this.#compared.set(key, faithful);
       }
       if (faithful) return copy.packId;

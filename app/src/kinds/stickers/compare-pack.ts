@@ -21,8 +21,8 @@ export type OriginalPack = { title: string; stickers: OriginalSticker[] };
 
 /** A pack's files on Signal's CDN, still encrypted. Each gives null when the CDN has no such file. */
 export type PackFiles = {
-  manifest(packId: Uint8Array): Promise<Uint8Array | null>;
-  sticker(packId: Uint8Array, number: number): Promise<Uint8Array | null>;
+  manifest(packId: Uint8Array, cancel?: AbortSignal): Promise<Uint8Array | null>;
+  sticker(packId: Uint8Array, number: number, cancel?: AbortSignal): Promise<Uint8Array | null>;
 };
 
 /** Says whether a converted file shows the same as the Telegram file it was made from. */
@@ -89,10 +89,14 @@ export async function isFaithfulCopy(
   files: PackFiles,
   pictures: PictureComparison,
   onProgress: (done: number, total: number) => void = () => undefined,
+  cancel?: AbortSignal,
 ): Promise<boolean> {
   if (original.stickers.length === 0) return false;
+  cancel?.throwIfAborted();
   await loadSignalWasm();
-  const encryptedManifest = await files.manifest(packId);
+  cancel?.throwIfAborted();
+  const encryptedManifest = await files.manifest(packId, cancel);
+  cancel?.throwIfAborted();
   const manifest = encryptedManifest && decrypted(encryptedManifest, packKey);
   if (!manifest || !manifestMatches(manifest, original)) return false;
 
@@ -101,10 +105,13 @@ export async function isFaithfulCopy(
   let different = false;
   const compareNext = async () => {
     while (!different && next < original.stickers.length) {
+      cancel?.throwIfAborted();
       const number = next++;
-      const encrypted = await files.sticker(packId, number);
+      const encrypted = await files.sticker(packId, number, cancel);
+      cancel?.throwIfAborted();
       const file = encrypted && decrypted(encrypted, packKey);
       if (!file || !(await stickerMatches(file, original.stickers[number], pictures))) different = true;
+      cancel?.throwIfAborted();
       onProgress(++done, original.stickers.length);
     }
   };

@@ -321,4 +321,50 @@ describe('adding the chosen friends to Signal', () => {
     const stored = (await (await user.phone.storage()).readContacts()).contacts;
     expect(stored.map((contact) => contact.phoneNumber).sort()).toEqual([MARA.phoneNumber, AIKO.phoneNumber].sort());
   });
+
+  // Detects: two Telegram accounts sharing the same Signal phone number / account producing duplicate Signal
+  // ContactRecords in one write.
+  it('deduplicates contacts sharing the same Signal account in contactsToAdd and addContacts', async () => {
+    const world = new World();
+    const user = new User(world);
+    const maraAlt = person(9, 'Mara Work', MARA.phoneNumber);
+    const dupSearch = await findFriends(
+      telegram(
+        [
+          { kind: 'person', userId: MARA.userId },
+          { kind: 'person', userId: maraAlt.userId },
+        ],
+        [MARA, maraAlt],
+      ),
+      user.linkDevice(),
+      [
+        finding({
+          [MARA.userId]: { phoneNumberIdentity: id(2), phoneNumber: MARA.phoneNumber },
+          [maraAlt.userId]: { phoneNumberIdentity: id(2), phoneNumber: MARA.phoneNumber },
+        }),
+      ],
+      () => undefined,
+    );
+
+    const toAdd = contactsToAdd(dupSearch, [MARA.userId, maraAlt.userId]);
+    expect(toAdd).toHaveLength(1);
+
+    // Even if duplicate contacts are passed directly to addContacts, only one record is written.
+    const direct = [
+      {
+        accountId: null,
+        phoneNumberIdentity: id(2),
+        phoneNumber: MARA.phoneNumber,
+        nickname: { given: 'Mara', family: '' },
+      },
+      {
+        accountId: null,
+        phoneNumberIdentity: id(2),
+        phoneNumber: MARA.phoneNumber,
+        nickname: { given: 'Mara Work', family: '' },
+      },
+    ];
+    expect(await addContacts(user.linkDevice(), direct)).toBe(1);
+    expect((await (await user.phone.storage()).readContacts()).contacts).toHaveLength(1);
+  });
 });

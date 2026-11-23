@@ -202,7 +202,7 @@ export class StickerMigration extends EventTarget {
   /** Packs this page uploaded in this visit that the index does not list yet. */
   #notListed = new Set<PackEntry>();
   #lookup: Promise<void> | null = null;
-  #previewsStopped = false;
+  #previewStop: AbortController | null = null;
   /** The packs each run set out to install from the index, and to upload; for progress across runs of a visit. */
   #plannedInstalls = new Set<PackEntry>();
   #plannedUploads = new Set<PackEntry>();
@@ -247,11 +247,13 @@ export class StickerMigration extends EventTarget {
   }
 
   /** Reads the list of installed Telegram packs. Their states stay "checking" until lookUpInIndex. */
-  async readTelegram(telegram: TelegramSource): Promise<void> {
+  async readTelegram(telegram: TelegramSource, cancel?: AbortSignal): Promise<void> {
     const packs = await telegram.readPacks((done, total) => {
+      if (cancel?.aborted) return;
       this.readProgress = { done, total };
       this.#changed();
-    });
+    }, cancel);
+    cancel?.throwIfAborted();
     this.entries = await Promise.all(
       packs.map(async (pack, rank) => ({
         pack,
@@ -271,13 +273,15 @@ export class StickerMigration extends EventTarget {
         error: null,
       })),
     );
+    cancel?.throwIfAborted();
     this.#changed();
   }
 
   /** Looks every pack up in the index: "available" when someone uploaded it, "to-upload" otherwise. Runs once. */
-  lookUpInIndex(): Promise<void> {
+  lookUpInIndex(cancel?: AbortSignal): Promise<void> {
     this.#lookup ??= (async () => {
-      await this.#services.index.refresh();
+      await this.#services.index.refresh(cancel);
+      cancel?.throwIfAborted();
       for (const entry of this.entries) {
         entry.state = this.#services.index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
       }
@@ -289,32 +293,52 @@ export class StickerMigration extends EventTarget {
   }
 
   /**
-   * Loads up to four preview images per pack, in Telegram order, until stopPreviews. A preview that fails to load is
-   * left out; the pack shows placeholders instead.
+   * Loads up to four preview images per pack, in Telegram order, until cancelled or stopPreviews. A preview that
+   * fails to load is left out; the pack shows placeholders instead.
    */
-  async loadPreviews(telegram: TelegramSource): Promise<void> {
-    await forEachConcurrently(this.entries, CONCURRENT_DOWNLOADS, async (entry) => {
-      if (this.#previewsStopped || entry.thumbnails.length > 0) return;
-      const previews = entry.pack.stickers
-        .flatMap((sticker) => (sticker.thumbnail ? [sticker.thumbnail] : []))
-        .slice(0, THUMBNAILS_PER_PACK);
-      try {
-        entry.thumbnails = await Promise.all(
-          previews.map(async (thumbnail) => ({
-            data: await telegram.readFile(thumbnail.fileId),
-            mimeType: thumbnail.mimeType,
-          })),
-        );
-      } catch {
-        entry.thumbnails = [];
-      }
-      this.#changed();
-    });
+  async loadPreviews(telegram: TelegramSource, cancel?: AbortSignal): Promise<void> {
+    const controller = new AbortController();
+    this.#previewStop?.abort();
+    this.#previewStop = controller;
+    const onOuterAbort = () => controller.abort(cancel?.reason);
+    if (cancel?.aborted) controller.abort(cancel.reason);
+    else cancel?.addEventListener('abort', onOuterAbort, { once: true });
+    const signal = controller.signal;
+    try {
+      await forEachConcurrently(
+        this.entries,
+        CONCURRENT_DOWNLOADS,
+        async (entry) => {
+          if (signal.aborted || entry.thumbnails.length > 0) return;
+          const previews = entry.pack.stickers
+            .flatMap((sticker) => (sticker.thumbnail ? [sticker.thumbnail] : []))
+            .slice(0, THUMBNAILS_PER_PACK);
+          try {
+            const loaded = await Promise.all(
+              previews.map(async (thumbnail) => ({
+                data: await telegram.readFile(thumbnail.fileId, signal),
+                mimeType: thumbnail.mimeType,
+              })),
+            );
+            if (signal.aborted) return;
+            entry.thumbnails = loaded;
+          } catch {
+            if (signal.aborted) return;
+            entry.thumbnails = [];
+          }
+          this.#changed();
+        },
+        signal,
+      ).catch(() => undefined);
+    } finally {
+      cancel?.removeEventListener('abort', onOuterAbort);
+      if (this.#previewStop === controller) this.#previewStop = null;
+    }
   }
 
-  /** Stops loading previews; the ones not yet loaded are not needed after the user has chosen. */
+  /** Stops the currently running preview load; later calls to loadPreviews can start fresh. */
   stopPreviews(): void {
-    this.#previewsStopped = true;
+    this.#previewStop?.abort();
   }
 
   /**
@@ -322,30 +346,57 @@ export class StickerMigration extends EventTarget {
    * pack, and whose manifest, decrypted with the key in the account, has that pack's title and its stickers' emoji
    * in order. Anyone can add an index entry, so the entry alone does not show that the installed pack is this one.
    */
-  async readSignal(signal: SignalAccount): Promise<void> {
+  async readSignal(signal: SignalAccount, cancel?: AbortSignal): Promise<void> {
+    cancel?.throwIfAborted();
+    if (this.signalReadFrom !== null && this.signalReadFrom !== signal) {
+      this.#unannounced.clear();
+      this.#copyChosen.clear();
+      this.#notListed.clear();
+      this.announceError = null;
+    }
     const { packs } = await (await signal.storage()).readStickerPacks();
+    cancel?.throwIfAborted();
     const { index } = this.#services;
-    await forEachConcurrently(this.entries, CONCURRENT_VERIFICATIONS, async (entry) => {
-      const candidates = new Set(index.candidates(entry.identity.lookupKey).map(toHex));
-      for (const stored of packs.filter((pack) => candidates.has(toHex(pack.packId)))) {
-        const manifest = await index.manifest(stored.packId, stored.packKey);
-        const stickers = entry.pack.stickers;
-        if (
-          manifest?.title === entry.pack.title &&
-          manifest.stickers.length === stickers.length &&
-          manifest.stickers.every((sticker, i) => sticker.emoji === stickers[i].emoji)
-        ) {
-          Object.assign(entry, { state: 'in-signal', packId: stored.packId, packKey: stored.packKey, error: null });
-          return;
-        }
+    for (const entry of this.entries) {
+      if (entry.state === 'in-signal') {
+        const fallback: PackState = index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
+        Object.assign(entry, { state: fallback, packId: null, packKey: null, error: null });
       }
-    });
+    }
+    await forEachConcurrently(
+      this.entries,
+      CONCURRENT_VERIFICATIONS,
+      async (entry) => {
+        cancel?.throwIfAborted();
+        const candidates = new Set(index.candidates(entry.identity.lookupKey).map(toHex));
+        for (const stored of packs.filter((pack) => candidates.has(toHex(pack.packId)))) {
+          const manifest = await index.manifest(stored.packId, stored.packKey, cancel);
+          cancel?.throwIfAborted();
+          const stickers = entry.pack.stickers;
+          if (
+            manifest?.title === entry.pack.title &&
+            manifest.stickers.length === stickers.length &&
+            manifest.stickers.every((sticker, i) => sticker.emoji === stickers[i].emoji)
+          ) {
+            Object.assign(entry, { state: 'in-signal', packId: stored.packId, packKey: stored.packKey, error: null });
+            return;
+          }
+        }
+      },
+      cancel,
+    );
+    cancel?.throwIfAborted();
     this.signalReadFrom = signal;
     this.#changed();
   }
 
   setSelected(entry: PackEntry, selected: boolean): void {
-    entry.selected = selected && entry.pack.stickers.length <= MAX_STICKERS;
+    entry.selected = selected && entry.pack.stickers.length > 0 && entry.pack.stickers.length <= MAX_STICKERS;
+    if (!entry.selected) {
+      this.#originals.delete(entry);
+      this.#converted.delete(entry);
+      entry.prepared = false;
+    }
     this.#changed();
   }
 
@@ -376,8 +427,15 @@ export class StickerMigration extends EventTarget {
   /** Puts the packs that failed back in line, for the next run. */
   retryFailed(): void {
     this.announceError = null;
-    for (const entry of this.selected)
-      if (entry.state === 'failed') Object.assign(entry, { state: 'to-upload', error: null, progress: null });
+    for (const entry of this.selected) {
+      if (entry.state === 'failed') {
+        Object.assign(entry, {
+          state: this.#plannedInstalls.has(entry) ? 'available' : 'to-upload',
+          error: null,
+          progress: null,
+        });
+      }
+    }
     this.#changed();
   }
 
@@ -421,6 +479,10 @@ export class StickerMigration extends EventTarget {
       });
       if (await storage.writeStickerPacks(snapshot, writes)) {
         this.installed += missing.length;
+        for (const entry of adding) {
+          Object.assign(entry, { state: 'in-signal', progress: null, error: null });
+          if (entry.packId) this.#unannounced.add(entry);
+        }
         return;
       }
     }
@@ -456,7 +518,7 @@ export class StickerMigration extends EventTarget {
         stickers.map((_, i) => i),
         CONCURRENT_DOWNLOADS,
         async (i) => {
-          files[i] = await telegram.readFile(stickers[i].fileId).catch((error: unknown) => {
+          files[i] = await telegram.readFile(stickers[i].fileId, cancel).catch((error: unknown) => {
             if (!(error instanceof DownloadStalledError)) throw error;
             throw new Error(`sticker ${i + 1}: ${error.message}`, { cause: error });
           });
@@ -539,7 +601,7 @@ export class StickerMigration extends EventTarget {
     const { index, pictures } = this.#services;
     Object.assign(entry, { state: 'checking', progress: null });
     this.#changed();
-    await index.refresh();
+    await index.refresh(cancel);
     cancel.throwIfAborted();
     const stickers = entry.pack.stickers;
     const original = {
@@ -552,11 +614,16 @@ export class StickerMigration extends EventTarget {
     };
     const pack = { lookupKey: entry.identity.lookupKey, packKey: entry.packKey!, original };
     try {
-      const found = await index.findFaithful(pack, pictures, (done, total) => {
-        if (cancel.aborted) return;
-        Object.assign(entry, { state: 'comparing', progress: { done, total } });
-        this.#changed();
-      });
+      const found = await index.findFaithful(
+        pack,
+        pictures,
+        (done, total) => {
+          if (cancel.aborted) return;
+          Object.assign(entry, { state: 'comparing', progress: { done, total } });
+          this.#changed();
+        },
+        cancel,
+      );
       cancel.throwIfAborted();
       return found;
     } finally {
@@ -656,6 +723,13 @@ export class StickerMigration extends EventTarget {
       this.selected.filter((entry) => entry.state === 'in-signal'),
       false,
     );
+    const selectedSet = new Set(this.selected);
+    for (const entry of this.#plannedInstalls) {
+      if (!selectedSet.has(entry) && entry.state !== 'in-signal') this.#plannedInstalls.delete(entry);
+    }
+    for (const entry of this.#plannedUploads) {
+      if (!selectedSet.has(entry) && entry.state !== 'in-signal') this.#plannedUploads.delete(entry);
+    }
     for (const entry of this.selected) if (entry.state === 'available') this.#plannedInstalls.add(entry);
     // Packs with a listed copy come first: installing them never waits for the upload limit.
     const queue = this.selected
@@ -720,7 +794,9 @@ export class StickerMigration extends EventTarget {
               Object.assign(next, { state: 'to-upload', progress: null });
           }
         } else {
-          Object.assign(entry, { state: 'failed', error: errorMessage(error), progress: null });
+          this.#originals.delete(entry);
+          this.#converted.delete(entry);
+          Object.assign(entry, { state: 'failed', prepared: false, error: errorMessage(error), progress: null });
         }
       }
       this.#changed();

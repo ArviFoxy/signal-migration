@@ -148,10 +148,29 @@ describe('assignPositions', () => {
     }
   });
 
-  // Detects: rewriting every existing pack's record when the new packs fit between the existing positions.
-  it('keeps existing positions when the new packs fit between them', () => {
-    expect(assignPositions([0, 1, null, null])).toEqual([0, 1, 2, 3]);
-    expect(assignPositions([null, 5, null, 9])).toEqual([0, 5, 6, 9]);
-    expect(assignPositions([3, 3, null])).toEqual([3, 3, 4]);
+  // Detects: rewriting every existing pack's record when the new packs fit between the existing positions, or
+  // renumbering with stride 1 so the very next visit's insert between any two packs forces another full rewrite.
+  it('keeps existing positions when new packs fit and leaves stride room when renumbering', () => {
+    const appended = assignPositions([0, 1, null, null]);
+    expect(appended.slice(0, 2)).toEqual([0, 1]);
+    expect(appended[2]).toBeGreaterThan(1);
+    expect(appended[3]).toBeGreaterThan(appended[2]);
+
+    const gapped = assignPositions([null, 5, null, 9]);
+    expect(gapped[1]).toBe(5);
+    expect(gapped[3]).toBe(9);
+    expect(gapped[0]).toBeGreaterThanOrEqual(0);
+    expect(gapped[0]).toBeLessThan(5);
+    expect(gapped[2]).toBeGreaterThan(5);
+    expect(gapped[2]).toBeLessThan(9);
+
+    const tied = assignPositions([3, 3, null]);
+    expect(tied.slice(0, 2)).toEqual([3, 3]);
+    expect(tied[2]).toBeGreaterThan(3);
+
+    // Forced renumber leaves enough room between every pair that a later insert does NOT rewrite existing packs.
+    const renumbered = assignPositions([0, null, 1]);
+    const nextVisit = assignPositions([renumbered[0], null, renumbered[1], null, renumbered[2]]);
+    expect([nextVisit[0], nextVisit[2], nextVisit[4]]).toEqual(renumbered);
   });
 });

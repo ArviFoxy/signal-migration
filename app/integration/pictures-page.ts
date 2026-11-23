@@ -50,6 +50,13 @@ const pictures = {
   stillDifference: (converted: string, original: string) => stillDifference(file(converted), file(original)),
   isPlainPng: (name: string) => isPlainPng(file(name)),
   isPlainWebp: (name: string) => isPlainWebp(file(name)),
+  getBase64(name: string): string {
+    const bytes = file(name);
+    let text = '';
+    for (const byte of bytes) text += String.fromCharCode(byte);
+    return btoa(text);
+  },
+  headLinkCount: () => document.head.querySelectorAll('link').length,
 
   /**
    * Draws a still picture of 512 × 512 pixels with fine detail, so that its lossless WebP is larger than Signal's
