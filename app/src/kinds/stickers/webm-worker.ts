@@ -18,12 +18,39 @@ let decoder: Promise<WebmDecoderModule> | null = null;
 let verifiedWasmBytes: Uint8Array | null = null;
 let configuredWasmUrl: string | null = null;
 
+/**
+ * Instantiates the Emscripten module from pre-verified WASM bytes via `instantiateWasm`. Emscripten 7+ drops
+ * `Module.wasmBinary` and otherwise falls back to `new URL("webm-decoder.wasm", import.meta.url)`, which throws inside
+ * an attested `blob:` worker.
+ */
+async function createFromBytes(bytes: Uint8Array): Promise<WebmDecoderModule> {
+  const compiled = await WebAssembly.compile(bytes.slice());
+  let rejectInstantiate!: (error: unknown) => void;
+  const instantiateFailed = new Promise<never>((_, reject) => {
+    rejectInstantiate = reject;
+  });
+  const created = createWebmDecoder({
+    instantiateWasm(imports, receiveInstance) {
+      WebAssembly.instantiate(compiled, imports).then(
+        (instance) => receiveInstance(instance),
+        (error) => rejectInstantiate(error),
+      );
+      return {};
+    },
+  });
+  // Emscripten's instantiateWasm wrapper creates a Promise with no reject handler; avoid unhandled rejections if
+  // instantiateFailed wins the race first.
+  created.catch(() => undefined);
+  return Promise.race([created, instantiateFailed]);
+}
+
 function loadDecoder(): Promise<WebmDecoderModule> {
   if (!decoder) {
-    const options = verifiedWasmBytes
-      ? { wasmBinary: verifiedWasmBytes.slice() }
-      : { locateFile: () => configuredWasmUrl ?? assetUrl(assetFile('webmDecoderWasm'), import.meta.url) };
-    const pending = createWebmDecoder(options);
+    const pending = verifiedWasmBytes
+      ? createFromBytes(verifiedWasmBytes)
+      : createWebmDecoder({
+          locateFile: () => configuredWasmUrl ?? assetUrl(assetFile('webmDecoderWasm'), import.meta.url),
+        });
     decoder = pending.catch((error) => {
       if (decoder === pending) decoder = null;
       throw error;
