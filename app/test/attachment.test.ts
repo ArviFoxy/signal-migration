@@ -111,4 +111,49 @@ describe('Signal attachment upload', () => {
       ),
     ).rejects.toThrow(AttachmentTooLargeError);
   });
+
+  // Detects: uploadAttachment silently sleeping on 429 Retry-After without reporting onWait for UI countdowns, or
+  // capping explicit Retry-After values > 60s prematurely.
+  it('reports onWait and honors >60s Retry-After (abortably) when attachment upload form answers 429', async () => {
+    const waits: (number | null)[] = [];
+    const cancel = new AbortController();
+    const account = {
+      withChat: async <T>(action: (chat: { request: () => Promise<never> }) => Promise<T>) =>
+        action({
+          async request() {
+            return {
+              status: 429,
+              message: 'Too Many Requests',
+              headers: ['Retry-After: 120'],
+              body: new Uint8Array(),
+            } as never;
+          },
+        }),
+      https: async () => {
+        throw new Error('unused');
+      },
+    };
+    const startedAt = Date.now();
+    const safety = setTimeout(() => cancel.abort(), 200);
+    try {
+      await expect(
+        uploadAttachment(
+          account as never,
+          bytesSource(new Uint8Array([1, 2, 3])),
+          { contentType: 'application/octet-stream' },
+          cancel.signal,
+          undefined,
+          (until) => {
+            waits.push(until);
+            if (until !== null) cancel.abort();
+          },
+        ),
+      ).rejects.toThrow(/abort/i);
+    } finally {
+      clearTimeout(safety);
+    }
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(waits[0]).toBeGreaterThanOrEqual(startedAt + 115_000);
+    expect(waits.at(-1)).toBeNull();
+  });
 });

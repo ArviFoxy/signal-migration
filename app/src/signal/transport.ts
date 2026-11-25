@@ -24,6 +24,11 @@ export type HttpsRequest = (
   body?: Uint8Array,
 ) => Promise<HttpResponse>;
 
+export type SendNoteOptions = {
+  cancel?: AbortSignal;
+  onWait?: (until: number | null) => void;
+};
+
 /**
  * A linked Signal account as the migration kinds use it. In the app it is the temporary linked device
  * (connection.ts); tests supply one over a simulated Signal service.
@@ -51,7 +56,7 @@ export interface SignalAccount {
    * Puts a message into the account's Note to Self, by sending it to the account's other devices. A note with the
    * timestamp of one that the devices already have is dropped by them.
    */
-  sendNoteToSelf(note: Note): Promise<void>;
+  sendNoteToSelf(note: Note, options?: SendNoteOptions): Promise<void>;
 }
 
 /** Reads a header from chat response headers. */

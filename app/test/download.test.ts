@@ -26,12 +26,12 @@ describe('downloading a Telegram file', () => {
   afterEach(() => vi.useRealTimers());
 
   // Detects: waiting forever for a download that stopped receiving bytes, which stops the whole migration.
-  it('gives up on a download that receives nothing for a minute, and cancels it', async () => {
+  it('gives up on a download that receives nothing for 90 seconds, and cancels it', async () => {
     vi.useFakeTimers();
     const { invoke, requests } = tdlib(() => 12 * 1024, new Promise(() => undefined), 48 * 1024);
     const outcome = downloadWithStallLimit(invoke, 7).catch((error: Error) => error.message);
-    await vi.advanceTimersByTimeAsync(70_000);
-    expect(await outcome).toBe('downloading from Telegram made no progress for 60 seconds (12 of 48 KB received)');
+    await vi.advanceTimersByTimeAsync(100_000);
+    expect(await outcome).toBe('downloading from Telegram made no progress for 90 seconds (12 of 48 KB received)');
     expect(requests).toContain('cancelDownloadFile');
   });
 
@@ -40,7 +40,7 @@ describe('downloading a Telegram file', () => {
     vi.useFakeTimers();
     const { invoke } = tdlib(null, new Promise(() => undefined), 0);
     const outcome = downloadWithStallLimit(invoke, 7).catch(() => 'given up');
-    await vi.advanceTimersByTimeAsync(80_000);
+    await vi.advanceTimersByTimeAsync(110_000);
     expect(await outcome).toBe('given up');
   });
 
@@ -93,5 +93,22 @@ describe('downloading a Telegram file', () => {
     await expect(outcome).rejects.toThrow(/abort/i);
     expect(requests).toContain('cancelDownloadFile');
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  // Detects: STALL_LIMIT_MS colliding with TDLib's 60-second NetQueryDelayer total_timeout_limit, killing downloads
+  // right before TDLib retries or surfaces "Too Many Requests: retry after N", and hiding Telegram download waits.
+  it('survives a 65-second TDLib flood-wait delay and notifies onWaiting while waiting for bytes', async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    const complete = new Promise<void>((resolve) => (finish = resolve));
+    const { invoke } = tdlib(() => 0, complete, 0);
+    const waitingEvents: boolean[] = [];
+    const outcome = downloadWithStallLimit(invoke, 7, undefined, undefined, undefined, (waiting) =>
+      waitingEvents.push(waiting),
+    );
+    await vi.advanceTimersByTimeAsync(65_000);
+    finish();
+    await outcome;
+    expect(waitingEvents).toEqual([true, false]);
   });
 });

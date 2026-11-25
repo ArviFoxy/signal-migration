@@ -186,6 +186,70 @@ describe('messages to the account’s other devices', () => {
     await sender(data).send(chat, new Uint8Array([1]));
     expect(puts).toBe(2);
   });
+
+  // Detects: OwnDevices.send() hanging during a 429 Retry-After sleep when cancelled, capping Retry-After > 60s
+  // prematurely, failing to notify onWait for UI countdowns, or re-encrypting (advancing ratchet) on 429 retries.
+  it('aborts a 429 Retry-After wait immediately on cancel, reports onWait for >60s Retry-After, and reuses ciphertext', async () => {
+    const data = await account([1]);
+    const putBodies: Sent[] = [];
+    const waits: (number | null)[] = [];
+    const controller = new AbortController();
+
+    const chat: ChatChannel = {
+      async request(verb, _path, options) {
+        if (verb === 'GET') {
+          return {
+            status: 200,
+            message: 'OK',
+            headers: [],
+            body: new TextEncoder().encode(
+              JSON.stringify({ identityKey: base64(data.identity.publicKey), devices: [data.devices.get(1)!] }),
+            ),
+          };
+        }
+        const body = JSON.parse(new TextDecoder().decode(options!.body)) as Sent;
+        putBodies.push(body);
+        if (putBodies.length === 1) {
+          return { status: 429, message: 'Too Many Requests', headers: ['Retry-After: 0.01'], body: new Uint8Array() };
+        }
+        return { status: 200, message: 'OK', headers: [], body: new Uint8Array() };
+      },
+    };
+
+    const s = sender(data);
+    await s.send(chat, new Uint8Array([1]), {
+      cancel: controller.signal,
+      onWait: (until) => waits.push(until),
+    });
+    expect(putBodies).toHaveLength(2);
+    // Retrying after 429 must resend the exact same encrypted message instead of advancing the ratchet chain.
+    expect(putBodies[1].messages[0].content).toBe(putBodies[0].messages[0].content);
+    expect(waits.length).toBe(2);
+    expect(typeof waits[0]).toBe('number');
+    expect(waits[1]).toBeNull();
+
+    // Now test a long (>60s) Retry-After: onWait reports the full >60s deadline and aborting resolves immediately.
+    const longWaits: (number | null)[] = [];
+    const cancelLong = new AbortController();
+    const slowChat: ChatChannel = {
+      async request() {
+        return { status: 429, message: 'Too Many Requests', headers: ['Retry-After: 120'], body: new Uint8Array() };
+      },
+    };
+    const startedAt = Date.now();
+    await expect(
+      s.send(slowChat, new Uint8Array([2]), {
+        cancel: cancelLong.signal,
+        onWait: (until) => {
+          longWaits.push(until);
+          if (until !== null) cancelLong.abort();
+        },
+      }),
+    ).rejects.toThrow(/abort/i);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(longWaits[0]).toBeGreaterThanOrEqual(startedAt + 115_000);
+    expect(longWaits.at(-1)).toBeNull();
+  });
 });
 
 describe('the identity of the account’s other devices', () => {

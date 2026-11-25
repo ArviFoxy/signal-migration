@@ -19,12 +19,28 @@ import { OwnDeviceSessions, randomInt } from '../wasm/signal_migration_wasm';
 import { type ChatChannel, chatHeader } from './transport';
 
 const MAX_RATE_LIMIT_RETRIES = 8;
-const MAX_RETRY_WAIT_S = 60;
+const MAX_BACKOFF_WAIT_S = 60;
+const MAX_RETRY_AFTER_S = 3600;
 
 function retryWaitMs(headerValue: string | undefined, attempt: number): number {
   const seconds = Number(headerValue);
-  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, MAX_RETRY_WAIT_S) * 1000 + 200;
-  return Math.min(2 ** attempt, MAX_RETRY_WAIT_S) * 1000;
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, MAX_RETRY_AFTER_S) * 1000 + 200;
+  return Math.min(2 ** attempt, MAX_BACKOFF_WAIT_S) * 1000;
+}
+
+function abortableWait(ms: number, cancel?: AbortSignal): Promise<void> {
+  if (cancel?.aborted) return Promise.reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancel!.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      cancel?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    cancel?.addEventListener('abort', onAbort, { once: true });
+  });
 }
 
 const json = (value: unknown) => new TextEncoder().encode(JSON.stringify(value));
@@ -101,6 +117,13 @@ export type SenderIdentity = {
   identity: { publicKey: Uint8Array; privateKey: Uint8Array };
 };
 
+export type OwnDeviceSendOptions = {
+  timestamp?: number;
+  urgent?: boolean;
+  cancel?: AbortSignal;
+  onWait?: (until: number | null) => void;
+};
+
 /** Sends messages to the account's other devices, keeping the sessions with them for as long as it lives. */
 export class OwnDevices {
   #sessions: OwnDeviceSessions | null;
@@ -167,7 +190,7 @@ export class OwnDevices {
    * migration kinds never race on prekey bundle fetches or 409/410 device-list recovery. `timestamp` is the message's
    * timestamp in milliseconds; `urgent` asks Signal to wake a sleeping phone for the message.
    */
-  send(chat: ChatChannel, content: Uint8Array, options: { timestamp?: number; urgent?: boolean } = {}): Promise<void> {
+  send(chat: ChatChannel, content: Uint8Array, options: OwnDeviceSendOptions = {}): Promise<void> {
     const run = this.#sendQueue.then(() => this.#sendSerialized(chat, content, options));
     this.#sendQueue = run.catch(() => undefined);
     return run;
@@ -176,8 +199,9 @@ export class OwnDevices {
   async #sendSerialized(
     chat: ChatChannel,
     content: Uint8Array,
-    { timestamp = Date.now(), urgent = true }: { timestamp?: number; urgent?: boolean } = {},
+    { timestamp = Date.now(), urgent = true, cancel, onWait }: OwnDeviceSendOptions = {},
   ): Promise<void> {
+    cancel?.throwIfAborted();
     if (!this.#bundlesRead) {
       await this.#startSessions(chat, '*');
       this.#bundlesRead = true;
@@ -185,30 +209,47 @@ export class OwnDevices {
     const padded = padMessageBody(content);
     let deviceRetries = 0;
     let rateRetries = 0;
+    let encryptedBatch:
+      | {
+          type: number;
+          destinationDeviceId: number;
+          destinationRegistrationId: number;
+          content: string;
+        }[]
+      | null = null;
     for (;;) {
-      const messages = [...this.#devices].map((deviceId) => {
-        const encrypted = this.#activeSessions().encrypt(deviceId, padded);
-        const message = {
-          type: encrypted.envelopeType,
-          destinationDeviceId: deviceId,
-          destinationRegistrationId: encrypted.registrationId,
-          content: toBase64(encrypted.body),
-        };
-        encrypted.free();
-        return message;
-      });
+      cancel?.throwIfAborted();
+      if (!encryptedBatch) {
+        encryptedBatch = [...this.#devices].map((deviceId) => {
+          const encrypted = this.#activeSessions().encrypt(deviceId, padded);
+          const message = {
+            type: encrypted.envelopeType,
+            destinationDeviceId: deviceId,
+            destinationRegistrationId: encrypted.registrationId,
+            content: toBase64(encrypted.body),
+          };
+          encrypted.free();
+          return message;
+        });
+      }
       const response = await chat.request('PUT', `/v1/messages/${this.sender.aci}`, {
         headers: ['content-type:application/json'],
-        body: json({ messages, online: false, urgent, timestamp }),
+        body: json({ messages: encryptedBatch, online: false, urgent, timestamp }),
       });
       if (response.status === 200) return;
       if (response.status === 429 && rateRetries < MAX_RATE_LIMIT_RETRIES) {
         const waitMs = retryWaitMs(chatHeader(response.headers, 'Retry-After'), rateRetries++);
-        await new Promise((resolve) => setTimeout(resolve, waitMs));
+        onWait?.(Date.now() + waitMs);
+        try {
+          await abortableWait(waitMs, cancel);
+        } finally {
+          onWait?.(null);
+        }
         continue;
       }
       if (response.status === 409 && deviceRetries < 3) {
         deviceRetries++;
+        encryptedBatch = null;
         const { missingDevices = [], extraDevices = [] } = parse<{
           missingDevices?: number[];
           extraDevices?: number[];
@@ -217,6 +258,7 @@ export class OwnDevices {
         for (const deviceId of missingDevices) await this.#startSessions(chat, deviceId);
       } else if (response.status === 410 && deviceRetries < 3) {
         deviceRetries++;
+        encryptedBatch = null;
         const { staleDevices = [] } = parse<{ staleDevices?: number[] }>(response.body);
         for (const deviceId of staleDevices) {
           this.#devices.delete(deviceId);

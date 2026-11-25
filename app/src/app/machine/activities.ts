@@ -329,6 +329,10 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           {
             source: sessionOf(resources, work.instance).saved,
             convert: context.services.migration().convert,
+            onWait: (wait) => {
+              if (wait) report();
+              if (!cancel.aborted) emit({ type: 'run/saved-wait', wait });
+            },
           },
         );
         report();

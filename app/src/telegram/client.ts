@@ -553,11 +553,12 @@ export class TelegramClient {
     chunkBytes = 2 * 1024 * 1024,
     run: number = this.#run,
     cancel?: AbortSignal,
+    onWaiting?: (waiting: boolean) => void,
   ): Promise<T> {
     const pinnedInvoke = ((query: Parameters<Td.Invoke>[0]) => this.invokeInRun(run, query)) as Td.Invoke;
     const readerKey = this.#acquireFileReader(run, fileId);
     try {
-      await downloadWithStallLimit(pinnedInvoke, fileId, undefined, undefined, cancel);
+      await downloadWithStallLimit(pinnedInvoke, fileId, undefined, undefined, cancel, onWaiting);
       const file = await this.invokeInRun(run, { _: 'getFile', file_id: fileId });
       const size = file.local.downloaded_size || file.size;
       return await use(size, async (onChunk) => {
@@ -618,11 +619,12 @@ export class TelegramClient {
     use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
     chunkBytes = 2 * 1024 * 1024,
     cancel?: AbortSignal,
+    onWaiting?: (waiting: boolean) => void,
   ): Promise<T> {
     return untilNotRestarted(async () => {
       cancel?.throwIfAborted();
       const { run, fileId } = await this.#resolveFileId(ref);
-      return this.withDownloadedFile(fileId, use, chunkBytes, run, cancel);
+      return this.withDownloadedFile(fileId, use, chunkBytes, run, cancel, onWaiting);
     });
   }
 
