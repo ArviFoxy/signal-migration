@@ -72,23 +72,33 @@ export function stepHeader(
   </header>`;
 }
 
-/** A labelled progress bar. */
+export type ProgressState = 'idle' | 'active' | 'throttled' | 'failed';
+
+/**
+ * A labelled progress bar. `activity` communicates live status: `'active'` animates a flowing sheen (including a
+ * gliding highlight on the track at 0%), while `'throttled'`, `'failed'`, and `'idle'` stay completely still.
+ */
 export function progressBar(
   label: string,
   done: number,
   total: number,
-  colour: 'accent' | 'upload' = 'accent',
+  colour: 'accent' | 'upload' | 'danger' = 'accent',
+  activity: ProgressState = 'idle',
 ): TemplateResult {
-  const width = total > 0 ? Math.round((done / total) * 100) : 0;
+  const width = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const fill = colour === 'accent' ? 'bg-accent' : colour === 'upload' ? 'bg-upload' : 'bg-danger';
+  const trackActive = activity === 'active' && width === 0 ? 'progress-track-active' : '';
+  const fillActive = activity === 'active' && width > 0 ? 'progress-fill-active' : '';
   return html`<div
     role="progressbar"
     aria-label=${label}
     aria-valuemin="0"
     aria-valuemax=${total}
     aria-valuenow=${done}
-    class="h-2 overflow-hidden rounded bg-line"
+    data-state=${activity}
+    class="relative h-2 overflow-hidden rounded bg-line ${trackActive}"
   >
-    <div class="h-full ${colour === 'accent' ? 'bg-accent' : 'bg-upload'}" style="width: ${width}%"></div>
+    <div class="h-full transition-[width] duration-300 ${fill} ${fillActive}" style="width: ${width}%"></div>
   </div>`;
 }
 
@@ -147,6 +157,13 @@ export const icons = {
       svg`<circle cx="12" cy="12" r="9"></circle><path d="M12 11v5"></path><path d="M12 8h.01"></path>`,
       16,
       '#5B5F6A',
+    ),
+  hourglass: (size = 15, colour = 'currentColor') =>
+    icon(
+      svg`<path d="M5 2h14"></path><path d="M5 22h14"></path><path d="M7 2v4.5a5 5 0 0 0 2.2 4.1L12 12l2.8-1.4A5 5 0 0 0 17 6.5V2"></path><path d="M7 22v-4.5a5 5 0 0 1 2.2-4.1L12 12l2.8 1.4A5 5 0 0 1 17 17.5V22"></path>`,
+      size,
+      colour,
+      2,
     ),
   shield: (colour = 'currentColor', size = 16) =>
     icon(svg`<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>`, size, colour),

@@ -93,12 +93,14 @@ export class MigrationApp extends LightElement {
     if (popover?.matches(':popover-open')) popover.hidePopover();
   }
 
-  /** A new step starts at the top of the page. */
+  /** A new step starts at the top of the page, and stays scrolled into view inside the sidebar step list. */
   protected updated(): void {
     if (this.workflow && this.workflow.step !== this.#shownStep) {
       this.#shownStep = this.workflow.step;
       window.scrollTo({ top: 0 });
       this.querySelector('main')?.scrollTo({ top: 0 });
+      const activeStep = this.querySelector<HTMLElement>('nav li[aria-current="step"]');
+      if (activeStep && activeStep.offsetParent !== null) activeStep.scrollIntoView({ block: 'nearest' });
     }
   }
 
@@ -208,12 +210,12 @@ export class MigrationApp extends LightElement {
     const finished = this.workflow.state.kind === 'done';
     return html`<nav
       aria-label="Migration steps"
-      class="hidden w-[272px] flex-none flex-col gap-7 border-r border-line bg-panel px-7 py-8 lg:flex"
+      class="hidden min-h-0 w-[272px] flex-none flex-col gap-5 border-r border-line bg-panel px-7 py-7 lg:flex"
     >
-      <div class="font-display text-[19px] leading-snug font-semibold tracking-[-0.01em]">
+      <div class="flex-none font-display text-[19px] leading-snug font-semibold tracking-[-0.01em]">
         Telegram to Signal Migration 🔒🦊
       </div>
-      <ol class="flex flex-col gap-4">
+      <ol class="scrollbar-visible -mr-4 flex min-h-0 flex-1 flex-col gap-3.5 overflow-y-auto pr-4">
         ${stepLabels(this.workflow.chosen).map((label, i) => {
           const active = i === current;
           const done = i < current || (finished && active);
@@ -232,7 +234,7 @@ export class MigrationApp extends LightElement {
           </li>`;
         })}
       </ol>
-      <div class="mt-auto flex flex-col gap-3">${this.connectionsPanel('side')}</div>
+      <div class="flex flex-none flex-col gap-3">${this.connectionsPanel('side')}</div>
     </nav>`;
   }
 
@@ -443,7 +445,7 @@ export class MigrationApp extends LightElement {
         const saved: MigrateSaved | null = !w.chosen.saved
           ? null
           : savedCopy
-            ? { kind: 'ready', toCopy: savedCopy.toCopy, copied: savedCopy.copied }
+            ? { kind: 'ready', toCopy: savedCopy.toCopy, copied: savedCopy.copied, wait: w.savedWait }
             : w.saved.kind === 'failed'
               ? { kind: 'failed' }
               : { kind: 'reading' };

@@ -1,10 +1,12 @@
-// The migrate step: shows progress across every chosen kind (friends, saved messages, and sticker packs). For sticker
-// packs, every selected pack stays in one list in Telegram order and rows never move; each row carries a status symbol
-// and one line saying what is happening, and the list follows the active pack unless the user scrolled away.
+// The migrate step: shows each chosen kind (friends, saved messages, and sticker packs) as sibling cards at the same
+// nesting level so parallel progress is clear at a glance. Active progress bars animate subtly; rate-limited ones stay
+// still in warm amber with an hourglass and countdown. Sticker packs nests a subcard holding its filter tabs and
+// scrollable pack window; rows stay in Telegram order and follow the active pack unless the user scrolled away.
 
 import { html, nothing, svg, type TemplateResult } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import type { MigrationRunStatus } from '../app/workflow';
+import type { SavedWait } from '../kinds/saved/copy';
 import type { PackEntry, PackState, StickerMigration } from '../kinds/stickers/migration';
 import { conversionDescription, formatDuration, MigrationView } from '../kinds/stickers/ui/view';
 import {
@@ -12,16 +14,17 @@ import {
   icons,
   primaryButton,
   progressBar,
+  type ProgressState,
   secondaryButton,
   stepHeader,
-  stickyBar,
   stickyFooter,
 } from './layout';
 
 export type MigrateFriends =
   { kind: 'looking' } | { kind: 'failed' } | { kind: 'ready'; toAdd: number; added: number | null };
 
-export type MigrateSaved = { kind: 'reading' } | { kind: 'failed' } | { kind: 'ready'; toCopy: number; copied: number };
+export type MigrateSaved =
+  { kind: 'reading' } | { kind: 'failed' } | { kind: 'ready'; toCopy: number; copied: number; wait?: SavedWait | null };
 
 type MigrateStepView =
   | { kind: 'finished'; migration: StickerMigration | null }
@@ -72,18 +75,11 @@ const SYMBOLS = {
     >!</span
   >`,
   waiting: html`<span class="block size-6 rounded-full ring-[1.5px] ring-line-strong ring-inset"></span>`,
-  limit: html`<svg
-    width="24"
-    height="24"
-    viewBox="0 0 24 24"
-    fill="none"
-    stroke="#C96A1B"
-    stroke-width="2"
-    stroke-linecap="round"
+  limit: html`<span
+    class="flex size-6 items-center justify-center rounded-full bg-upload-soft text-upload"
     aria-hidden="true"
-  >
-    ${svg`<circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path>`}
-  </svg>`,
+    >${icons.hourglass(14, '#C96A1B')}</span
+  >`,
 };
 
 const DEFAULT_RUN: MigrationRunStatus = {
@@ -117,9 +113,11 @@ export class MigrateStep extends MigrationView {
 
   connectedCallback(): void {
     super.connectedCallback();
-    // The countdown to the next upload is redrawn every second.
+    // Rate-limit countdowns (sticker upload limit and Saved Messages) are redrawn every second.
     this.#ticker = setInterval(() => {
-      if (this.migration?.uploadAllowedAt) this.requestUpdate();
+      if (this.migration?.uploadAllowedAt || (this.saved?.kind === 'ready' && this.saved.wait?.until)) {
+        this.requestUpdate();
+      }
     }, 1000);
   }
 
@@ -313,7 +311,7 @@ export class MigrateStep extends MigrationView {
     </button>`;
     const retry = run.canRetry
       ? html`<button type="button" class=${secondaryButton} @click=${() => this.emit('retry')}>
-          ${failedPacks > 0 ? 'Retry failed packs' : 'Try again'}
+          ${!run.failed && failedPacks > 0 ? 'Retry failed packs' : 'Try again'}
         </button>`
       : nothing;
     return html`${back}<span class="flex gap-3"
@@ -321,7 +319,7 @@ export class MigrateStep extends MigrationView {
       >`;
   }
 
-  /** One line under the overall progress: the wait for Signal's limit, what is happening, or how it ended. */
+  /** One line under the sticker packs progress bar: throttled countdown with hourglass, active pack, or summary. */
   private statusLine(ended: boolean, failed: number, remainingUploads: number) {
     const migration = this.migration!;
     if (migration.announceError) {
@@ -334,23 +332,30 @@ export class MigrateStep extends MigrationView {
     const waitUntil = migration.uploadAllowedAt;
     if (waitUntil) {
       const left = waitUntil - Date.now();
-      return html`<span class="text-muted">Signal's upload limit: next upload in</span>
-        <span class="font-medium tabular-nums">${countdown(left)}</span>
-        <span class="text-muted">· all uploaded in about</span>
-        <span class="font-medium"
-          >${formatDuration(left + Math.max(0, remainingUploads - 1) * migration.uploadIntervalMs)}</span
-        >`;
+      return html`<span class="flex items-start gap-1.5 text-upload-text">
+        <span class="mt-[2px] flex-none">${icons.hourglass(14, '#8A4A0F')}</span>
+        <span>
+          Signal's upload limit: next upload in
+          <span class="font-semibold tabular-nums">${countdown(left)}</span> · all uploaded in about
+          <span class="font-semibold"
+            >${formatDuration(left + Math.max(0, remainingUploads - 1) * migration.uploadIntervalMs)}</span
+          >
+        </span>
+      </span>`;
     }
     if (ended) {
       return html`<span class="text-muted"
         >${failed > 0 ? `${failed} pack${failed === 1 ? '' : 's'} failed` : 'All selected packs are in your Signal'}</span
       >`;
     }
+    if (this.run.failed) {
+      return html`<span class="text-danger">Stopped · click Try again to continue from here</span>`;
+    }
     const current = migration.current;
-    return html`<span class="text-muted">${current ? `Working on ${current.pack.title}` : 'Working'}</span>`;
+    return html`<span class="text-muted">${current ? `Working on ${current.pack.title}` : 'Working…'}</span>`;
   }
 
-  /** What happens to the chosen friends: one line, beside the packs or on its own. */
+  /** What happens to the chosen friends: one sibling card at the same level as Saved Messages and Sticker packs. */
   private friendsBlock() {
     const friends = this.friends;
     if (!friends) return nothing;
@@ -379,14 +384,14 @@ export class MigrateStep extends MigrationView {
     }
     return html`<section
       aria-label="Friends"
-      class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+      class="flex flex-none items-center justify-between gap-3 rounded-xl bg-white px-4 py-3.5 ring-1 ring-card-line ring-inset"
     >
-      <span class="text-sm font-semibold">Friends</span>
-      <span class="text-sm text-muted">${text}</span>
+      <span class="text-sm font-semibold whitespace-nowrap">Friends</span>
+      <span class="text-right text-sm text-muted">${text}</span>
     </section>`;
   }
 
-  /** What happens to the saved messages: their progress, beside the packs or on its own. */
+  /** What happens to the saved messages: sibling card with a working/throttled/stopped progress bar and status line. */
   private savedBlock() {
     const saved = this.saved;
     if (!saved) return nothing;
@@ -394,18 +399,21 @@ export class MigrateStep extends MigrationView {
       case 'reading':
         return html`<section
           aria-label="Saved Messages"
-          class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+          class="flex flex-none flex-col gap-2 rounded-xl bg-white px-4 py-3.5 ring-1 ring-card-line ring-inset"
         >
-          <span class="text-sm font-semibold">Saved Messages</span>
-          <span class="text-sm text-muted">Reading your Saved Messages…</span>
+          <div class="flex items-center justify-between gap-3">
+            <span class="text-sm font-semibold">Saved Messages</span>
+            <span class="text-sm text-muted">Reading your Saved Messages…</span>
+          </div>
+          ${progressBar('Reading Saved Messages', 0, 1, 'accent', this.run.failed ? 'failed' : 'active')}
         </section>`;
       case 'failed':
         return html`<section
           aria-label="Saved Messages"
-          class="flex items-center justify-between gap-3 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+          class="flex flex-none items-center justify-between gap-3 rounded-xl bg-white px-4 py-3.5 ring-1 ring-card-line ring-inset"
         >
           <span class="text-sm font-semibold">Saved Messages</span>
-          <span class="text-sm text-muted">Could not read your Saved Messages</span>
+          <span class="text-sm text-danger">Could not read your Saved Messages</span>
         </section>`;
       case 'ready': {
         const count = `${saved.toCopy.toLocaleString('en')} message${saved.toCopy === 1 ? '' : 's'}`;
@@ -416,15 +424,51 @@ export class MigrateStep extends MigrationView {
             : done
               ? `${count} copied to Note to Self`
               : `${saved.copied.toLocaleString('en')} of ${count} copied to Note to Self`;
+        const wait = !done && !this.run.failed ? (saved.wait ?? null) : null;
+        let barColour: 'accent' | 'upload' | 'danger' = 'accent';
+        let barState: ProgressState = 'idle';
+        if (!done && saved.toCopy > 0) {
+          if (this.run.failed) {
+            barColour = 'danger';
+            barState = 'failed';
+          } else if (wait) {
+            barColour = 'upload';
+            barState = 'throttled';
+          } else if (!this.run.ended) {
+            barColour = 'accent';
+            barState = 'active';
+          }
+        }
+        const status =
+          saved.toCopy === 0 || done
+            ? nothing
+            : this.run.failed
+              ? html`<span class="text-[13px] text-danger">Stopped · click Try again to continue from here</span>`
+              : wait
+                ? html`<span class="flex items-start gap-1.5 text-[13px] text-upload-text tabular-nums">
+                    <span class="mt-[2px] flex-none">${icons.hourglass(14, '#8A4A0F')}</span>
+                    <span>
+                      ${
+                        wait.until !== null
+                          ? html`Waiting for ${wait.service}'s rate limit · next in
+                              <span class="font-semibold">${countdown(wait.until - Date.now())}</span>`
+                          : html`Waiting for ${wait.service}'s download rate limit…`
+                      }
+                    </span>
+                  </span>`
+                : !this.run.ended
+                  ? html`<span class="text-[13px] text-muted">Copying to Note to Self…</span>`
+                  : nothing;
         return html`<section
           aria-label="Saved Messages"
-          class="flex flex-col gap-2 rounded-xl px-4 py-3 ring-1 ring-card-line ring-inset"
+          class="flex flex-none flex-col gap-2 rounded-xl bg-white px-4 py-3.5 ring-1 ring-card-line ring-inset"
         >
-          <div class="flex items-center justify-between gap-3">
-            <span class="text-sm font-semibold">Saved Messages</span>
-            <span class="text-sm text-muted tabular-nums">${text}</span>
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="text-sm font-semibold whitespace-nowrap">Saved Messages</span>
+            <span class="text-right text-sm text-muted tabular-nums">${text}</span>
           </div>
-          ${saved.toCopy === 0 || done ? nothing : progressBar('Saved messages copied', saved.copied, saved.toCopy)}
+          ${saved.toCopy === 0 ? nothing : progressBar('Saved messages copied', saved.copied, saved.toCopy, barColour, barState)}
+          ${status}
         </section>`;
       }
       default:
@@ -432,16 +476,24 @@ export class MigrateStep extends MigrationView {
     }
   }
 
-  private view(): MigrateStepView {
-    const migration = this.stickers ? this.migration : null;
-    if (this.run.finished) return { kind: 'finished', migration };
-    if (this.run.ending) return { kind: 'ending', migration };
-    if (!this.stickers) return { kind: 'without-packs' };
-    if (!migration) return { kind: 'reading-packs', failed: this.run.failed };
-    return { kind: 'packs', migration };
+  /** Placeholder Sticker packs card while packs are still loading from Telegram after a reload. */
+  private readingPacksBlock(failed: boolean) {
+    return html`<section
+      aria-label="Sticker packs"
+      class="flex flex-none flex-col gap-2 rounded-xl bg-white px-4 py-3.5 ring-1 ring-card-line ring-inset"
+    >
+      <div class="flex items-center justify-between gap-3">
+        <span class="text-sm font-semibold">Sticker packs</span>
+        <span class="text-sm ${failed ? 'text-danger' : 'text-muted'}"
+          >${failed ? 'Stopped before your packs finished reading' : 'Reading your packs from Telegram…'}</span
+        >
+      </div>
+      ${progressBar('Reading sticker packs', 0, 1, failed ? 'danger' : 'accent', failed ? 'failed' : 'active')}
+    </section>`;
   }
 
-  private renderWithPacks(migration: StickerMigration, title: string, description: string) {
+  /** Sticker packs card: top progress bar matching Saved Messages, with an inset subcard for the stickers window. */
+  private packsBlock(migration: StickerMigration) {
     const selected = migration.selected;
     const stickersEnded = migration.phase === 'done' || migration.phase === 'stopped';
     const done = selected.filter((entry) => entry.state === 'in-signal').length;
@@ -460,55 +512,92 @@ export class MigrateStep extends MigrationView {
       { id: 'done', label: 'Installed' },
       { id: 'failed', label: 'Failed' },
     ];
-
-    return html`${stepHeader(this.position, title, description)}
-    ${stickyBar(
-      html`<div class="flex flex-col gap-1.5">
-          <div class="flex justify-between gap-3 text-sm">
-            <span class="font-semibold">In your Signal</span>
-            <span class="text-muted tabular-nums">${done} of ${selected.length} packs</span>
-          </div>
-          ${progressBar('Packs in your Signal', done, selected.length)}
-        </div>
-        <div class="flex flex-wrap items-center justify-between gap-3">
-          <span class="text-sm">${this.statusLine(stickersEnded, failed, remainingUploads)}</span>
-          <div
-            role="group"
-            aria-label="Filter the list"
-            class="inline-flex flex-wrap gap-1 rounded-[10px] bg-segment p-1"
-          >
-            ${tabs.map(
-              (tab) =>
-                html`<button
-                  type="button"
-                  aria-pressed=${tab.id === this.filter}
-                  class="min-h-7 cursor-pointer rounded-lg px-2.5 text-[13px] font-medium ${
-                    tab.id === this.filter ? 'bg-white text-ink shadow-[0_1px_2px_rgba(20,20,30,0.12)]' : 'text-muted'
-                  }"
-                  @click=${() => (this.filter = tab.id)}
-                >
-                  ${tab.label} · ${counts[tab.id]}
-                </button>`,
-            )}
-          </div>
-        </div>`,
-    )}
-    ${this.friendsBlock()} ${this.savedBlock()}
-    ${migration.stopReason ? html`<p class="text-danger" role="alert">${migration.stopReason}.</p>` : nothing}
-    ${
-      shown.length === 0
-        ? html`<p class="text-sm text-muted">No packs here.</p>`
-        : html`<div class="relative flex min-h-[240px] flex-col lg:flex-1">
-            <ul
-              aria-label="Packs"
-              class="scrollbar-visible relative flex max-h-[70vh] flex-col overflow-y-auto overscroll-contain rounded-xl ring-1 ring-card-line ring-inset lg:max-h-none lg:min-h-0 lg:flex-1"
-            >
-              ${shown.map((entry) => this.row(entry, entry === current))}
-            </ul>
-            ${this.currentButton(current)}
-          </div>`
+    let barColour: 'accent' | 'upload' | 'danger' = 'accent';
+    let barState: ProgressState = 'idle';
+    if (migration.uploadAllowedAt) {
+      barColour = 'upload';
+      barState = 'throttled';
+    } else if (!stickersEnded && !this.run.failed) {
+      barColour = 'accent';
+      barState = 'active';
+    } else if (this.run.failed && done < selected.length) {
+      barColour = 'danger';
+      barState = 'failed';
     }
-    ${stickyFooter(this.actions(failed))}`;
+
+    return {
+      failed,
+      template: html`<section
+        aria-label="Sticker packs"
+        class="flex min-h-[280px] flex-none flex-col rounded-xl bg-white ring-1 ring-card-line ring-inset lg:min-h-0 lg:flex-1"
+      >
+        <div class="flex flex-none flex-col gap-2 px-4 pt-3.5 pb-3">
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="text-sm font-semibold whitespace-nowrap">Sticker packs</span>
+            <span class="text-right text-sm text-muted tabular-nums">${done} of ${selected.length} packs</span>
+          </div>
+          ${progressBar('Packs in your Signal', done, selected.length, barColour, barState)}
+          <div class="text-[13px]">${this.statusLine(stickersEnded, failed, remainingUploads)}</div>
+          ${migration.stopReason ? html`<p class="text-[13px] text-danger" role="alert">${migration.stopReason}.</p>` : nothing}
+        </div>
+        <div class="mx-3 mb-3 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-line bg-panel/40">
+          <div
+            class="flex flex-none flex-wrap items-center justify-between gap-2 border-b border-line bg-panel/70 px-3 py-2"
+          >
+            <div
+              role="group"
+              aria-label="Filter the list"
+              class="inline-flex flex-wrap gap-1 rounded-[10px] bg-segment p-1"
+            >
+              ${tabs.map(
+                (tab) =>
+                  html`<button
+                    type="button"
+                    aria-pressed=${tab.id === this.filter}
+                    class="min-h-7 cursor-pointer rounded-lg px-2.5 text-[13px] font-medium ${
+                      tab.id === this.filter ? 'bg-white text-ink shadow-[0_1px_2px_rgba(20,20,30,0.12)]' : 'text-muted'
+                    }"
+                    @click=${() => (this.filter = tab.id)}
+                  >
+                    ${tab.label} · ${counts[tab.id]}
+                  </button>`,
+              )}
+            </div>
+          </div>
+          ${
+            shown.length === 0
+              ? html`<p class="bg-white px-4 py-6 text-sm text-muted">No packs here.</p>`
+              : html`<div class="relative flex min-h-[200px] flex-1 flex-col lg:min-h-0">
+                  <ul
+                    aria-label="Packs"
+                    class="scrollbar-visible relative flex max-h-[60vh] flex-col overflow-y-auto overscroll-contain bg-white lg:max-h-none lg:min-h-0 lg:flex-1"
+                  >
+                    ${shown.map((entry) => this.row(entry, entry === current))}
+                  </ul>
+                  ${this.currentButton(current)}
+                </div>`
+          }
+        </div>
+      </section>`,
+    };
+  }
+
+  private view(): MigrateStepView {
+    const migration = this.stickers ? this.migration : null;
+    if (this.run.finished) return { kind: 'finished', migration };
+    if (this.run.ending) return { kind: 'ending', migration };
+    if (!this.stickers) return { kind: 'without-packs' };
+    if (!migration) return { kind: 'reading-packs', failed: this.run.failed };
+    return { kind: 'packs', migration };
+  }
+
+  private renderWithPacks(migration: StickerMigration, title: string, description: string) {
+    const packs = this.packsBlock(migration);
+    return html`${stepHeader(this.position, title, description)}
+      <div class="flex min-h-0 flex-col gap-4 lg:flex-1">
+        ${this.friendsBlock()} ${this.savedBlock()} ${packs.template}
+      </div>
+      ${stickyFooter(this.actions(packs.failed))}`;
   }
 
   render() {
@@ -518,33 +607,39 @@ export class MigrateStep extends MigrationView {
         const title = 'Done and logged out';
         const description = 'Logged out of Telegram and Signal. Nothing is kept in your browser.';
         if (view.migration) return this.renderWithPacks(view.migration, title, description);
-        return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
-        ${stickyFooter(this.actions(0))}`;
+        return html`${stepHeader(this.position, title, description)}
+          <div class="flex flex-col gap-4">${this.friendsBlock()} ${this.savedBlock()}</div>
+          ${stickyFooter(this.actions(0))}`;
       }
       case 'ending': {
         const title = 'Migration finished';
         const description = 'Logging out of Telegram and Signal…';
         if (view.migration) return this.renderWithPacks(view.migration, title, description);
-        return html`${stepHeader(this.position, title, description)} ${this.friendsBlock()} ${this.savedBlock()}
-        ${stickyFooter(this.actions(0))}`;
+        return html`${stepHeader(this.position, title, description)}
+          <div class="flex flex-col gap-4">${this.friendsBlock()} ${this.savedBlock()}</div>
+          ${stickyFooter(this.actions(0))}`;
       }
       case 'without-packs':
         return html`${stepHeader(this.position, 'Migrating', 'Keep this tab open until it finishes.')}
-        ${this.friendsBlock()} ${this.savedBlock()} ${stickyFooter(this.actions(0))}`;
+          <div class="flex flex-col gap-4">${this.friendsBlock()} ${this.savedBlock()}</div>
+          ${stickyFooter(this.actions(0))}`;
       case 'reading-packs':
         return html`${stepHeader(
-          this.position,
-          'Migrating',
-          view.failed
-            ? 'The migration stopped before your packs finished reading.'
-            : 'Reading your packs from Telegram…',
-        )}
-        ${this.friendsBlock()} ${this.savedBlock()} ${stickyFooter(this.actions(0))}`;
+            this.position,
+            'Migrating',
+            view.failed
+              ? 'The migration stopped before your packs finished reading.'
+              : 'Keep this tab open until it finishes. After a reload, it continues where it stopped.',
+          )}
+          <div class="flex flex-col gap-4">
+            ${this.friendsBlock()} ${this.savedBlock()} ${this.readingPacksBlock(view.failed)}
+          </div>
+          ${stickyFooter(this.actions(0))}`;
       case 'packs':
         return this.renderWithPacks(
           view.migration,
           this.run.completed ? 'Migration finished' : 'Migrating',
-          'Keep this tab open until the uploads finish. After a reload, it continues where it stopped.',
+          'Keep this tab open until it finishes. After a reload, it continues where it stopped.',
         );
       default:
         return assertNever(view);
