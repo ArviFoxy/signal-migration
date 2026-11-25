@@ -9,6 +9,7 @@ import { ConversionError } from '../../../src/kinds/stickers/convert';
 import { MAX_ATTACHMENT_UPLOAD_BYTES } from '../../../src/signal/attachment';
 import type { Note } from '../../../src/signal/note-to-self';
 import type { SignalAccount } from '../../../src/signal/transport';
+import '../../wasm';
 
 function fakeAccount() {
   const sent: Note[] = [];
@@ -102,5 +103,64 @@ describe('copyToNoteToSelf error resilience', () => {
     });
     expect(sentIds).toEqual([10, 20]);
     expect(sent.map((n) => n.body)).toEqual(['after broken sticker']);
+  });
+
+  // Detects: copyToNoteToSelf omitting messageId when calling source.withMedia (breaking post-restart file_reference
+  // refresh) or failing to forward cancel/onWait to sendNoteToSelf.
+  it('passes item.id to source.withMedia and forwards cancel/onWait to sendNoteToSelf', async () => {
+    const withMediaCalls: unknown[] = [];
+    const sendNoteOptions: unknown[] = [];
+    const controller = new AbortController();
+    const account: Pick<SignalAccount, 'withChat' | 'https' | 'sendNoteToSelf'> = {
+      withChat: async (action) =>
+        action({
+          async request() {
+            return {
+              status: 200,
+              message: 'OK',
+              headers: [],
+              body: new TextEncoder().encode(
+                JSON.stringify({
+                  cdn: 3,
+                  key: 'k1',
+                  headers: {},
+                  signedUploadLocation: 'https://cdn3.signal.org/attachments/',
+                }),
+              ),
+            };
+          },
+        }),
+      https: async () => ({ status: 204, header: () => undefined, body: new Uint8Array() }),
+      async sendNoteToSelf(_note, ...rest: unknown[]) {
+        sendNoteOptions.push(rest[0]);
+      },
+    };
+    const messages: SavedMessage[] = [
+      {
+        id: 42 * 2 ** 20,
+        date: 1_700_000_001,
+        kind: 'file',
+        body: 'doc',
+        styles: [],
+        media: {
+          file: { run: 1, fileId: 1, remoteId: 'r1' },
+          size: 4,
+          contentType: 'application/octet-stream',
+        },
+      },
+    ];
+    const source: SavedSource = {
+      readMessages: async () => messages,
+      withMedia: async (_media, use, _cancel, ...rest: unknown[]) => {
+        withMediaCalls.push(rest[0]);
+        return use(4, async (onChunk) => onChunk(new Uint8Array([1, 2, 3, 4])));
+      },
+    };
+    await copyToNoteToSelf(account, messages, () => undefined, controller.signal, {
+      source,
+      onWait: () => undefined,
+    });
+    expect(withMediaCalls[0]).toMatchObject({ messageId: 42 * 2 ** 20 });
+    expect(sendNoteOptions[0]).toMatchObject({ cancel: controller.signal });
   });
 });

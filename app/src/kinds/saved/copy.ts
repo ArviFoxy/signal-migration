@@ -134,17 +134,34 @@ async function readAllBytes(
   return offset === size ? out : out.subarray(0, offset);
 }
 
+/** Active rate-limit or throttle pause during Saved Messages migration (`until` is ms since 1970, or null if unknown). */
+export type SavedWait = {
+  service: 'Signal' | 'Telegram';
+  until: number | null;
+};
+
 async function uploadSavedMedia(
   account: Pick<SignalAccount, 'withChat' | 'https'>,
   source: SavedSource,
+  messageId: number,
   media: SavedMedia,
   caption: string | undefined,
   convert: ConvertSticker | undefined,
   cancel: AbortSignal,
+  onWait?: (wait: SavedWait | null) => void,
 ): Promise<UploadedAttachment> {
   if (!source.withMedia) {
     throw new Error('reading Telegram media files is not available in this session');
   }
+  const signalWait = onWait
+    ? (until: number | null) => onWait(until === null ? null : { service: 'Signal', until })
+    : undefined;
+  const telegramWait = onWait
+    ? (until: number | null) => onWait(until === null ? null : { service: 'Telegram', until })
+    : undefined;
+  const telegramWaiting = onWait
+    ? (waiting: boolean) => onWait(waiting ? { service: 'Telegram', until: null } : null)
+    : undefined;
   return source.withMedia(
     media,
     async (size, readChunks) => {
@@ -165,11 +182,14 @@ async function uploadSavedMedia(
             caption: caption || undefined,
           },
           cancel,
+          undefined,
+          signalWait,
         );
       }
-      return uploadAttachment(account, { size, readChunks }, metadataOf(media, caption), cancel);
+      return uploadAttachment(account, { size, readChunks }, metadataOf(media, caption), cancel, undefined, signalWait);
     },
     cancel,
+    { messageId, onWait: telegramWait, onWaiting: telegramWaiting },
   );
 }
 
@@ -178,6 +198,8 @@ export type CopyOptions = {
   convert?: ConvertSticker;
   /** Called when a group is permanently uncopyable (oversized unknown-size file or unconvertible sticker) and skipped. */
   onSkipped?: (group: SavedGroup, error: Error) => void;
+  /** Called when copying pauses for a Signal or Telegram rate limit, and with null once copying resumes. */
+  onWait?: (wait: SavedWait | null) => void;
 };
 
 /**
@@ -193,6 +215,9 @@ export async function copyToNoteToSelf(
   cancel: AbortSignal,
   options: CopyOptions = {},
 ): Promise<void> {
+  const signalWait = options.onWait
+    ? (until: number | null) => options.onWait!(until === null ? null : { service: 'Signal', until })
+    : undefined;
   for (const group of groupSavedMessages(messages)) {
     if (cancel.aborted) return;
     const first = group.messages[0];
@@ -208,7 +233,14 @@ export async function copyToNoteToSelf(
       if (fullBody !== '' && !bodyFits(fullBody)) {
         const textBytes = textEncoder.encode(fullBody);
         attachments.push(
-          await uploadAttachment(account, bytesSource(textBytes), { contentType: LONG_TEXT_CONTENT_TYPE }, cancel),
+          await uploadAttachment(
+            account,
+            bytesSource(textBytes),
+            { contentType: LONG_TEXT_CONTENT_TYPE },
+            cancel,
+            undefined,
+            signalWait,
+          ),
         );
         body = trimBody(fullBody);
       }
@@ -217,7 +249,16 @@ export async function copyToNoteToSelf(
         if (!item.media) continue;
         const itemCaption = item !== bodyOwner && item.body !== '' ? item.body : undefined;
         attachments.push(
-          await uploadSavedMedia(account, options.source!, item.media, itemCaption, options.convert, cancel),
+          await uploadSavedMedia(
+            account,
+            options.source!,
+            item.id,
+            item.media,
+            itemCaption,
+            options.convert,
+            cancel,
+            options.onWait,
+          ),
         );
       }
     } catch (error) {
@@ -237,7 +278,12 @@ export async function copyToNoteToSelf(
       styles,
       ...(attachments.length > 0 ? { attachments } : {}),
     };
-    await account.sendNoteToSelf(note);
+    try {
+      await account.sendNoteToSelf(note, { cancel, onWait: signalWait });
+    } catch (error) {
+      if (cancel.aborted) return;
+      throw error;
+    }
     onSent(group.lastId);
   }
 }

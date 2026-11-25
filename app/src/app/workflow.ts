@@ -2,7 +2,14 @@
 // state, and the user's actions as events. Nothing here holds state of its own.
 
 import { contactsToAdd } from '../kinds/friends/search';
-import { type LeftOut, leftOutFrom, mediaSummaryFrom, messagesToCopy, notYetSent } from '../kinds/saved/copy';
+import {
+  type LeftOut,
+  leftOutFrom,
+  mediaSummaryFrom,
+  messagesToCopy,
+  notYetSent,
+  type SavedWait,
+} from '../kinds/saved/copy';
 import type { PackEntry, StickerMigration } from '../kinds/stickers/migration';
 import { DEFAULT_DEVICE_NAME } from '../signal/device-name';
 import {
@@ -227,6 +234,11 @@ export class Workflow extends Runtime {
       ...mediaSummaryFrom(state.saved.messages, state.savedFrom),
       leftOut: leftOutFrom(state.saved.messages, state.savedFrom),
     };
+  }
+
+  /** Active Signal or Telegram rate-limit pause while copying Saved Messages; null when actively copying or idle. */
+  get savedWait(): SavedWait | null {
+    return this.state.kind === 'migrating' ? (this.state.run.savedWait ?? null) : null;
   }
 
   /** The reading of sticker packs: none while stickers are not chosen or Telegram is not signed in. */

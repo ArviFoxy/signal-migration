@@ -282,7 +282,7 @@ export function appServices(
       storage: () => account.storage(),
       announceStickerPacks: (packs) => account.announceStickerPacks(packs),
       announceStorageChange: () => account.announceStorageChange(),
-      sendNoteToSelf: (note) => account.sendNoteToSelf(note),
+      sendNoteToSelf: (note, options) => account.sendNoteToSelf(note, options),
       async unlink() {
         if (options.unlinkNever) await new Promise(() => undefined);
         if (world.signal.failUnlinks > 0) {

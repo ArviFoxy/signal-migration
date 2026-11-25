@@ -8,6 +8,7 @@
 //
 // "Disconnect and clear" ends the same way as the migration's end, and then goes back to the start.
 
+import type { SavedWait } from '../../../kinds/saved/copy';
 import type { FriendsState } from '../friends/state';
 import type { PacksState } from '../packs/state';
 import type { Record } from '../record';
@@ -49,6 +50,8 @@ export type Run = {
   status: 'running' | 'ended' | 'failed';
   friendsAdded: number | null;
   error: string | null;
+  /** Active rate-limit pause during Saved Messages copying; null/omitted while actively copying or idle. */
+  savedWait?: SavedWait | null;
 };
 
 /** Why the migration ends: it finished, or the user asked to disconnect and clear. */

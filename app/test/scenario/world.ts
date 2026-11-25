@@ -9,7 +9,7 @@ import type { ManifestRecord } from '../../src/gen/SignalStorage_pb';
 import type { Note } from '../../src/signal/note-to-self';
 import { basicAuthorization } from '../../src/signal/session';
 import { StorageClient } from '../../src/signal/storage';
-import type { ChatChannel, SignalAccount } from '../../src/signal/transport';
+import type { ChatChannel, SendNoteOptions, SignalAccount } from '../../src/signal/transport';
 import { storageServiceKeyFromMasterKey } from '../../src/wasm/signal_migration_wasm';
 import '../wasm';
 import { VirtualClock } from './clock';
@@ -52,7 +52,8 @@ export class SimulatedAccount implements SignalAccount {
     this.signal.deliverToOtherDevices(this.aci, this.deviceId, []);
   }
 
-  async sendNoteToSelf(note: Note): Promise<void> {
+  async sendNoteToSelf(note: Note, options?: SendNoteOptions): Promise<void> {
+    options?.cancel?.throwIfAborted();
     this.signal.deliverNote(this.aci, this.deviceId, note);
   }
 }

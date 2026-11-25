@@ -2,7 +2,8 @@
 // their stickers.
 
 import type * as Td from 'tdlib-types';
-import { type TelegramClient, untilNotRestarted } from '../../telegram/client';
+import { type TelegramClient, TelegramError, untilNotRestarted } from '../../telegram/client';
+import { patiently } from '../../telegram/patiently';
 
 export type StickerFormat = 'webp' | 'tgs' | 'webm';
 
@@ -46,7 +47,27 @@ const CONCURRENT_REQUESTS = 4;
 const FILE_GONE = 'the sticker is no longer in its pack on Telegram';
 
 /** A file this source gave out: TDLib's number for it in the run that gave it, and how to find it again. */
-type IssuedFile = { run: number; id: number; setId: string; uniqueId: string };
+type IssuedFile = { run: number; id: number; setId: string; setName: string; uniqueId: string };
+
+/** Races a shared promise against one caller's AbortSignal without aborting the shared work for other callers. */
+function withAbort<T>(promise: Promise<T>, cancel?: AbortSignal): Promise<T> {
+  if (!cancel) return promise;
+  if (cancel.aborted) return Promise.reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+    cancel.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cancel.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        cancel.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 function toPack(set: Td.stickerSet, issue: (file: Td.file) => number): TelegramPack {
   return {
@@ -74,20 +95,57 @@ function toPack(set: Td.stickerSet, issue: (file: Td.file) => number): TelegramP
  */
 export function telegramSource(client: TelegramClient): TelegramSource {
   const issued: IssuedFile[] = [];
+  /**
+   * Per-run installed sticker sets fetch. Because TDLib runs with `useDatabase: false`, every fresh run starts with an
+   * empty in-memory sticker-set cache, so `getStickerSet(set_id)` returns 400 "Sticker set not found" until
+   * `getInstalledStickerSets` populates the sets' access hashes in that run.
+   */
+  const installedInRun = new Map<number, Promise<Td.stickerSetInfo[]>>();
   /** The files of a pack in one run, by their permanent identifier; keyed by run and pack. */
   const reread = new Map<string, Promise<Map<string, number>>>();
 
-  const readPack = async (setId: string): Promise<TelegramPack> => {
-    const run = client.run;
-    const set = await client.invokeInRun(run, { _: 'getStickerSet', set_id: setId });
-    return toPack(set, (file) => issued.push({ run, id: file.id, setId, uniqueId: file.remote.unique_id }) - 1);
+  const ensureInstalledInRun = (run: number): Promise<Td.stickerSetInfo[]> => {
+    let list = installedInRun.get(run);
+    if (!list) {
+      list = patiently(() =>
+        client.invokeInRun(run, { _: 'getInstalledStickerSets', sticker_type: { _: 'stickerTypeRegular' } }),
+      ).then(({ sets }) => sets);
+      installedInRun.set(run, list);
+      list.catch(() => {
+        if (installedInRun.get(run) === list) installedInRun.delete(run);
+      });
+    }
+    return list;
   };
 
-  const filesInRun = (run: number, setId: string): Promise<Map<string, number>> => {
+  const readPack = async (run: number, setId: string, setName: string, cancel?: AbortSignal): Promise<TelegramPack> => {
+    const set = await patiently(() => client.invokeInRun(run, { _: 'getStickerSet', set_id: setId }), cancel);
+    const name = set.name || setName;
+    return toPack(
+      set,
+      (file) => issued.push({ run, id: file.id, setId, setName: name, uniqueId: file.remote.unique_id }) - 1,
+    );
+  };
+
+  const fetchSetInRun = async (run: number, setId: string, setName: string): Promise<Td.stickerSet> => {
+    await ensureInstalledInRun(run);
+    try {
+      return await patiently(() => client.invokeInRun(run, { _: 'getStickerSet', set_id: setId }));
+    } catch (error) {
+      // A pack uninstalled on another device after readPacks is no longer in getInstalledStickerSets; look it up by
+      // its short name so TDLib fetches its access hash from Telegram.
+      if (setName && error instanceof TelegramError && error.code === 400 && /not found/i.test(error.message)) {
+        return patiently(() => client.invokeInRun(run, { _: 'searchStickerSet', name: setName, ignore_cache: false }));
+      }
+      throw error;
+    }
+  };
+
+  const filesInRun = (run: number, setId: string, setName: string): Promise<Map<string, number>> => {
     const key = `${run}:${setId}`;
     let files = reread.get(key);
     if (!files) {
-      files = client.invokeInRun(run, { _: 'getStickerSet', set_id: setId }).then((set) => {
+      files = fetchSetInRun(run, setId, setName).then((set) => {
         const byUniqueId = new Map<string, number>();
         for (const sticker of set.stickers)
           for (const file of [sticker.sticker, sticker.thumbnail?.file])
@@ -95,17 +153,21 @@ export function telegramSource(client: TelegramClient): TelegramSource {
         return byUniqueId;
       });
       reread.set(key, files);
-      files.catch(() => reread.delete(key));
+      files.catch(() => {
+        if (reread.get(key) === files) reread.delete(key);
+      });
     }
     return files;
   };
 
   /** TDLib's number in one run for a file this source gave out, paired with that run. */
-  const currentId = async (fileId: number): Promise<{ run: number; id: number }> => {
+  const currentId = async (fileId: number, cancel?: AbortSignal): Promise<{ run: number; id: number }> => {
     const run = client.run;
     const file = issued[fileId];
     if (file.run === run) return { run, id: file.id };
-    const id = file.uniqueId ? (await filesInRun(run, file.setId)).get(file.uniqueId) : undefined;
+    const id = file.uniqueId
+      ? (await withAbort(filesInRun(run, file.setId, file.setName), cancel)).get(file.uniqueId)
+      : undefined;
     if (id === undefined) throw new Error(FILE_GONE);
     return { run, id };
   };
@@ -114,26 +176,27 @@ export function telegramSource(client: TelegramClient): TelegramSource {
     readPacks: (onProgress, cancel) =>
       untilNotRestarted(() => {
         cancel?.throwIfAborted();
-        return readInstalledPacks(client, readPack, onProgress, cancel);
+        return readInstalledPacks(client.run, ensureInstalledInRun, readPack, onProgress, cancel);
       }),
     readFile: (fileId, cancel) =>
       untilNotRestarted(async () => {
         cancel?.throwIfAborted();
-        const { run, id } = await currentId(fileId);
-        return client.readFile(id, run, cancel);
+        const { run, id } = await currentId(fileId, cancel);
+        return patiently(() => client.readFile(id, run, cancel), cancel);
       }),
   };
 }
 
 /** Lists the installed regular sticker packs with all their stickers. `onProgress` gets (packs read, packs total). */
 async function readInstalledPacks(
-  client: TelegramClient,
-  readPack: (setId: string) => Promise<TelegramPack>,
+  run: number,
+  ensureInstalledInRun: (run: number) => Promise<Td.stickerSetInfo[]>,
+  readPack: (run: number, setId: string, setName: string, cancel?: AbortSignal) => Promise<TelegramPack>,
   onProgress: (done: number, total: number) => void,
   cancel?: AbortSignal,
 ): Promise<TelegramPack[]> {
   cancel?.throwIfAborted();
-  const { sets } = await client.invoke({ _: 'getInstalledStickerSets', sticker_type: { _: 'stickerTypeRegular' } });
+  const sets = await withAbort(ensureInstalledInRun(run), cancel);
   cancel?.throwIfAborted();
   const packs: TelegramPack[] = new Array(sets.length);
   let next = 0;
@@ -143,7 +206,7 @@ async function readInstalledPacks(
     while (next < sets.length) {
       cancel?.throwIfAborted();
       const index = next++;
-      packs[index] = await readPack(sets[index].id);
+      packs[index] = await readPack(run, sets[index].id, sets[index].name, cancel);
       cancel?.throwIfAborted();
       onProgress(++done, sets.length);
     }

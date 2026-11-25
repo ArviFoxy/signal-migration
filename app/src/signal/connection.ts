@@ -10,7 +10,7 @@ import { fetchLatestStorageMessage, installStickerPacksMessage, OwnDevices } fro
 import { SignalSession } from './session';
 import { HandshakeRefusedError, SocketClosedError } from './socket';
 import { StorageClient } from './storage';
-import type { ChatChannel, SignalAccount } from './transport';
+import type { ChatChannel, SendNoteOptions, SignalAccount } from './transport';
 import { loadSignalWasm } from './wasm';
 
 /** A linked device's login and storage service key, as kept between visits. */
@@ -108,11 +108,19 @@ export class SignalConnection implements SignalAccount {
     return this.announceStickerPacks([]);
   }
 
-  async sendNoteToSelf(note: Note): Promise<void> {
+  async sendNoteToSelf(note: Note, options?: SendNoteOptions): Promise<void> {
+    options?.cancel?.throwIfAborted();
     const devices = await this.#toOwnDevices();
     const content = noteToSelfMessage(this.#account.credentials.aci, note);
     // Not urgent, as Signal Desktop sends a transcript (sendSyncMessageOnly): the phone is not woken for each note.
-    await this.withChat((chat) => devices.send(chat, content, { timestamp: note.timestamp, urgent: false }));
+    await this.withChat((chat) =>
+      devices.send(chat, content, {
+        timestamp: note.timestamp,
+        urgent: false,
+        cancel: options?.cancel,
+        onWait: options?.onWait,
+      }),
+    );
   }
 
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device, or `cancel`. */

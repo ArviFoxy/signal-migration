@@ -19,10 +19,16 @@ export class DownloadStalledError extends Error {
   }
 }
 
-/** How long a download may receive nothing before it counts as stalled. */
-export const STALL_LIMIT_MS = 60_000;
+/**
+ * How long a download may receive nothing before it counts as stalled. Must exceed TDLib's internal NetQueryDelayer
+ * timeout (`total_timeout_limit = 60` s in NetQueryCreator.cpp) so Telegram's <= 60 s flood-wait delays complete or
+ * surface as "Too Many Requests: retry after N" instead of being cancelled early as stalls.
+ */
+export const STALL_LIMIT_MS = 90_000;
 /** How often TDLib is asked how far the download got. */
 const PROGRESS_POLL_MS = 5_000;
+/** How long without new bytes before `onWaiting(true)` is called so the UI can explain TDLib's internal throttle. */
+const WAITING_NOTIFY_MS = 10_000;
 
 /** Races `promise` against a timeout of `ms` and optional `cancel`, always clearing timers and listeners. */
 function raceWait<T>(promise: Promise<T>, ms: number, onTimeout: T, cancel?: AbortSignal): Promise<T> {
@@ -70,6 +76,7 @@ export async function downloadWithStallLimit(
   limitMs = STALL_LIMIT_MS,
   pollMs = PROGRESS_POLL_MS,
   cancel?: AbortSignal,
+  onWaiting?: (waiting: boolean) => void,
 ): Promise<void> {
   cancel?.throwIfAborted();
   let finished = false;
@@ -89,6 +96,12 @@ export async function downloadWithStallLimit(
   let received = 0;
   let total = 0;
   let progressAt = Date.now();
+  let notifiedWaiting = false;
+  const setWaiting = (waiting: boolean) => {
+    if (notifiedWaiting === waiting) return;
+    notifiedWaiting = waiting;
+    onWaiting?.(waiting);
+  };
   try {
     while (!finished) {
       await raceWait(
@@ -122,16 +135,21 @@ export async function downloadWithStallLimit(
         if (file.local.downloaded_size > received) {
           received = file.local.downloaded_size;
           progressAt = Date.now();
+          setWaiting(false);
         }
       }
-      if (Date.now() - progressAt >= limitMs) {
+      const idleMs = Date.now() - progressAt;
+      if (idleMs >= limitMs) {
         cancelDownload();
         throw new DownloadStalledError(received, total, limitMs);
       }
+      if (idleMs >= WAITING_NOTIFY_MS) setWaiting(true);
     }
   } catch (error) {
     if (cancel?.aborted && !(error instanceof DownloadStalledError)) cancelDownload();
     throw error;
+  } finally {
+    setWaiting(false);
   }
   await download;
 }

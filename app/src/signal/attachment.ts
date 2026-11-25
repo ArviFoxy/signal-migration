@@ -24,7 +24,8 @@ export const UPLOAD_CHUNK_BYTES = 2 * 1024 * 1024;
 
 const TUS_VERSION = '1.0.0';
 const MAX_RATE_LIMIT_RETRIES = 8;
-const MAX_RETRY_WAIT_S = 60;
+const MAX_BACKOFF_WAIT_S = 60;
+const MAX_RETRY_AFTER_S = 3600;
 const encoder = new TextEncoder();
 
 /** Signal's padded plaintext length: `max(541, floor(1.05^ceil(log_1.05(size))))`. */
@@ -115,8 +116,17 @@ function abortableWait(ms: number, cancel: AbortSignal): Promise<void> {
 
 function parseRetryAfterMs(headerValue: string | undefined, attempt: number): number {
   const seconds = Number(headerValue);
-  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, MAX_RETRY_WAIT_S) * 1000 + 200;
-  return Math.min(2 ** attempt, MAX_RETRY_WAIT_S) * 1000;
+  if (Number.isFinite(seconds) && seconds > 0) return Math.min(seconds, MAX_RETRY_AFTER_S) * 1000 + 200;
+  return Math.min(2 ** attempt, MAX_BACKOFF_WAIT_S) * 1000;
+}
+
+async function waitWithNotice(ms: number, cancel: AbortSignal, onWait?: (until: number | null) => void): Promise<void> {
+  onWait?.(Date.now() + ms);
+  try {
+    await abortableWait(ms, cancel);
+  } finally {
+    onWait?.(null);
+  }
 }
 
 /** Validates that a CDN URL uses HTTPS on the expected Signal CDN host and returns its host and request path. */
@@ -141,6 +151,7 @@ async function requestUploadForm(
   account: Pick<SignalAccount, 'withChat'>,
   uploadLength: number,
   cancel: AbortSignal,
+  onWait?: (until: number | null) => void,
 ): Promise<AttachmentUploadForm> {
   for (let attempt = 0; ; attempt++) {
     cancel.throwIfAborted();
@@ -153,7 +164,7 @@ async function requestUploadForm(
     if (response.status === 413) throw new AttachmentTooLargeError(uploadLength);
     if (response.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
       const waitMs = parseRetryAfterMs(chatHeader(response.headers, 'Retry-After'), attempt);
-      await abortableWait(waitMs, cancel);
+      await waitWithNotice(waitMs, cancel, onWait);
       continue;
     }
     throw new Error(`requesting an attachment upload form answered ${response.status} ${response.message}`);
@@ -168,12 +179,13 @@ async function cdnRequestWithRetry(
   headers: string[],
   body: Uint8Array,
   cancel: AbortSignal,
+  onWait?: (until: number | null) => void,
 ): Promise<HttpResponse> {
   for (let attempt = 0; ; attempt++) {
     cancel.throwIfAborted();
     const response = await https(host, method, path, headers, body);
     if (response.status === 429 && attempt < MAX_RATE_LIMIT_RETRIES) {
-      await abortableWait(parseRetryAfterMs(response.header('Retry-After'), attempt), cancel);
+      await waitWithNotice(parseRetryAfterMs(response.header('Retry-After'), attempt), cancel, onWait);
       continue;
     }
     if (response.status >= 500 && response.status < 600 && attempt < 3) {
@@ -196,6 +208,7 @@ class ChunkedUploader {
     private readonly form: AttachmentUploadForm,
     private readonly totalBytes: number,
     private readonly cancel: AbortSignal,
+    private readonly onWait?: (until: number | null) => void,
   ) {
     if (form.cdn !== 2 && form.cdn !== 3) {
       throw new Error(`unsupported Signal attachment CDN ${form.cdn}`);
@@ -219,6 +232,7 @@ class ChunkedUploader {
       headers,
       new Uint8Array(0),
       this.cancel,
+      this.onWait,
     );
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`starting attachment upload answered ${response.status}`);
@@ -254,6 +268,7 @@ class ChunkedUploader {
           headers,
           chunk,
           this.cancel,
+          this.onWait,
         );
         if (response.status === 413) throw new AttachmentTooLargeError(this.totalBytes);
         if (response.status < 200 || response.status >= 300) {
@@ -292,6 +307,7 @@ class ChunkedUploader {
           headers,
           chunk,
           this.cancel,
+          this.onWait,
         );
         if (response.status === 413) throw new AttachmentTooLargeError(this.totalBytes);
         if (response.status < 200 || response.status >= 300) {
@@ -316,6 +332,7 @@ class ChunkedUploader {
         headers,
         chunk,
         this.cancel,
+        this.onWait,
       );
       if (isFinal) {
         if (response.status < 200 || response.status >= 300) {
@@ -344,6 +361,7 @@ export async function uploadAttachment(
   metadata: AttachmentMetadata,
   cancel: AbortSignal,
   chunkBytes = UPLOAD_CHUNK_BYTES,
+  onWait?: (until: number | null) => void,
 ): Promise<UploadedAttachment> {
   if (!Number.isSafeInteger(source.size) || source.size < 0) {
     throw new Error(`invalid attachment size: ${source.size}`);
@@ -354,8 +372,8 @@ export async function uploadAttachment(
   // Use the WebAssembly implementation so Upload-Length / Content-Range always match AttachmentEncryptor bit-for-bit.
   const ciphertextSize = wasmEncryptedAttachmentSize(source.size);
   if (ciphertextSize > MAX_ATTACHMENT_UPLOAD_BYTES) throw new AttachmentTooLargeError(ciphertextSize);
-  const form = await requestUploadForm(account, ciphertextSize, cancel);
-  const uploader = new ChunkedUploader(account.https, form, ciphertextSize, cancel);
+  const form = await requestUploadForm(account, ciphertextSize, cancel, onWait);
+  const uploader = new ChunkedUploader(account.https, form, ciphertextSize, cancel, onWait);
   const encryptor = new AttachmentEncryptor(source.size);
 
   // Coalesce encrypted output into fixed-size chunks (except the final remainder) for CDN upload.

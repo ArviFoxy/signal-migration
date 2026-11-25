@@ -1,5 +1,6 @@
 // Every event of the app: the machines' own, and the top level's.
 
+import type { SavedWait } from '../../kinds/saved/copy';
 import type { SetupStep } from './app/steps';
 import type { FriendsEvent } from './friends/state';
 import type { PacksEvent } from './packs/state';
@@ -27,6 +28,8 @@ export type AppEvent =
   | { type: 'run/friends-failed'; error: string }
   /** The saved message with this ID, and every one before it, is in Signal. */
   | { type: 'run/saved-sent'; upTo: number }
+  /** Saved Messages migration paused on a Signal or Telegram rate limit, or resumed (null). */
+  | { type: 'run/saved-wait'; wait: SavedWait | null }
   | { type: 'run/saved-failed'; error: string }
   // From the user.
   | { type: 'go-to'; step: SetupStep }

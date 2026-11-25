@@ -89,21 +89,34 @@ export const migrating: VariantHandlers<AppState, 'migrating', AppEvent, Context
   'run/ended': (state) => ({ ...state, run: { ...state.run, status: 'ended' } }),
   'run/failed': (state, event) => ({
     ...state,
-    run: { ...state.run, status: 'failed', error: `The migration stopped: ${event.error}` },
+    run: { ...state.run, status: 'failed', error: `The migration stopped: ${event.error}`, savedWait: null },
   }),
   'run/friends-added': (state, event) => ({ ...state, run: { ...state.run, friendsAdded: event.count } }),
   'run/friends-failed': (state, event) => ({
     ...state,
     run: { ...state.run, status: 'failed', error: `Adding your friends to Signal failed: ${event.error}` },
   }),
-  'run/saved-sent': (state, event) => ({ ...state, savedSentUpTo: event.upTo }),
+  'run/saved-sent': (state, event) => ({
+    ...state,
+    savedSentUpTo: event.upTo,
+    run: state.run.savedWait ? { ...state.run, savedWait: null } : state.run,
+  }),
+  'run/saved-wait': (state, event) => ({
+    ...state,
+    run: { ...state.run, savedWait: event.wait },
+  }),
   'run/saved-failed': (state, event) => ({
     ...state,
-    run: { ...state.run, status: 'failed', error: `Copying your Saved Messages to Signal failed: ${event.error}` },
+    run: {
+      ...state.run,
+      status: 'failed',
+      error: `Copying your Saved Messages to Signal failed: ${event.error}`,
+      savedWait: null,
+    },
   }),
   'run/retry': (state) => ({
     ...state,
-    run: { ...state.run, attempt: state.run.attempt + 1, status: 'running', error: null },
+    run: { ...state.run, attempt: state.run.attempt + 1, status: 'running', error: null, savedWait: null },
   }),
   finish: (state, _, context) => beginEnding(state, 'finish', context),
   clear: (state, _, context) => beginEnding(state, 'clear', context),
