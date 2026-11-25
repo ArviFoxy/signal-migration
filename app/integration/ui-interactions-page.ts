@@ -462,6 +462,145 @@ const uiTests = {
       openAfterSignOut,
     };
   },
+
+  async migrateStepSavedRateLimitAndFailure() {
+    const host = clearBody();
+    const el = document.createElement('migrate-step') as MigrateStep;
+    el.stickers = false;
+    el.migration = null;
+    el.run = { ended: false, completed: false, canRetry: false, failed: false, ending: false, finished: false };
+
+    // 1. Actively copying: progress bar must be animated (data-state="active" + .progress-fill-active).
+    el.saved = { kind: 'ready', toCopy: 388, copied: 97, wait: null };
+    host.appendChild(el);
+    await el.updateComplete;
+    const activeBar = el.querySelector('section[aria-label="Saved Messages"] [role="progressbar"]') as HTMLElement;
+    const activeFill = activeBar.firstElementChild as HTMLElement;
+    const activeState = activeBar.dataset.state;
+    const activeAnimated = activeFill.classList.contains('progress-fill-active');
+
+    // 2. Signal rate-limited: still amber progress bar (no active animation) + hourglass + countdown.
+    el.saved = {
+      kind: 'ready',
+      toCopy: 388,
+      copied: 97,
+      wait: { service: 'Signal', until: Date.now() + 45_000 },
+    };
+    await el.updateComplete;
+    const savedSection = el.querySelector('section[aria-label="Saved Messages"]') as HTMLElement;
+    const throttledBar = savedSection.querySelector('[role="progressbar"]') as HTMLElement;
+    const throttledFill = throttledBar.firstElementChild as HTMLElement;
+    const throttledState = throttledBar.dataset.state;
+    const throttledAnimated = throttledFill.classList.contains('progress-fill-active');
+    const throttledHasHourglass = Boolean(savedSection.querySelector('svg'));
+    const rateLimitText = savedSection.textContent?.trim() ?? '';
+
+    // 3. Telegram internal download throttle (unknown duration).
+    el.saved = {
+      kind: 'ready',
+      toCopy: 388,
+      copied: 97,
+      wait: { service: 'Telegram', until: null },
+    };
+    await el.updateComplete;
+    const telegramSlowText = savedSection.textContent?.trim() ?? '';
+
+    // 4. Failed run: still failed bar + Stopped message.
+    el.saved = { kind: 'ready', toCopy: 388, copied: 97, wait: null };
+    el.run = { ended: true, completed: false, canRetry: true, failed: true, ending: false, finished: false };
+    await el.updateComplete;
+    const failedBar = savedSection.querySelector('[role="progressbar"]') as HTMLElement;
+    const failedState = failedBar.dataset.state;
+    const failedText = savedSection.textContent?.trim() ?? '';
+    return {
+      activeState,
+      activeAnimated,
+      throttledState,
+      throttledAnimated,
+      throttledHasHourglass,
+      rateLimitText,
+      telegramSlowText,
+      failedState,
+      failedText,
+    };
+  },
+
+  async desktopSidebarAnchorsBottomOnShortViewport() {
+    const host = clearBody();
+    const { workflow } = makeWorkflow({
+      ...session({
+        telegram: signedIn,
+        signal: linked,
+        chosen: { stickers: true, friends: true, saved: true },
+      }),
+      kind: 'migrating',
+      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+    });
+    const app = document.createElement('migration-app') as MigrationApp;
+    app.workflow = workflow;
+    app.build = {
+      kind: 'verified',
+      tag: 'v0.3.1',
+      commit: '25863eb',
+      url: 'https://github.com/example/repo/attestations',
+    };
+    host.appendChild(app);
+    await app.updateComplete;
+    await tick();
+
+    const nav = app.querySelector('nav') as HTMLElement;
+    const ol = nav.querySelector('ol') as HTMLElement;
+    const navRect = nav.getBoundingClientRect();
+    const navStyle = getComputedStyle(nav);
+    const olStyle = getComputedStyle(ol);
+
+    const verifiedLink = [...nav.querySelectorAll('a')].find((a) => a.textContent?.includes('Verified build'))!;
+    const githubLink = [...nav.querySelectorAll('a')].find((a) => a.textContent?.includes('Source code on GitHub'))!;
+    const clearBtn = [...nav.querySelectorAll('button')].find((b) =>
+      b.textContent?.includes('Disconnect and clear local state'),
+    )!;
+
+    const verifiedRect = verifiedLink.getBoundingClientRect();
+    const githubRect = githubLink.getBoundingClientRect();
+    const clearRect = clearBtn.getBoundingClientRect();
+
+    // Reveal the side tooltip as hover does (headless tabs do not maintain window focus) and verify hit-testing
+    // outside nav's right edge proves nav does not clip the floating tooltip.
+    const sideCard = nav.querySelector('#connection-info-side-signal') as HTMLElement;
+    Object.assign(sideCard.style, { visibility: 'visible', opacity: '1' });
+    await tick();
+    const cardRect = sideCard.getBoundingClientRect();
+    const hitOutsideNav = document.elementFromPoint(navRect.right + 40, cardRect.top + cardRect.height / 2);
+
+    // Also verify migrate-step places Friends, Saved Messages, and Sticker packs as direct siblings at the same
+    // nesting level inside <main>.
+    const sections = ['Friends', 'Saved Messages', 'Sticker packs'].map((label) =>
+      app.querySelector(`main section[aria-label="${label}"]`),
+    );
+    const sameParent =
+      sections.every(Boolean) &&
+      sections[0]!.parentElement === sections[1]!.parentElement &&
+      sections[1]!.parentElement === sections[2]!.parentElement;
+
+    return {
+      viewportHeight: window.innerHeight,
+      navBottom: navRect.bottom,
+      navOverflowY: navStyle.overflowY,
+      navOverflowX: navStyle.overflowX,
+      olOverflowY: olStyle.overflowY,
+      olScrollHeight: ol.scrollHeight,
+      olClientHeight: ol.clientHeight,
+      verifiedBottom: verifiedRect.bottom,
+      githubBottom: githubRect.bottom,
+      clearBottom: clearRect.bottom,
+      sideCardHit: Boolean(hitOutsideNav && sideCard.contains(hitOutsideNav)),
+      sideCardRight: cardRect.right,
+      navRight: navRect.right,
+      sideCardTop: cardRect.top,
+      sideCardBottom: cardRect.bottom,
+      sameParent,
+    };
+  },
 };
 
 declare global {

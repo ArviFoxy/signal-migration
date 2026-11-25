@@ -678,6 +678,26 @@ const FIXTURES: Record<string, Fixture> = {
       };
     },
   },
+  'migrate-throttled': {
+    async state() {
+      const { state, migration } = await migrating(40);
+      migration.uploadAllowedAt = Date.now() + 14 * 60_000 + 32_000;
+      return {
+        ...state,
+        chosen: { stickers: true, friends: false, saved: true },
+        saved: readSaved(),
+        savedFrom: SAVED_FROM,
+        savedSentUpTo: SAVED_MESSAGES[1900].id,
+        run: {
+          attempt: 1,
+          status: 'running',
+          friendsAdded: null,
+          error: null,
+          savedWait: { service: 'Signal', until: Date.now() + 42_000 },
+        },
+      };
+    },
+  },
   'end-failed': {
     async state() {
       const { migration } = await migrating(170);

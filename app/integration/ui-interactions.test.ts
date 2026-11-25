@@ -208,6 +208,71 @@ describe('UI interactions in real Chrome', () => {
     expect(result.sheetFitsViewport).toBe(true);
     expect(result.openAfterSignOut).toBe(false);
   });
+
+  // Detects: Saved Messages rate-limit waits looking silently frozen, working/throttled bars lacking clear visual
+  // distinction, and run failures leaving the Saved Messages progress bar looking active with no stopped status.
+  it('shows active animation, still throttled bar with hourglass/countdown, and stopped status in <migrate-step> Saved Messages block', async () => {
+    const { result, errors } = await runHarness<{
+      activeState: string;
+      activeAnimated: boolean;
+      throttledState: string;
+      throttledAnimated: boolean;
+      throttledHasHourglass: boolean;
+      rateLimitText: string;
+      telegramSlowText: string;
+      failedState: string;
+      failedText: string;
+    }>('migrateStepSavedRateLimitAndFailure');
+    expect(errors).toEqual([]);
+    expect(result.activeState).toBe('active');
+    expect(result.activeAnimated).toBe(true);
+    expect(result.throttledState).toBe('throttled');
+    expect(result.throttledAnimated).toBe(false);
+    expect(result.throttledHasHourglass).toBe(true);
+    expect(result.rateLimitText).toMatch(/Waiting for Signal's rate limit/);
+    expect(result.rateLimitText).toMatch(/0:4[0-5]/);
+    expect(result.telegramSlowText).toMatch(/Waiting for Telegram/);
+    expect(result.failedState).toBe('failed');
+    expect(result.failedText).toMatch(/Stopped/i);
+  });
+
+  // Detects: desktop sidebar overflowing and clipping "Verified build" / "Source code on GitHub" / Connections on
+  // shorter laptop viewports instead of keeping the bottom panel anchored and scrolling the step list, and verifies
+  // parallel migration kinds render at the same nesting level.
+  it('anchors sidebar connections and footer links to the bottom while scrolling steps on a short desktop viewport', async () => {
+    const { result, errors } = await runHarness<{
+      viewportHeight: number;
+      navBottom: number;
+      navOverflowY: string;
+      navOverflowX: string;
+      olOverflowY: string;
+      olScrollHeight: number;
+      olClientHeight: number;
+      verifiedBottom: number;
+      githubBottom: number;
+      clearBottom: number;
+      sideCardHit: boolean;
+      sideCardRight: number;
+      navRight: number;
+      sideCardTop: number;
+      sideCardBottom: number;
+      sameParent: boolean;
+    }>('desktopSidebarAnchorsBottomOnShortViewport', { width: 1280, height: 680, mobile: false });
+    expect(errors).toEqual([]);
+    expect(result.verifiedBottom).toBeLessThanOrEqual(result.navBottom + 1);
+    expect(result.verifiedBottom).toBeLessThanOrEqual(result.viewportHeight);
+    expect(result.githubBottom).toBeLessThanOrEqual(result.navBottom + 1);
+    expect(result.clearBottom).toBeLessThanOrEqual(result.navBottom + 1);
+    expect(result.olOverflowY).toBe('auto');
+    expect(result.olScrollHeight).toBeGreaterThan(result.olClientHeight);
+    expect(result.navOverflowX).toBe('visible');
+    expect(result.navOverflowY).toBe('visible');
+    expect(result.sideCardHit).toBe(true);
+    expect(result.sideCardRight).toBeGreaterThan(result.navRight + 200);
+    expect(result.sideCardTop).toBeGreaterThanOrEqual(0);
+    expect(result.sideCardBottom).toBeLessThanOrEqual(result.viewportHeight);
+    expect(result.sameParent).toBe(true);
+  });
 });
 
 describe('fixture-wide UI invariants', () => {
