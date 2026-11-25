@@ -3,6 +3,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import type { AppState, SetupStep } from '../src/app/machine/app';
+import { EMPTY_STICKER_PROGRESS } from '../src/app/machine/record';
 import type { Session } from '../src/app/machine/app/state';
 import type { SignalState } from '../src/app/machine/signal';
 import type { TelegramState } from '../src/app/machine/telegram';
@@ -36,11 +37,14 @@ const session = (parts: Partial<Session> = {}): Session => ({
   chosen: { stickers: true, friends: false, saved: false },
   packs: { kind: 'none' },
   deselected: [],
+  stickerProgress: EMPTY_STICKER_PROGRESS,
   friends: { kind: 'none' },
   tickedFriends: [],
+  friendsAdded: null,
   saved: { kind: 'none' },
   savedFrom: null,
   savedSentUpTo: null,
+  savedDone: null,
   notice: null,
   ...parts,
 });
@@ -115,7 +119,7 @@ describe('connectRouter', () => {
     env.setState(workflow, {
       ...session(),
       kind: 'migrating',
-      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      run: { attempt: 1, status: 'running', error: null },
     });
     expect(env.loc.hash).toBe('#/migrate');
     expect(env.calls.filter((call) => call.kind === 'push')).toEqual([]);
@@ -168,7 +172,7 @@ describe('connectRouter', () => {
     env.setState(workflow, {
       ...session(),
       kind: 'migrating',
-      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      run: { attempt: 1, status: 'running', error: null },
     });
     expect(env.calls).toEqual([{ kind: 'push', url: '#/migrate' }]);
 

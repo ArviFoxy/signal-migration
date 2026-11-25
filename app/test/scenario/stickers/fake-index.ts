@@ -13,6 +13,8 @@ export class FakeIndex {
   adds = 0;
   /** Runs before each read is answered: something that happens on the server meanwhile. */
   beforeRead: () => Promise<void> = async () => undefined;
+  /** Runs before each add is answered. */
+  beforeAdd: () => Promise<void> = async () => undefined;
 
   constructor(
     readonly clock: Pick<Clock, 'now'>,
@@ -28,6 +30,7 @@ export class FakeIndex {
       return new Uint8Array(page.flatMap((entry) => [...entry]));
     },
     add: async (entry: Uint8Array): Promise<AddResult> => {
+      await this.beforeAdd();
       if (entry.length !== 48) throw new Error('malformed entry');
       if (this.entries.some((existing) => hex(existing) === hex(entry))) return 'added';
       const packId = entry.subarray(32);

@@ -187,7 +187,11 @@ export class MigrateStep extends MigrationView {
     switch (entry.state) {
       case 'in-signal': {
         const conversion = conversionDescription(entry.conversion);
-        const detail = migration.wasOnSignal(entry) ? 'Installed · was already on Signal' : 'Uploaded and installed';
+        const detail = migration.wasOnSignal(entry)
+          ? 'Installed · was already on Signal'
+          : migration.wasAlreadyInSignal(entry)
+            ? 'Already in your Signal'
+            : 'Uploaded and installed';
         return { symbol: SYMBOLS.done, detail: conversion ? `${detail} · ${conversion}` : detail, tone: 'text-muted' };
       }
       case 'failed':
@@ -231,7 +235,7 @@ export class MigrateStep extends MigrationView {
           tone: 'text-muted',
         };
       default:
-        if (isCurrent && migration.uploadAllowedAt) {
+        if (isCurrent && !this.run.failed && !this.run.ended && migration.uploadAllowedAt) {
           return {
             symbol: SYMBOLS.limit,
             detail: `Waiting for Signal's upload limit · ${countdown(migration.uploadAllowedAt - Date.now())}`,
@@ -614,6 +618,16 @@ export class MigrateStep extends MigrationView {
       ${stickyFooter(this.actions(packs.failed))}`;
   }
 
+  private runningDescription(): string {
+    if (this.run.failed) {
+      return 'The migration stopped before everything finished. Your progress is saved — try again when you are ready.';
+    }
+    if (this.run.completed) {
+      return 'Some items could not be moved yet. You can retry them or finish now.';
+    }
+    return 'Your progress is saved in this browser. Closing this tab pauses the migration — reopen this page anytime to pick up where you left off.';
+  }
+
   render() {
     const view = this.view();
     switch (view.kind) {
@@ -634,7 +648,11 @@ export class MigrateStep extends MigrationView {
           ${stickyFooter(this.actions(0))}`;
       }
       case 'without-packs':
-        return html`${stepHeader(this.position, 'Migrating', 'Keep this tab open until it finishes.')}
+        return html`${stepHeader(
+            this.position,
+            this.run.completed ? 'Migration finished' : 'Migrating',
+            this.runningDescription(),
+          )}
           <div class="flex flex-col gap-4">${this.friendsBlock()} ${this.savedBlock()}</div>
           ${stickyFooter(this.actions(0))}`;
       case 'reading-packs':
@@ -642,8 +660,8 @@ export class MigrateStep extends MigrationView {
             this.position,
             'Migrating',
             view.failed
-              ? 'The migration stopped before your packs finished reading.'
-              : 'Keep this tab open until it finishes. After a reload, it continues where it stopped.',
+              ? 'The migration stopped before your packs finished reading. Your progress is saved — try again when you are ready.'
+              : this.runningDescription(),
           )}
           <div class="flex flex-col gap-4">
             ${this.friendsBlock()} ${this.savedBlock()} ${this.readingPacksBlock(view.failed)}
@@ -653,7 +671,7 @@ export class MigrateStep extends MigrationView {
         return this.renderWithPacks(
           view.migration,
           this.run.completed ? 'Migration finished' : 'Migrating',
-          'Keep this tab open until it finishes. After a reload, it continues where it stopped.',
+          this.runningDescription(),
         );
       default:
         return assertNever(view);

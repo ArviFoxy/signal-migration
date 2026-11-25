@@ -15,9 +15,11 @@ import { DEFAULT_DEVICE_NAME } from '../signal/device-name';
 import {
   type AppState,
   type Chosen,
+  friendsAddedFor,
   INITIAL_CHOICE,
   isSession,
   linkedDevice,
+  savedDoneFor,
   type SetupStep,
   setupStepShown,
   signedInInstance,
@@ -196,8 +198,13 @@ export class Workflow extends Runtime {
   /** How many friends the run has added to the Signal contacts, once it has; null before, and without a run. */
   get friendsAdded(): number | null {
     const state = this.state;
-    if (state.kind === 'migrating') return state.run.friendsAdded;
-    return state.kind === 'done' && state.chosen.friends ? this.friendsToAdd : null;
+    if (!isSession(state) || !state.chosen.friends) return null;
+    if (state.kind === 'migrating' || state.kind === 'ending' || state.kind === 'done') {
+      const added = friendsAddedFor(state);
+      if (added !== null) return added;
+      return state.kind === 'done' ? this.friendsToAdd : null;
+    }
+    return null;
   }
 
   /** The reading of Saved Messages: none while they are not chosen or Telegram is not signed in. */
@@ -226,14 +233,27 @@ export class Workflow extends Runtime {
     leftOut: LeftOut;
   } | null {
     const state = this.state;
-    if (!isSession(state) || state.saved.kind !== 'read') return null;
-    const toCopy = messagesToCopy(state.saved.messages, state.savedFrom);
-    return {
-      toCopy: toCopy.length,
-      copied: toCopy.length - notYetSent(toCopy, state.savedSentUpTo).length,
-      ...mediaSummaryFrom(state.saved.messages, state.savedFrom),
-      leftOut: leftOutFrom(state.saved.messages, state.savedFrom),
-    };
+    if (!isSession(state)) return null;
+    if (state.saved.kind === 'read') {
+      const toCopy = messagesToCopy(state.saved.messages, state.savedFrom);
+      return {
+        toCopy: toCopy.length,
+        copied: toCopy.length - notYetSent(toCopy, state.savedSentUpTo).length,
+        ...mediaSummaryFrom(state.saved.messages, state.savedFrom),
+        leftOut: leftOutFrom(state.saved.messages, state.savedFrom),
+      };
+    }
+    const done = savedDoneFor(state);
+    if (done !== null && (state.kind === 'migrating' || state.kind === 'ending' || state.kind === 'done')) {
+      return {
+        toCopy: done.copied,
+        copied: done.copied,
+        withMedia: 0,
+        mediaBytes: 0,
+        leftOut: { tooLarge: 0, other: 0 },
+      };
+    }
+    return null;
   }
 
   /** Active Signal or Telegram rate-limit pause while copying Saved Messages; null when actively copying or idle. */
@@ -269,9 +289,11 @@ export class Workflow extends Runtime {
     );
   }
 
-  /** The run stopped with an error. */
+  /** The run stopped with an error (or Telegram failed to reconnect on reopen). */
   get runFailed(): boolean {
-    return this.state.kind === 'migrating' && this.state.run.status === 'failed';
+    return (
+      this.state.kind === 'migrating' && (this.state.run.status === 'failed' || this.state.telegram.kind === 'stopped')
+    );
   }
 
   /** Cross-kind migration completion and retry status for the migrate screen (shares predicate with settleMigrating). */
@@ -297,10 +319,11 @@ export class Workflow extends Runtime {
     };
   }
 
-  /** The newest failure of background work: reading the packs or Signal's packs, the run. */
+  /** The newest failure of background work: reading the packs or Signal's packs, the run, or Telegram reconnect. */
   get error(): string | null {
     const state = this.state;
     if (!isSession(state)) return null;
+    if (state.kind === 'migrating' && state.telegram.kind === 'stopped') return state.telegram.error;
     if (state.friends.kind === 'failed') return state.friends.error;
     if (state.saved.kind === 'failed') return state.saved.error;
     if (state.packs.kind === 'failed') return state.packs.error;
@@ -342,9 +365,12 @@ export class Workflow extends Runtime {
     this.dispatch({ type: 'start-migration' });
   }
 
-  /** Runs again what failed: reading packs, reading Signal, reading friends or saved messages, or the run. */
+  /** Runs again what failed: Telegram reconnect, reading packs/Signal/friends/saved, or the run. */
   tryAgain(): void {
     const state = this.state;
+    if (state.kind === 'migrating' && state.telegram.kind === 'stopped') {
+      this.dispatch({ type: 'telegram/retry' });
+    }
     if (state.kind === 'migrating' && state.run.status !== 'running') {
       this.stickers?.retryFailed();
       this.dispatch({ type: 'run/retry' });

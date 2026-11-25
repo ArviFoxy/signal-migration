@@ -22,7 +22,7 @@ import { setup } from './setup';
 import { type AppState, isSession } from './state';
 
 export * from './state';
-export { INITIAL_CHOICE, stepOf, linkedDevice, signedInInstance } from './session';
+export { INITIAL_CHOICE, friendsAddedFor, linkedDevice, savedDoneFor, signedInInstance, stepOf } from './session';
 export * from './steps';
 
 const byPhase = byVariant<AppState, AppEvent, Context>({
@@ -74,10 +74,11 @@ export function recordOf(state: AppState): Record | null | undefined {
     packs.kind === 'read'
       ? packs.migration.entries.filter((entry) => !entry.selected).map((entry) => entry.pack.setId)
       : state.deselected;
+  const stickerProgress = packs.kind === 'read' ? packs.migration.snapshotProgress() : state.stickerProgress;
   const ending = state.kind === 'ending' || state.kind === 'end-failed' || state.kind === 'done';
   if (ending && nothingKept) return null;
   return {
-    version: 5,
+    version: 6,
     phase: ending ? 'ending' : state.kind === 'migrating' ? 'migrating' : 'setup',
     step: state.kind === 'setup' ? state.step : 'review',
     why: state.kind === 'ending' || state.kind === 'end-failed' ? state.reason : ending ? 'finish' : null,
@@ -86,7 +87,19 @@ export function recordOf(state: AppState): Record | null | undefined {
     chosen: state.chosen,
     deselected,
     tickedFriends: state.tickedFriends,
+    friendsAdded: state.friendsAdded ? { ...state.friendsAdded } : null,
     savedFrom: state.savedFrom,
     savedSentUpTo: state.savedSentUpTo,
+    savedDone: state.savedDone ? { ...state.savedDone } : null,
+    pendingPacks: stickerProgress.pendingPacks.map((pack) => ({
+      setId: pack.setId,
+      packId: pack.packId.slice(),
+      packKey: pack.packKey.slice(),
+      listed: pack.listed,
+    })),
+    uploadLimit: stickerProgress.uploadLimit ? { ...stickerProgress.uploadLimit } : null,
+    installedFromIndex: [...stickerProgress.installedFromIndex],
+    uploadedPacks: [...stickerProgress.uploadedPacks],
+    addedToIndex: stickerProgress.addedToIndex,
   };
 }

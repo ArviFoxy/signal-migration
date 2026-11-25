@@ -4,6 +4,7 @@
 
 import type * as Td from 'tdlib-types';
 import type { AppState, SetupStep } from '../src/app/machine/app';
+import { EMPTY_STICKER_PROGRESS } from '../src/app/machine/record';
 import type { Session } from '../src/app/machine/app/state';
 import type { SignalState } from '../src/app/machine/signal';
 import type { TelegramState } from '../src/app/machine/telegram';
@@ -49,11 +50,14 @@ const session = (parts: Partial<Session> = {}): Session => ({
   chosen: { stickers: true, friends: false, saved: false },
   packs: { kind: 'none' },
   deselected: [],
+  stickerProgress: EMPTY_STICKER_PROGRESS,
   friends: { kind: 'none' },
   tickedFriends: [],
+  friendsAdded: null,
   saved: { kind: 'none' },
   savedFrom: null,
   savedSentUpTo: null,
+  savedDone: null,
   notice: null,
   ...parts,
 });
@@ -362,7 +366,7 @@ const uiTests = {
         },
       }),
       kind: 'migrating',
-      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      run: { attempt: 1, status: 'running', error: null },
     });
     const app = document.createElement('migration-app') as MigrationApp;
     app.workflow = workflow;
@@ -534,7 +538,7 @@ const uiTests = {
         chosen: { stickers: true, friends: true, saved: true },
       }),
       kind: 'migrating',
-      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      run: { attempt: 1, status: 'running', error: null },
     });
     const app = document.createElement('migration-app') as MigrationApp;
     app.workflow = workflow;
@@ -628,6 +632,76 @@ const uiTests = {
       sameParent,
       doneVisibleInOl: doneRect.top >= olRect.top - 1 && doneRect.bottom <= olRect.bottom + 1,
     };
+  },
+
+  async migrateCopyAndPersistedCompletedCards() {
+    const host = clearBody();
+    // 1. Review step without stickers still shows the browser-persistence reassurance.
+    const { workflow: reviewWorkflow } = makeWorkflow(
+      setup('review', {
+        telegram: signedIn,
+        signal: linked,
+        chosen: { stickers: false, friends: false, saved: true },
+        saved: { kind: 'read', instance: 'ui-1', attempt: 1, messages: [] },
+      }),
+    );
+    const reviewApp = document.createElement('migration-app') as MigrationApp;
+    reviewApp.workflow = reviewWorkflow;
+    host.appendChild(reviewApp);
+    await reviewApp.updateComplete;
+    await tick();
+    const reviewText = reviewApp.querySelector('main')?.textContent ?? '';
+
+    // 2. Migrate step reopened mid-sticker-migration with friendsAdded + savedDone persisted (no re-fetch).
+    const host2 = clearBody();
+    const { workflow: migrateWorkflow } = makeWorkflow({
+      ...session({
+        telegram: signedIn,
+        signal: linked,
+        chosen: { stickers: true, friends: true, saved: true },
+        friends: { kind: 'none' },
+        friendsAdded: { aci: device.aci, count: 5 },
+        saved: { kind: 'none' },
+        savedDone: { aci: device.aci, copied: 8 },
+        stickerProgress: {
+          pendingPacks: [],
+          uploadLimit: null,
+          installedFromIndex: [],
+          uploadedPacks: [],
+          addedToIndex: 3,
+        },
+      }),
+      kind: 'migrating',
+      run: { attempt: 1, status: 'running', error: null },
+    });
+    const app = document.createElement('migration-app') as MigrationApp;
+    app.workflow = migrateWorkflow;
+    host2.appendChild(app);
+    await app.updateComplete;
+    await tick();
+    const runningHeader = app.querySelector('main header')?.textContent ?? '';
+    const friendsText = app.querySelector('section[aria-label="Friends"]')?.textContent ?? '';
+    const savedText = app.querySelector('section[aria-label="Saved Messages"]')?.textContent ?? '';
+    const connectionsText = app.querySelector('nav')?.textContent ?? '';
+
+    // 3. Offline reopen (telegram.kind === 'stopped') shows stopped description + Try again button.
+    migrateWorkflow.state = {
+      ...session({
+        telegram: { kind: 'stopped', method: 'qr', instance: 'ui-1', attempt: 1, error: 'offline 503' },
+        signal: linked,
+        chosen: { stickers: false, friends: false, saved: true },
+        saved: { kind: 'none' },
+      }),
+      kind: 'migrating',
+      run: { attempt: 1, status: 'running', error: null },
+    };
+    migrateWorkflow.dispatchEvent(new Event('change'));
+    await app.updateComplete;
+    await tick();
+    const stoppedHeader = app.querySelector('main header')?.textContent ?? '';
+    const stoppedButtons = [...app.querySelectorAll('main button')].map((b) => b.textContent?.trim() ?? '');
+
+    return { reviewText, runningHeader, friendsText, savedText, connectionsText, stoppedHeader, stoppedButtons };
   },
 };
 

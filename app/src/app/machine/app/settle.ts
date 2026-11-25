@@ -7,26 +7,36 @@
 // - ending: both parts are driven to their end; then done (or the start, after a clear), or end-failed.
 // Each rule is a pure function of the state.
 
+import { messagesToCopy } from '../../../kinds/saved/copy';
 import type { Context } from '../core';
 import { signalTransition, type SignalState } from '../signal';
 import { telegramTransition, type TelegramState } from '../telegram';
 import {
   beginEnding,
   freshSession,
+  friendsAddedFor,
   friendsFollowAccounts,
   linkedDevice,
   packsFollowLogin,
+  savedDoneFor,
   savedFollowLogin,
   sessionOf,
   stepOf,
   unlinkOldDevice,
 } from './session';
-import { migrationProgress } from './migrating';
+import { migrationProgress, savedLeft } from './migrating';
 import { type AppState, isSession, type Session, type SessionState } from './state';
 
 /** What follows from the accounts in the setup and during the migration. */
-const followAccounts = (session: Session, context: Context): Session =>
-  savedFollowLogin(friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(session, context))));
+const followAccounts = (
+  session: Session,
+  context: Context,
+  options: { skipFriends?: boolean; skipSaved?: boolean } = {},
+): Session =>
+  savedFollowLogin(
+    friendsFollowAccounts(packsFollowLogin(unlinkOldDevice(session, context)), options.skipFriends),
+    options.skipSaved,
+  );
 
 /** `state` with `session`'s parts, or `state` itself when they are the same. */
 function withSession<S extends SessionState>(state: S, session: Session): S {
@@ -47,12 +57,26 @@ function settleSetup(state: Extract<AppState, { kind: 'setup' }>, context: Conte
 }
 
 function settleMigrating(state: Extract<AppState, { kind: 'migrating' }>, context: Context): AppState {
-  const next = withSession(state, followAccounts(sessionOf(state), context));
+  const skipFriends = friendsAddedFor(state) !== null;
+  const skipSaved = savedDoneFor(state) !== null;
+  let next = withSession(state, followAccounts(sessionOf(state), context, { skipFriends, skipSaved }));
   // A login lost during the migration (signed out elsewhere, unlinked from the phone): the setup shows the step to
-  // log in again, and the user starts the migration again from the review. A login being restored after a reload
-  // (starting, within its time limit) or saved is not lost.
-  const telegramLost = !['starting', 'saving', 'signed-in'].includes(next.telegram.kind);
+  // log in again, and the user starts the migration again from the review. A login being restored after reopening
+  // (starting, within its time limit), saved, or temporarily stopped (e.g. offline on reopen, retryable in place)
+  // is not lost.
+  const telegramLost = !['starting', 'saving', 'signed-in', 'stopped'].includes(next.telegram.kind);
   if (telegramLost || next.signal.kind !== 'linked') return { ...sessionOf(next), kind: 'setup', step: 'review' };
+  // Atomically mark Saved Messages completed once every chosen message has been sent, so reopening during a longer
+  // sticker migration does not re-paginate Telegram Saved Messages history.
+  if (next.chosen.saved && savedDoneFor(next) === null && next.saved.kind === 'read' && savedLeft(next).length === 0) {
+    next = {
+      ...next,
+      savedDone: {
+        aci: next.signal.device.aci,
+        copied: messagesToCopy(next.saved.messages, next.savedFrom).length,
+      },
+    };
+  }
   // Done once each chosen kind is done (shared single predicate with Workflow.migrationRun).
   if (!migrationProgress(next).readyToFinish) return next;
   return beginEnding(next, 'finish', context);

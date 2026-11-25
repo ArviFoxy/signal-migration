@@ -75,9 +75,14 @@ export class ReviewStep extends MigrationView {
               )}`
         }
       </ul>
-      <p class="text-sm text-muted" ?hidden=${!this.stickers}>
-        New packs go into your Signal sticker list in your Telegram order. Packs already in Signal keep their place.
-        Keep this tab open while it uploads. After a reload, it continues where it stopped.
+      <p class="text-sm text-muted">
+        ${
+          this.stickers
+            ? 'New packs go into your Signal sticker list in your Telegram order. Packs already in Signal keep their place. '
+            : ''
+        }Your
+        progress is saved in this browser, so you can close this tab and reopen this page anytime to pick up where you
+        left off.
       </p>
       ${
         animated.length > 0

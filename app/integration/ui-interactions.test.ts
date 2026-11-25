@@ -279,6 +279,31 @@ describe('UI interactions in real Chrome', () => {
     expect(result.sameParent).toBe(true);
     expect(result.doneVisibleInOl).toBe(true);
   });
+
+  // Detects: inaccurate "Keep this tab open / After a reload" copy, missing review note on non-sticker runs, or
+  // reopened completed Friends/Saved cards dropping their counts when re-fetching is skipped.
+  it('shows accurate close-and-reopen copy and renders persisted completed Friends and Saved cards on reopen', async () => {
+    const { result, errors } = await runHarness<{
+      reviewText: string;
+      runningHeader: string;
+      friendsText: string;
+      savedText: string;
+      connectionsText: string;
+      stoppedHeader: string;
+      stoppedButtons: string[];
+    }>('migrateCopyAndPersistedCompletedCards');
+    expect(errors).toEqual([]);
+    expect(result.reviewText).toMatch(/close this tab and reopen/i);
+    expect(result.reviewText).not.toMatch(/Keep this tab open/i);
+    expect(result.runningHeader).toMatch(/Closing this tab pauses the migration/i);
+    expect(result.runningHeader).not.toMatch(/Keep this tab open/i);
+    expect(result.friendsText).toContain('5 friends added to your Signal contacts');
+    expect(result.savedText).toContain('8 messages copied to Note to Self');
+    expect(result.connectionsText).toContain('3 packs added');
+    expect(result.stoppedHeader).toMatch(/migration stopped/i);
+    expect(result.stoppedHeader).not.toMatch(/Closing this tab pauses/i);
+    expect(result.stoppedButtons).toContain('Try again');
+  });
 });
 
 describe('fixture-wide UI invariants', () => {

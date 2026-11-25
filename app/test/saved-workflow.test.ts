@@ -456,4 +456,107 @@ describe('copying Saved Messages', () => {
     await until(() => workflow.state.kind === 'done', 'the migration to finish after retrying the read');
     expect(world.signal.notesToSelf.get(alice.aci)!).toHaveLength(8);
   });
+
+  // Detects: reopening during a multi-kind migration after Saved Messages already finished re-paginating 100% of
+  // Telegram Saved Messages history (and breaking if that re-read fails).
+  it('skips re-reading Telegram Saved Messages on reopen once Saved Messages already finished', async () => {
+    const MINUTE = 60_000;
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const browser = new Browser();
+    const first = appServices(alice, browser, { saved, leaveAfterWaitOf: 10 * MINUTE });
+    const w1 = new Workflow(first.services);
+    w1.start();
+    await until(() => isSession(w1.state), 'loaded');
+    w1.choose('saved', true);
+    w1.goTo('saved');
+    await until(() => first.scanTelegramCode(), 'telegram qr');
+    await until(() => first.scanSignalCode(), 'signal qr');
+    await until(() => w1.saved.kind === 'read' && w1.packsReady, 'saved and packs read');
+    w1.goTo('review');
+    w1.startMigration();
+    await until(() => w1.savedCopy?.copied === 8 && w1.error !== null, 'saved finished and stickers paused');
+    await w1.settled();
+    expect((browser.snapshot as { savedDone: { aci: string; copied: number } | null }).savedDone).toEqual({
+      aci: alice.aci,
+      copied: 8,
+    });
+    browser.closePage();
+
+    let savedReads = 0;
+    const forbiddenSaved: SavedSource = {
+      readMessages: () => {
+        savedReads++;
+        return Promise.reject(new Error('should not re-read Telegram Saved Messages after savedDone'));
+      },
+    };
+    await world.clock.advance(2 * 72 * MINUTE);
+    const second = appServices(alice, browser, { saved: forbiddenSaved });
+    const w2 = new Workflow(second.services);
+    w2.start();
+    await until(() => w2.state.kind === 'done', 'migration finishes on reopen without re-reading saved messages');
+
+    expect(savedReads).toBe(0);
+    expect(w2.savedCopy).toMatchObject({ toCopy: 8, copied: 8 });
+    expect(world.signal.notesToSelf.get(alice.aci)!).toHaveLength(8);
+    expect(await alice.installedTitles()).toEqual(['A', 'B']);
+  });
+
+  // Detects: the 500 ms savedSentUpTo debounce delaying persistence of a media message sent right after earlier
+  // text messages, forcing a redundant re-download and CDN re-upload if the tab closes immediately.
+  it('flushes savedSentUpTo immediately after sending a media message without waiting 500 ms', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([]);
+    const browser = new Browser();
+    let mediaDownloads = 0;
+    let photoDelivered!: () => void;
+    const delivered = new Promise<void>((resolve) => (photoDelivered = resolve));
+    const countingSaved: SavedSource = {
+      readMessages: () => Promise.resolve(MESSAGES),
+      async withMedia(media, use) {
+        if (media.file.fileId === 401) {
+          // Hold indefinitely on visit 1 to simulate closing the tab right after message 3 (within <50 ms of msg 1).
+          photoDelivered();
+          await new Promise<void>(() => undefined);
+        }
+        mediaDownloads++;
+        const bytes = MEDIA_FILES.get(media.file.fileId)!;
+        return use(bytes.length, (onChunk) => onChunk(bytes));
+      },
+    };
+
+    const first = appServices(alice, browser, { saved: countingSaved });
+    const w1 = new Workflow(first.services);
+    w1.start();
+    await until(() => isSession(w1.state), 'loaded');
+    await connectAndRead({ workflow: w1, ...first });
+    const startedAt = Date.now();
+    await startMigration({ workflow: w1, ...first });
+    await delivered;
+    await until(
+      () => (browser.snapshot as { savedSentUpTo: number | null } | null)?.savedSentUpTo === MESSAGES[2].id,
+      'photo message persisted immediately',
+    );
+    expect(Date.now() - startedAt).toBeLessThan(400);
+    expect(mediaDownloads).toBe(1);
+    browser.closePage();
+
+    const second = appServices(alice, browser, {
+      saved: {
+        readMessages: () => Promise.resolve(MESSAGES),
+        async withMedia(media, use) {
+          mediaDownloads++;
+          const bytes = MEDIA_FILES.get(media.file.fileId)!;
+          return use(bytes.length, (onChunk) => onChunk(bytes));
+        },
+      },
+    });
+    const w2 = new Workflow(second.services);
+    w2.start();
+    await until(() => w2.state.kind === 'done', 'second visit finishes');
+
+    // Photo (301) was NOT downloaded/uploaded a second time; only PDF (401) was downloaded on visit 2.
+    expect(mediaDownloads).toBe(2);
+    expect(world.signal.notesToSelf.get(alice.aci)!).toHaveLength(8);
+  });
 });

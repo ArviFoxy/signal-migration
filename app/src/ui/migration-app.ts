@@ -9,6 +9,7 @@ import { html, nothing, type PropertyValues } from 'lit';
 import { customElement, property, state } from 'lit/decorators.js';
 import { ATTESTATIONS_URL } from '../attestation/config';
 import type { BuildVerification } from '../attestation/verify';
+import { isSession } from '../app/machine/app';
 import type { SignalState, UnlinkReason } from '../app/machine/signal';
 import type { TelegramState } from '../app/machine/telegram';
 import type { Step, Workflow } from '../app/workflow';
@@ -127,8 +128,8 @@ export class MigrationApp extends LightElement {
     let [signalState, signalStatus] = SIGNAL_STATUS[signal.kind];
     const unlinked = signal.kind === 'off' && signal.unlinked ? UNLINKED[signal.unlinked] : undefined;
     if (unlinked) [signalState, signalStatus] = ['ended', unlinked];
-    const added = w.stickers?.addedToIndex ?? 0;
-    const contacted = w.stickers !== null && w.stickers.entries.length > 0;
+    const added = w.stickers?.addedToIndex ?? (isSession(w.state) ? w.state.stickerProgress.addedToIndex : 0);
+    const contacted = added > 0 || (w.stickers !== null && w.stickers.entries.length > 0);
     return {
       telegram: {
         state: telegramState,
@@ -446,13 +447,16 @@ export class MigrationApp extends LightElement {
           @start=${() => w.startMigration()}
         ></review-step>`;
       case 'migrate': {
+        const friendsAdded = w.friendsAdded;
         const friends: MigrateFriends | null = !w.chosen.friends
           ? null
-          : w.friends.kind === 'found' || w.state.kind === 'done'
-            ? { kind: 'ready', toAdd: w.friendsToAdd, added: w.friendsAdded }
-            : w.friends.kind === 'failed'
-              ? { kind: 'failed' }
-              : { kind: 'looking' };
+          : friendsAdded !== null
+            ? { kind: 'ready', toAdd: friendsAdded, added: friendsAdded }
+            : w.friends.kind === 'found' || w.state.kind === 'done'
+              ? { kind: 'ready', toAdd: w.friendsToAdd, added: null }
+              : w.friends.kind === 'failed'
+                ? { kind: 'failed' }
+                : { kind: 'looking' };
         const savedCopy = w.savedCopy;
         const saved: MigrateSaved | null = !w.chosen.saved
           ? null

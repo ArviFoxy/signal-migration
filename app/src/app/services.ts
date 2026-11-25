@@ -111,9 +111,16 @@ export type AppServices = {
 /** The record in this site's own IndexedDB database. */
 function indexedDbSnapshots(): SnapshotStore {
   const store = createStore('signal-migration', 'workflow');
+  let requestedPersistence = false;
   return {
     load: async () => (await get<unknown>('snapshot', store)) ?? null,
-    save: (record) => set('snapshot', record, store),
+    save: (record) => {
+      if (!requestedPersistence) {
+        requestedPersistence = true;
+        void navigator.storage?.persist?.().catch(() => undefined);
+      }
+      return set('snapshot', record, store);
+    },
     clear: () => del('snapshot', store),
   };
 }
