@@ -289,7 +289,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
     }
     case 'add-friends':
       try {
-        await addContacts(deviceOf(context, work.deviceKey, work.device), work.contacts);
+        await addContacts(deviceOf(context, work.deviceKey, work.device), work.contacts, cancel);
         if (!cancel.aborted) emit({ type: 'run/friends-added', count: work.contacts.length });
       } catch (error) {
         if (!cancel.aborted) emit({ type: 'run/friends-failed', error: errorMessage(error) });

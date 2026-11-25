@@ -105,6 +105,7 @@ export type Animation = {
 class WorkerChannel {
   #worker: Worker | null = null;
   #revokeUrl: (() => void) | null = null;
+  #revokeWasmUrl: (() => void) | null = null;
   #starting: Promise<Worker> | null = null;
   #generation = 0;
   #nextId = 0;
@@ -114,7 +115,7 @@ class WorkerChannel {
     private readonly file: string,
     /** What the worker is, for the error when it fails as a whole. */
     private readonly name: string,
-    /** Optional WASM module initialized inside the worker (verified `ArrayBuffer` when attested). */
+    /** Optional WASM module initialized inside the worker (verified `Blob` URL when attested). */
     private readonly wasmFile?: string,
   ) {}
 
@@ -127,11 +128,31 @@ class WorkerChannel {
           buildVerifier.resolveWorkerInput(this.file, import.meta.url),
           this.wasmFile ? buildVerifier.resolveWasmInput(this.wasmFile, import.meta.url) : Promise.resolve(null),
         ]);
+        // For attested builds, wrap verified WASM bytes in a same-origin blob: URL (application/wasm) so Emscripten
+        // streams directly from verified memory via locateFile without touching import.meta.url or re-fetching.
+        // Retained until stop() so post-trap re-instantiation inside the worker keeps working.
+        let wasmUrl: string | null = null;
+        let revokeWasm: () => void = () => undefined;
+        if (wasmInput instanceof ArrayBuffer) {
+          const url = URL.createObjectURL(new Blob([wasmInput], { type: 'application/wasm' }));
+          wasmUrl = url;
+          revokeWasm = () => URL.revokeObjectURL(url);
+        } else if (wasmInput !== null) {
+          wasmUrl = wasmInput.href;
+        }
         if (this.#generation !== generation) {
           workerInput.revoke();
+          revokeWasm();
           throw new ConversionError(`${this.name} was stopped`);
         }
-        const worker = new Worker(workerInput.url, { type: 'module' });
+        let worker: Worker;
+        try {
+          worker = new Worker(workerInput.url, { type: 'module' });
+        } catch (error) {
+          workerInput.revoke();
+          revokeWasm();
+          throw error;
+        }
         worker.onmessage = (event: MessageEvent<{ id: number; result?: never; error?: string }>) => {
           const request = this.#pending.get(event.data.id);
           this.#pending.delete(event.data.id);
@@ -142,16 +163,18 @@ class WorkerChannel {
         worker.onmessageerror = () => this.stop(new ConversionError(`${this.name} returned an unreadable message`));
         this.#worker = worker;
         this.#revokeUrl = workerInput.revoke;
-        if (wasmInput !== null) {
+        this.#revokeWasmUrl = revokeWasm;
+        if (wasmUrl !== null) {
           const initId = this.#nextId++;
-          await new Promise<void>((resolve, reject) => {
-            this.#pending.set(initId, { resolve: () => resolve(), reject });
-            if (wasmInput instanceof ArrayBuffer) {
-              worker.postMessage({ id: initId, kind: 'init', wasmBinary: wasmInput }, [wasmInput]);
-            } else {
-              worker.postMessage({ id: initId, kind: 'init', wasmUrl: wasmInput.href });
-            }
-          });
+          try {
+            await new Promise<void>((resolve, reject) => {
+              this.#pending.set(initId, { resolve: () => resolve(), reject });
+              worker.postMessage({ id: initId, kind: 'init', wasmUrl });
+            });
+          } catch (error) {
+            if (this.#worker === worker) this.stop(error instanceof Error ? error : new ConversionError(String(error)));
+            throw error;
+          }
           if (this.#generation !== generation || this.#worker !== worker) {
             throw new ConversionError(`${this.name} was stopped`);
           }
@@ -189,6 +212,8 @@ class WorkerChannel {
     this.#worker = null;
     this.#revokeUrl?.();
     this.#revokeUrl = null;
+    this.#revokeWasmUrl?.();
+    this.#revokeWasmUrl = null;
     for (const request of this.#pending.values()) request.reject(error);
     this.#pending.clear();
   }

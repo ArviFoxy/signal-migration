@@ -71,6 +71,7 @@ export class MigrationApp extends LightElement {
   #lastRawBannerKey: string | null = null;
   #onChange = () => this.requestUpdate();
   #shownStep: string | undefined;
+  #shownNavEntry: number | undefined;
 
   protected willUpdate(changed: PropertyValues<this>): void {
     if (changed.has('workflow')) {
@@ -93,14 +94,25 @@ export class MigrationApp extends LightElement {
     if (popover?.matches(':popover-open')) popover.hidePopover();
   }
 
-  /** A new step starts at the top of the page, and stays scrolled into view inside the sidebar step list. */
+  /** A new step starts at the top of the page, and the active sidebar entry stays visible inside its scrollable list. */
   protected updated(): void {
-    if (this.workflow && this.workflow.step !== this.#shownStep) {
+    if (!this.workflow) return;
+    if (this.workflow.step !== this.#shownStep) {
       this.#shownStep = this.workflow.step;
       window.scrollTo({ top: 0 });
       this.querySelector('main')?.scrollTo({ top: 0 });
-      const activeStep = this.querySelector<HTMLElement>('nav li[aria-current="step"]');
-      if (activeStep && activeStep.offsetParent !== null) activeStep.scrollIntoView({ block: 'nearest' });
+    }
+    const navEntry = this.currentEntry();
+    if (navEntry !== this.#shownNavEntry) {
+      this.#shownNavEntry = navEntry;
+      const list = this.querySelector<HTMLElement>('nav ol');
+      const activeStep = list?.querySelector<HTMLElement>('li[aria-current="step"]');
+      if (list && activeStep && list.offsetParent !== null) {
+        const listRect = list.getBoundingClientRect();
+        const itemRect = activeStep.getBoundingClientRect();
+        if (itemRect.top < listRect.top) list.scrollTop -= listRect.top - itemRect.top;
+        else if (itemRect.bottom > listRect.bottom) list.scrollTop += itemRect.bottom - listRect.bottom;
+      }
     }
   }
 

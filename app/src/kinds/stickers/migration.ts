@@ -410,15 +410,19 @@ export class StickerMigration extends EventTarget {
    * show them. Packs are told in batches, to stay within Signal's rate limit for messages: `force` sends whatever
    * is waiting, otherwise a batch goes once it holds ANNOUNCE_BATCH packs. A failure keeps the packs waiting.
    */
-  async #announce(signal: SignalAccount, installed: PackEntry[], force: boolean): Promise<void> {
+  async #announce(signal: SignalAccount, installed: PackEntry[], force: boolean, cancel?: AbortSignal): Promise<void> {
     for (const entry of installed) if (entry.packId) this.#unannounced.add(entry);
     if (this.#unannounced.size === 0 || (!force && this.#unannounced.size < ANNOUNCE_BATCH)) return;
     const batch = [...this.#unannounced];
     try {
-      await signal.announceStickerPacks(batch.map((entry) => ({ packId: entry.packId!, packKey: entry.packKey! })));
+      await signal.announceStickerPacks(
+        batch.map((entry) => ({ packId: entry.packId!, packKey: entry.packKey! })),
+        cancel,
+      );
       for (const entry of batch) this.#unannounced.delete(entry);
       this.announceError = null;
     } catch (error) {
+      if (cancel?.aborted) throw error;
       this.announceError = errorMessage(error);
     }
     this.#changed();
@@ -722,6 +726,7 @@ export class StickerMigration extends EventTarget {
       signal,
       this.selected.filter((entry) => entry.state === 'in-signal'),
       false,
+      cancel,
     );
     const selectedSet = new Set(this.selected);
     for (const entry of this.#plannedInstalls) {
@@ -745,7 +750,7 @@ export class StickerMigration extends EventTarget {
       try {
         await untilCancelled(this.#migrateOne(signal, telegram, entry, cancel), cancel);
         cancel.throwIfAborted();
-        await this.#announce(signal, [entry], false);
+        await this.#announce(signal, [entry], false, cancel);
       } catch (error) {
         // A cancelled run leaves the pack as it was; the next run takes it up again.
         if (cancel.aborted) {
@@ -763,7 +768,7 @@ export class StickerMigration extends EventTarget {
           if (!this.#limitReached) this.uploadIntervalMs = waitMs;
           this.#limitReached = true;
           // The packs installed so far reach the phone before the wait.
-          await this.#announce(signal, [], true);
+          await this.#announce(signal, [], true, cancel);
           this.uploadAllowedAt = clock.now() + waitMs;
           this.#changed();
           // While waiting, the next pack is downloaded and converted. If that fails, it is tried again in its turn.
@@ -792,6 +797,7 @@ export class StickerMigration extends EventTarget {
             this.uploadAllowedAt = null;
             if (next && next.state !== 'to-upload' && next.state !== 'in-signal')
               Object.assign(next, { state: 'to-upload', progress: null });
+            this.#changed();
           }
         } else {
           this.#originals.delete(entry);
@@ -802,7 +808,7 @@ export class StickerMigration extends EventTarget {
       this.#changed();
     }
     cancel.throwIfAborted();
-    if (signal.isLinked) await this.#announce(signal, [], true);
+    if (signal.isLinked) await this.#announce(signal, [], true, cancel);
     if (!signal.isLinked)
       Object.assign(this, { phase: 'stopped', stopReason: 'Signal was unlinked before the migration finished' });
     else this.phase = 'done';

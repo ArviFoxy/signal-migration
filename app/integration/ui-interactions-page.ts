@@ -564,13 +564,21 @@ const uiTests = {
     const githubRect = githubLink.getBoundingClientRect();
     const clearRect = clearBtn.getBoundingClientRect();
 
-    // Reveal the side tooltip as hover does (headless tabs do not maintain window focus) and verify hit-testing
-    // outside nav's right edge proves nav does not clip the floating tooltip.
-    const sideCard = nav.querySelector('#connection-info-side-signal') as HTMLElement;
-    Object.assign(sideCard.style, { visibility: 'visible', opacity: '1' });
+    // Reveal the top (Telegram) and middle (Signal) side tooltips as hover does and verify hit-testing outside nav's
+    // right edge proves nav does not clip either floating tooltip, and neither overflows the top of the viewport.
+    const signalCard = nav.querySelector('#connection-info-side-signal') as HTMLElement;
+    Object.assign(signalCard.style, { visibility: 'visible', opacity: '1' });
     await tick();
-    const cardRect = sideCard.getBoundingClientRect();
-    const hitOutsideNav = document.elementFromPoint(navRect.right + 40, cardRect.top + cardRect.height / 2);
+    const signalRect = signalCard.getBoundingClientRect();
+    const signalHit = document.elementFromPoint(navRect.right + 40, signalRect.top + signalRect.height / 2);
+    Object.assign(signalCard.style, { visibility: '', opacity: '' });
+
+    const telegramCard = nav.querySelector('#connection-info-side-telegram') as HTMLElement;
+    Object.assign(telegramCard.style, { visibility: 'visible', opacity: '1' });
+    await tick();
+    const telegramRect = telegramCard.getBoundingClientRect();
+    const telegramHit = document.elementFromPoint(navRect.right + 40, telegramRect.top + telegramRect.height / 2);
+    Object.assign(telegramCard.style, { visibility: '', opacity: '' });
 
     // Also verify migrate-step places Friends, Saved Messages, and Sticker packs as direct siblings at the same
     // nesting level inside <main>.
@@ -581,6 +589,23 @@ const uiTests = {
       sections.every(Boolean) &&
       sections[0]!.parentElement === sections[1]!.parentElement &&
       sections[1]!.parentElement === sections[2]!.parentElement;
+
+    // Transition from migrating -> done (workflow.step stays 'migrate', currentEntry moves to "Done and logged out")
+    // and verify the sidebar <ol> scrolls "Done and logged out" into view automatically.
+    workflow.state = {
+      ...session({
+        telegram: { kind: 'off', method: 'qr', signedOut: true, error: null },
+        signal: { ...notLinked, unlinked: 'at-finish' },
+        chosen: { stickers: true, friends: true, saved: true },
+      }),
+      kind: 'done',
+    };
+    workflow.dispatchEvent(new Event('change'));
+    await app.updateComplete;
+    await tick();
+    const olRect = ol.getBoundingClientRect();
+    const doneItem = ol.querySelector('li[aria-current="step"]') as HTMLElement;
+    const doneRect = doneItem.getBoundingClientRect();
 
     return {
       viewportHeight: window.innerHeight,
@@ -593,12 +618,15 @@ const uiTests = {
       verifiedBottom: verifiedRect.bottom,
       githubBottom: githubRect.bottom,
       clearBottom: clearRect.bottom,
-      sideCardHit: Boolean(hitOutsideNav && sideCard.contains(hitOutsideNav)),
-      sideCardRight: cardRect.right,
+      sideCardHit: Boolean(signalHit && signalCard.contains(signalHit)),
+      sideCardRight: signalRect.right,
       navRight: navRect.right,
-      sideCardTop: cardRect.top,
-      sideCardBottom: cardRect.bottom,
+      sideCardTop: signalRect.top,
+      sideCardBottom: signalRect.bottom,
+      telegramCardHit: Boolean(telegramHit && telegramCard.contains(telegramHit)),
+      telegramCardTop: telegramRect.top,
       sameParent,
+      doneVisibleInOl: doneRect.top >= olRect.top - 1 && doneRect.bottom <= olRect.bottom + 1,
     };
   },
 };

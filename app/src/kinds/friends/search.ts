@@ -195,15 +195,21 @@ const WRITE_ATTEMPTS = 5;
  * in the meantime is left as they are. The other devices are told also when every person is a contact already: an
  * earlier attempt can have written them and stopped before telling. Returns how many were added.
  */
-export async function addContacts(account: SignalAccount, contacts: NewContact[]): Promise<number> {
+export async function addContacts(
+  account: SignalAccount,
+  contacts: NewContact[],
+  cancel?: AbortSignal,
+): Promise<number> {
+  cancel?.throwIfAborted();
   const uniqueContacts = deduplicateContacts(contacts);
   if (uniqueContacts.length === 0) return 0;
   const storage = await account.storage();
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
+    cancel?.throwIfAborted();
     const snapshot = await storage.readContacts();
     const fresh = uniqueContacts.filter((contact) => !snapshot.contacts.some((stored) => sameAccount(stored, contact)));
     if (fresh.length === 0 || (await storage.addContacts(snapshot, fresh))) {
-      await account.announceStorageChange();
+      await account.announceStorageChange(cancel);
       return fresh.length;
     }
   }

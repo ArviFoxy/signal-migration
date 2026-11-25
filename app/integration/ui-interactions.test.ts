@@ -256,7 +256,10 @@ describe('UI interactions in real Chrome', () => {
       navRight: number;
       sideCardTop: number;
       sideCardBottom: number;
+      telegramCardHit: boolean;
+      telegramCardTop: number;
       sameParent: boolean;
+      doneVisibleInOl: boolean;
     }>('desktopSidebarAnchorsBottomOnShortViewport', { width: 1280, height: 680, mobile: false });
     expect(errors).toEqual([]);
     expect(result.verifiedBottom).toBeLessThanOrEqual(result.navBottom + 1);
@@ -271,7 +274,10 @@ describe('UI interactions in real Chrome', () => {
     expect(result.sideCardRight).toBeGreaterThan(result.navRight + 200);
     expect(result.sideCardTop).toBeGreaterThanOrEqual(0);
     expect(result.sideCardBottom).toBeLessThanOrEqual(result.viewportHeight);
+    expect(result.telegramCardHit).toBe(true);
+    expect(result.telegramCardTop).toBeGreaterThanOrEqual(0);
     expect(result.sameParent).toBe(true);
+    expect(result.doneVisibleInOl).toBe(true);
   });
 });
 

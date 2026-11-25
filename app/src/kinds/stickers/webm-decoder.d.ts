@@ -16,9 +16,5 @@ declare module 'webm-decoder' {
   };
   export default function createWebmDecoder(options?: {
     locateFile?: (path: string, prefix: string) => string;
-    instantiateWasm?: (
-      imports: WebAssembly.Imports,
-      receiveInstance: (instance: WebAssembly.Instance) => void,
-    ) => WebAssembly.Exports | Record<string, never>;
   }): Promise<WebmDecoderModule>;
 }

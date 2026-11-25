@@ -311,32 +311,71 @@ describe('reading Saved Messages', () => {
     expect(requests.some((r) => r.run === 2 && r._ === 'getMessage' && r.message_id === MSG_ID)).toBe(true);
   });
 
-  // Detects: TDLib's FileManager::on_download_error_impl rewriting 429 flood waits to code 400
-  // ("Too Many Requests: retry after N"), causing patiently() to abort downloads instead of waiting and retrying.
-  it('retries and reports onWait when TDLib downloadFile fails with code 400 Too Many Requests: retry after', async () => {
-    let attempts = 0;
+  // Detects: TDLib's synchronous downloadFile collapsing failed file_reference repairs and >60 s download flood waits
+  // into 400 "File download has failed or was canceled" (FileManager.cpp:3029), leaving withMedia unable to refresh
+  // via getMessage or back off with onWait feedback.
+  it('refreshes via getMessage and backs off with onWait on real TDLib 400 download failure', async () => {
+    const MSG_ID = 9 * 2 ** 20;
     const waits: (number | null)[] = [];
+    let getMessageCalls = 0;
+    let downloadCalls = 0;
+
+    const invoke = async (query: { _: string; [key: string]: unknown }) => {
+      switch (query._) {
+        case 'getMe':
+          return { _: 'user', id: MY_USER_ID };
+        case 'createPrivateChat':
+          return { _: 'chat', id: MY_USER_ID };
+        case 'getMessage':
+          getMessageCalls++;
+          return {
+            _: 'message',
+            id: MSG_ID,
+            date: 1_700_000_001,
+            content: {
+              _: 'messageDocument',
+              caption: { _: 'formattedText', text: '', entities: [] },
+              document: {
+                _: 'document',
+                file_name: 'a.bin',
+                mime_type: 'application/octet-stream',
+                document: {
+                  _: 'file',
+                  id: 100 + getMessageCalls,
+                  size: 2,
+                  expected_size: 2,
+                  remote: { _: 'remoteFile', id: `remote-${getMessageCalls}` },
+                },
+              },
+            },
+          };
+        default:
+          throw new Error(`not simulated: ${query._}`);
+      }
+    };
+
     const client = {
-      invoke: async () => {
-        throw new Error('unused');
-      },
+      invoke,
       get run() {
         return 1;
       },
-      async withFileRef<T>(
-        _ref: TelegramFileRef,
+      withFileRef: async () => {
+        throw new Error('should use withDownloadedFile pinned to run');
+      },
+      async withDownloadedFile<T>(
+        fileId: number,
         use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
       ): Promise<T> {
-        attempts++;
-        if (attempts === 1) {
-          throw new TelegramError(400, 'Too Many Requests: retry after 0');
+        downloadCalls++;
+        if (downloadCalls <= 2) {
+          throw new TelegramError(400, 'File download has failed or was canceled');
         }
-        const data = new TextEncoder().encode('ok');
+        const data = new TextEncoder().encode(`ok-${fileId}`);
         return use(data.length, async (onChunk) => onChunk(data));
       },
-    } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'>;
+    } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef' | 'withDownloadedFile'>;
 
-    const source = savedMessagesOf(client);
+    const source = savedMessagesOf(client, { downloadRetryDelaysMs: [10] });
     const received: Uint8Array[] = [];
     await source.withMedia!(
       { file: { run: 1, fileId: 1, remoteId: 'r1' }, size: 2 },
@@ -346,12 +385,115 @@ describe('reading Saved Messages', () => {
         });
       },
       undefined,
-      { onWait: (until: number | null) => waits.push(until) },
+      { messageId: MSG_ID, onWait: (until) => waits.push(until) },
     );
-    expect(attempts).toBe(2);
-    expect(new TextDecoder().decode(received[0])).toBe('ok');
+    expect(downloadCalls).toBe(3);
+    expect(getMessageCalls).toBe(2);
+    expect(new TextDecoder().decode(received[0])).toBe('ok-102');
     expect(waits.length).toBe(2);
     expect(typeof waits[0]).toBe('number');
     expect(waits[1]).toBeNull();
+  });
+
+  // Detects: a TDLib restart occurring mid-download inside withDownloadedFile falling back to getRemoteFile instead
+  // of re-entering createPrivateChat + getMessage in the new run; and getMessage returning a message with no media
+  // silently falling back to the stale file reference.
+  it('re-enters getMessage on mid-download TDLib restart and fails cleanly if media disappeared', async () => {
+    const MSG_ID = 11 * 2 ** 20;
+    let run = 1;
+    let knownChatInRun = new Set<number>([MY_USER_ID]);
+    const requests: { run: number; _: string }[] = [];
+    let allowMedia = true;
+    let downloadCalls = 0;
+
+    const invoke = async (query: { _: string; [key: string]: unknown }) => {
+      requests.push({ run, _: query._ });
+      switch (query._) {
+        case 'getMe':
+          return { _: 'user', id: MY_USER_ID };
+        case 'createPrivateChat':
+          knownChatInRun.add(MY_USER_ID);
+          return { _: 'chat', id: MY_USER_ID };
+        case 'getMessage':
+          if (!knownChatInRun.has(MY_USER_ID)) throw new TelegramError(400, 'Chat not found');
+          return {
+            _: 'message',
+            id: MSG_ID,
+            date: 1_700_000_001,
+            can_be_saved: allowMedia,
+            content: {
+              _: 'messageDocument',
+              caption: { _: 'formattedText', text: '', entities: [] },
+              document: {
+                _: 'document',
+                file_name: 'a.bin',
+                mime_type: 'application/octet-stream',
+                document: {
+                  _: 'file',
+                  id: 55,
+                  size: 4,
+                  expected_size: 4,
+                  remote: { _: 'remoteFile', id: 'remote-55' },
+                },
+              },
+            },
+          };
+        default:
+          throw new Error(`not simulated: ${query._}`);
+      }
+    };
+
+    const client = {
+      invoke,
+      get run() {
+        return run;
+      },
+      withFileRef: async () => {
+        throw new Error('must not fall back to getRemoteFile via withFileRef when messageId is present');
+      },
+      async withDownloadedFile<T>(
+        fileId: number,
+        use: (size: number, readChunks: (onChunk: (chunk: Uint8Array) => Promise<void>) => Promise<void>) => Promise<T>,
+        _chunkBytes?: number,
+        pinnedRun?: number,
+      ): Promise<T> {
+        downloadCalls++;
+        if (downloadCalls === 1) {
+          // Simulate TDLib restarting mid-download.
+          run = 2;
+          knownChatInRun = new Set();
+          throw new TelegramRestartedError();
+        }
+        expect(pinnedRun).toBe(2);
+        const data = new TextEncoder().encode(`run2-${fileId}`);
+        return use(data.length, async (onChunk) => onChunk(data));
+      },
+    } as unknown as Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef' | 'withDownloadedFile'>;
+
+    const source = savedMessagesOf(client);
+    const received: Uint8Array[] = [];
+    await source.withMedia!(
+      { file: { run: 1, fileId: 1, remoteId: 'r1' }, size: 4 },
+      async (_size, readChunks) => {
+        await readChunks(async (chunk) => {
+          received.push(chunk);
+        });
+      },
+      undefined,
+      { messageId: MSG_ID },
+    );
+    expect(new TextDecoder().decode(received[0])).toBe('run2-55');
+    expect(requests.some((r) => r.run === 2 && r._ === 'getMessage')).toBe(true);
+    expect(requests.some((r) => r._ === 'getRemoteFile')).toBe(false);
+
+    // If getMessage returns a protected message (no downloadable media), must fail instead of using stale file.
+    allowMedia = false;
+    run = 3;
+    knownChatInRun = new Set();
+    await expect(
+      source.withMedia!({ file: { run: 1, fileId: 1, remoteId: 'r1' }, size: 4 }, async () => undefined, undefined, {
+        messageId: MSG_ID,
+      }),
+    ).rejects.toThrow(/no longer available/);
   });
 });

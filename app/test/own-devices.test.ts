@@ -250,6 +250,102 @@ describe('messages to the account’s other devices', () => {
     expect(longWaits[0]).toBeGreaterThanOrEqual(startedAt + 115_000);
     expect(longWaits.at(-1)).toBeNull();
   });
+
+  // Detects: (a) 429 followed by 409 reusing stale encryptedBatch instead of re-encrypting for updated devices,
+  // (b) a socket drop during a 429 wait forcing outer re-encryption when using a reconnecting ChatTarget, and
+  // (c) a queued send() hanging when cancelled while the front send is sleeping on a 429.
+  it('invalidates cached ciphertext on 409 after 429, preserves it across ChatTarget reconnect, and aborts queued sends', async () => {
+    const data = await account([1, 2]);
+    const s = sender(data);
+    const putBodies: Sent[] = [];
+    let attempt = 0;
+
+    // 1. 429 -> reconnect via ChatTarget (same ciphertext) -> 409 missing device 2 (re-encrypts for [1, 2]) -> 200.
+    const withReconnectingChat = async <T>(action: (chat: ChatChannel) => Promise<T>): Promise<T> => {
+      const chat: ChatChannel = {
+        async request(verb, path, options) {
+          if (verb === 'GET' && path === `/v2/keys/${ACI}/*`) {
+            return {
+              status: 200,
+              message: 'OK',
+              headers: [],
+              body: new TextEncoder().encode(
+                JSON.stringify({ identityKey: base64(data.identity.publicKey), devices: [data.devices.get(1)!] }),
+              ),
+            };
+          }
+          if (verb === 'GET' && path === `/v2/keys/${ACI}/2`) {
+            return {
+              status: 200,
+              message: 'OK',
+              headers: [],
+              body: new TextEncoder().encode(
+                JSON.stringify({ identityKey: base64(data.identity.publicKey), devices: [data.devices.get(2)!] }),
+              ),
+            };
+          }
+          const body = JSON.parse(new TextDecoder().decode(options!.body)) as Sent;
+          putBodies.push(body);
+          attempt++;
+          if (attempt === 1) {
+            return {
+              status: 429,
+              message: 'Too Many Requests',
+              headers: ['Retry-After: 0.01'],
+              body: new Uint8Array(),
+            };
+          }
+          if (attempt === 2) {
+            return {
+              status: 409,
+              message: 'Conflict',
+              headers: [],
+              body: new TextEncoder().encode(JSON.stringify({ missingDevices: [2], extraDevices: [] })),
+            };
+          }
+          return { status: 200, message: 'OK', headers: [], body: new Uint8Array() };
+        },
+      };
+      return action(chat);
+    };
+
+    await s.send(withReconnectingChat, new Uint8Array([9]));
+    expect(putBodies).toHaveLength(3);
+    // Attempt 2 (after 429) resends the exact same ciphertext as attempt 1.
+    expect(putBodies[1].messages[0].content).toBe(putBodies[0].messages[0].content);
+    // Attempt 3 (after 409) re-encrypts for both device 1 and newly added device 2.
+    expect(devicesOf(putBodies[2])).toEqual([1, 2]);
+    expect(putBodies[2].messages.find((m) => m.destinationDeviceId === 1)!.content).not.toBe(
+      putBodies[1].messages[0].content,
+    );
+
+    // 2. Queued send() must abort immediately while the front send is sleeping on a long 429.
+    const frontCancel = new AbortController();
+    const queuedCancel = new AbortController();
+    let frontWaiting!: () => void;
+    const frontWaitStarted = new Promise<void>((resolve) => (frontWaiting = resolve));
+    const always429: ChatChannel = {
+      async request() {
+        return { status: 429, message: 'Too Many Requests', headers: ['Retry-After: 120'], body: new Uint8Array() };
+      },
+    };
+    const front = s.send(always429, new Uint8Array([1]), {
+      cancel: frontCancel.signal,
+      onWait: (until) => {
+        if (until !== null) frontWaiting();
+      },
+    });
+    front.catch(() => undefined);
+    await frontWaitStarted;
+
+    const queued = s.send(always429, new Uint8Array([2]), { cancel: queuedCancel.signal });
+    const startedAt = Date.now();
+    queuedCancel.abort();
+    await expect(queued).rejects.toThrow(/abort/i);
+    expect(Date.now() - startedAt).toBeLessThan(500);
+    frontCancel.abort();
+    await expect(front).rejects.toThrow(/abort/i);
+  });
 });
 
 describe('the identity of the account’s other devices', () => {

@@ -2,8 +2,8 @@
 //
 // TDLib gives a chat's history from the newest message backwards, at most 100 messages per request, and may give
 // fewer than asked for. The end of the history is a request that gives none. Media files are downloaded on demand
-// during migration and read in chunks via `readFilePart`, re-resolving their TDLib file ID via `getRemoteFile` if
-// TDLib restarted since the history was read.
+// during migration and read in chunks via `readFilePart`, reloading the message via `getMessage` if TDLib restarted
+// or its file reference expired since the history was read.
 
 import type * as Td from 'tdlib-types';
 import {
@@ -42,18 +42,44 @@ export interface SavedSource {
 }
 
 const MESSAGES_PER_REQUEST = 100;
+/**
+ * Bounded backoff delays when TDLib's synchronous `downloadFile` fails with its generic error
+ * `400 "File download has failed or was canceled"` (FileManager.cpp:3029) even after refreshing via `getMessage`,
+ * which is how TDLib surfaces >60 s download flood waits.
+ */
+const DOWNLOAD_RETRY_DELAYS_MS = [15_000, 30_000] as const;
 
-function isFileReferenceError(error: unknown): boolean {
+function abortableWait(ms: number, cancel?: AbortSignal): Promise<void> {
+  if (cancel?.aborted) return Promise.reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(cancel!.reason ?? new DOMException('Aborted', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      cancel?.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    cancel?.addEventListener('abort', onAbort, { once: true });
+  });
+}
+
+function isDownloadRetryableError(error: unknown): boolean {
   return (
     error instanceof TelegramError &&
     error.code === 400 &&
-    (/file.?reference/i.test(error.message) || /no valid file reference/i.test(error.message))
+    (/file download has failed or was canceled/i.test(error.message) ||
+      /file.?reference/i.test(error.message) ||
+      /no valid file reference/i.test(error.message))
   );
 }
 
 export function savedMessagesOf(
-  client: Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'> & Partial<Pick<TelegramClient, 'invokeInRun'>>,
+  client: Pick<TelegramClient, 'invoke' | 'run' | 'withFileRef'> &
+    Partial<Pick<TelegramClient, 'invokeInRun' | 'withDownloadedFile'>>,
+  config: { downloadRetryDelaysMs?: readonly number[] } = {},
 ): SavedSource {
+  const retryDelaysMs = config.downloadRetryDelaysMs ?? DOWNLOAD_RETRY_DELAYS_MS;
   const invokeInRun = async <T extends Td.$FunctionName>(
     run: number,
     query: { readonly _: T } & Td.$FunctionInputByName[T],
@@ -127,45 +153,71 @@ export function savedMessagesOf(
       const onWait = options?.onWait;
       const onWaiting = options?.onWaiting;
 
-      const refreshFileRef = async (): Promise<TelegramFileRef | null> => {
-        if (messageId === undefined) return null;
-        return patiently(
-          () =>
-            untilNotRestarted(async () => {
-              cancel?.throwIfAborted();
-              const run = client.run;
-              const id = await ensureChat(run);
-              const fresh = await invokeInRun(run, { _: 'getMessage', chat_id: id, message_id: messageId });
-              return savedMessageOf(fresh, run).media?.file ?? null;
-            }),
+      if (messageId === undefined) {
+        return patiently(() => client.withFileRef(media.file, use, undefined, cancel, onWaiting), cancel, onWait);
+      }
+
+      const reloadInRun = (run: number): Promise<TelegramFileRef> =>
+        patiently(
+          async () => {
+            cancel?.throwIfAborted();
+            const id = await ensureChat(run);
+            const fresh = await invokeInRun(run, { _: 'getMessage', chat_id: id, message_id: messageId });
+            const freshFile = savedMessageOf(fresh, run).media?.file;
+            if (!freshFile) throw new Error('the Telegram message or its media is no longer available');
+            return freshFile;
+          },
           cancel,
           onWait,
         );
+
+      const downloadInRun = (file: TelegramFileRef, run: number) => {
+        // Pin directly to `run` via withDownloadedFile when available so a mid-download TDLib restart throws
+        // TelegramRestartedError out to our outer loop and re-enters getMessage (instead of falling back to
+        // getRemoteFile inside client.withFileRef).
+        if (client.withDownloadedFile) {
+          return client.withDownloadedFile(file.fileId, use, undefined, run, cancel, onWaiting);
+        }
+        return client.withFileRef(file, use, undefined, cancel, onWaiting);
       };
 
       let file = media.file;
-      let refreshed = false;
-      // After a TDLib restart, getRemoteFile creates a file without a FileSourceId (or size), so expired
-      // file_references cannot self-repair; reload the message in the current run when its messageId is known.
-      if (messageId !== undefined && file.run !== client.run) {
-        const fresh = await refreshFileRef();
-        if (fresh) {
-          file = fresh;
-          refreshed = true;
-        }
-      }
+      let refreshedInRun = -1;
+      let retryAttempt = 0;
 
-      try {
-        return await patiently(() => client.withFileRef(file, use, undefined, cancel, onWaiting), cancel, onWait);
-      } catch (error) {
-        if (!refreshed && messageId !== undefined && isFileReferenceError(error)) {
-          const fresh = await refreshFileRef();
-          if (fresh) {
-            return patiently(() => client.withFileRef(fresh, use, undefined, cancel, onWaiting), cancel, onWait);
+      return untilNotRestarted(async () => {
+        for (;;) {
+          cancel?.throwIfAborted();
+          const run = client.run;
+          // After a TDLib restart, getRemoteFile creates a file without a FileSourceId (or size), so expired
+          // file_references cannot self-repair; reload the message in the current run instead.
+          if (file.run !== run) {
+            file = await reloadInRun(run);
+            refreshedInRun = run;
+          }
+          try {
+            return await downloadInRun(file, run);
+          } catch (error) {
+            if (cancel?.aborted || !isDownloadRetryableError(error)) throw error;
+            if (refreshedInRun !== run) {
+              file = await reloadInRun(run);
+              refreshedInRun = run;
+              continue;
+            }
+            if (retryAttempt >= retryDelaysMs.length) throw error;
+            const waitMs = retryDelaysMs[retryAttempt++];
+            onWait?.(Date.now() + waitMs);
+            try {
+              await abortableWait(waitMs, cancel);
+            } finally {
+              onWait?.(null);
+            }
+            const nextRun = client.run;
+            file = await reloadInRun(nextRun);
+            refreshedInRun = nextRun;
           }
         }
-        throw error;
-      }
+      });
     },
   };
 }

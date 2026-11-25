@@ -12,11 +12,7 @@ const LONGEST_WAIT_S = 300;
 const WAITS_PER_REQUEST = 3;
 
 function retryAfterSeconds(error: unknown): number | null {
-  if (!(error instanceof TelegramError)) return null;
-  // TDLib's FileManager::on_download_error_impl rewrites 429 download errors to code 400 while preserving the message.
-  const isRateLimit =
-    error.code === TOO_FAST || (error.code === 400 && /^Too Many Requests: retry after \d+/.test(error.message));
-  if (!isRateLimit) return null;
+  if (!(error instanceof TelegramError) || error.code !== TOO_FAST) return null;
   const named = /retry after (\d+)/.exec(error.message);
   return named ? Number(named[1]) : null;
 }
