@@ -85,7 +85,8 @@ export class FakeSignal {
   maxAttachmentBytes = 100 * 1024 * 1024;
   #faults: Fault[] = [];
   #beforeStorageWrite: (() => Promise<void>)[] = [];
-  /** Sticker pack upload forms issued, and manifests stored, per account. */
+  /** Sticker pack upload form requests (including 429s), forms issued, and manifests stored, per account. */
+  formRequests = new Map<string, number>();
   formsIssued = new Map<string, number>();
   packsUploaded = new Map<string, number>();
   storageWrites = 0;
@@ -225,6 +226,7 @@ export class FakeSignal {
   }
 
   #uploadForm(aci: string, account: Account, count: number): ChatResponse {
+    this.formRequests.set(aci, (this.formRequests.get(aci) ?? 0) + 1);
     if (count < 1 || count > 201) return chatJson(400, {});
     const { burst, intervalMs } = this.uploadLimit;
     const now = this.clock.now();

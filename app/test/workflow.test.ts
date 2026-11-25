@@ -598,4 +598,240 @@ describe('the workflow', () => {
       finished: true,
     });
   });
+
+  // Detects: closing the tab after uploadStickerPack returns but before PackIndex.add finishes losing the packId
+  // and re-uploading the pack on reopen (burning another 72-minute Signal upload quota slot).
+  it('resumes an uploaded-but-unlisted pack without re-uploading when closed before index add', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+
+    let indexAddEntered!: () => void;
+    const addReached = new Promise<void>((resolve) => (indexAddEntered = resolve));
+    world.index.beforeAdd = () => {
+      indexAddEntered();
+      // Hold indefinitely on visit 1 to simulate closing the tab mid-index-add.
+      return new Promise<void>(() => undefined);
+    };
+
+    first.workflow.startMigration();
+    await addReached;
+    // The upload checkpoint committed before PackIndex.add was even called.
+    const kept = browser.snapshot as { pendingPacks: { setId: string; listed: boolean }[] };
+    expect(kept.pendingPacks).toHaveLength(1);
+    expect(kept.pendingPacks[0].listed).toBe(false);
+    expect(world.signal.formsIssued.get(alice.aci)).toBe(1);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(world.index.entries).toHaveLength(0);
+    expect(await alice.installedTitles()).toEqual([]);
+    browser.closePage();
+
+    world.index.beforeAdd = async () => undefined;
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.state.kind === 'done', 'the migration finishes on reopen');
+    await settle(second);
+
+    expect(world.signal.formsIssued.get(alice.aci)).toBe(1);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(world.index.entries).toHaveLength(1);
+    expect(await alice.installedTitles()).toEqual(['A']);
+    expect(browser.snapshot).toBeNull();
+  });
+
+  // Detects: closing the tab after PackIndex.add succeeds but before Signal storage install forcing a full Telegram
+  // re-download and pixel comparison on reopen, or mislabelling our own upload as "was already on Signal".
+  it('installs an uploaded-and-listed pending pack directly without re-downloading or re-uploading', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+
+    let fileReads = 0;
+    const origReadFile = alice.stickers.readFile.bind(alice.stickers);
+    alice.stickers.readFile = (fileId: number) => {
+      fileReads++;
+      return origReadFile(fileId);
+    };
+
+    // Fail the Signal storage write on visit 1 so upload + PackIndex.add succeed, then install fails.
+    world.signal.failNext((request) => request.startsWith('https PUT storage.signal.org'), 1);
+    first.workflow.startMigration();
+    await until(() => first.workflow.stickers?.entries[0].state === 'failed', 'install fails on visit 1');
+    await settle(first);
+    const readsAfterFirst = fileReads;
+    const kept = browser.snapshot as { pendingPacks: { setId: string; listed: boolean }[]; addedToIndex: number };
+    expect(kept.pendingPacks).toHaveLength(1);
+    expect(kept.pendingPacks[0].listed).toBe(true);
+    expect(kept.addedToIndex).toBe(1);
+    expect(world.signal.formsIssued.get(alice.aci)).toBe(1);
+    expect(world.index.entries).toHaveLength(1);
+    browser.closePage();
+
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.state.kind === 'done', 'the migration finishes on reopen');
+    await settle(second);
+
+    expect(world.signal.formsIssued.get(alice.aci)).toBe(1);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(1);
+    expect(fileReads).toBe(readsAfterFirst);
+    expect(await alice.installedTitles()).toEqual(['A']);
+    expect(second.workflow.stickers!.wasOnSignal(second.workflow.stickers!.entries[0])).toBe(false);
+    expect(second.workflow.stickers!.wasAlreadyInSignal(second.workflow.stickers!.entries[0])).toBe(false);
+    expect(second.workflow.stickers!.addedToIndex).toBe(1);
+  });
+
+  // Detects: reopening mid-cooldown forgetting uploadAllowedAt, immediately hitting Signal's upload-form endpoint
+  // with a wasted 429 request and re-downloading the next pack before the 72-minute limit expires.
+  it('persists Signal upload cooldown across tab closes and waits out the remainder without premature form requests', async () => {
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const alice = world.user(['A', 'B', 'C'].map((title) => world.pack(title)));
+    const browser = new Browser();
+    const start = world.clock.now();
+
+    const first = await openPage(alice, browser, { leaveAfterWaitOf: 10 * MINUTE });
+    await signIn(first);
+    await link(first);
+    first.workflow.startMigration();
+    await until(() => first.workflow.error !== null, 'first page leaves during 72-min cooldown');
+    await settle(first);
+    expect(await alice.installedTitles()).toEqual(['A']);
+    const formRequestsAfterFirst = world.signal.formRequests.get(alice.aci)!;
+    const kept = browser.snapshot as { uploadLimit: { aci: string; allowedAt: number; intervalMs: number } | null };
+    expect(kept.uploadLimit).toEqual({
+      aci: alice.aci,
+      allowedAt: start + 72 * MINUTE,
+      intervalMs: 72 * MINUTE,
+    });
+    browser.closePage();
+
+    // Reopen 30 minutes later (42 minutes still left): must NOT request a new upload form or re-download B yet.
+    await world.clock.advance(30 * MINUTE);
+    const second = await openPage(alice, browser, { leaveAfterWaitOf: 10 * MINUTE });
+    await until(() => second.workflow.error !== null, 'second page leaves during remaining 42-min cooldown');
+    await settle(second);
+    expect(world.signal.formRequests.get(alice.aci)).toBe(formRequestsAfterFirst);
+    expect(second.workflow.stickers!.uploadAllowedAt).toBe(start + 72 * MINUTE);
+    expect(second.workflow.stickers!.uploadIntervalMs).toBe(72 * MINUTE);
+    browser.closePage();
+
+    // Advance past the cooldown and reopen: finishes B and C cleanly.
+    await world.clock.advance(45 * MINUTE);
+    const third = await openPage(alice, browser);
+    await until(() => third.workflow.state.kind === 'done', 'migration completes after cooldown');
+    await settle(third);
+    expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
+    expect(world.signal.packsUploaded.get(alice.aci)).toBe(3);
+  });
+
+  // Detects: reopening while offline (e.g. /v1/config 503) bouncing migrating back to setup and overwriting phase,
+  // forcing the user back through Review instead of retrying Telegram in place.
+  it('stays in migrating and resumes in place on Try again when reopening hits a transient Telegram start failure', async () => {
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser, { leaveAfterWaitOf: 10 * MINUTE });
+    await signIn(first);
+    await link(first);
+    const keptInstance = first.workflow.telegram.instance;
+    first.workflow.startMigration();
+    await until(() => first.workflow.error !== null, 'first page leaves during cooldown');
+    await settle(first);
+    browser.closePage();
+
+    await world.clock.advance(2 * 72 * MINUTE);
+    const second = await openPage(alice, browser, { appFailures: 1 });
+    await until(() => second.workflow.telegram.state.kind === 'stopped', 'Telegram start fails while offline');
+    await settle(second);
+
+    expect(second.workflow.state.kind).toBe('migrating');
+    expect((browser.snapshot as { phase: string }).phase).toBe('migrating');
+    expect(second.workflow.runFailed).toBe(true);
+    expect(second.workflow.migrationRun.canRetry).toBe(true);
+    expect(second.workflow.error).toContain('503');
+
+    second.workflow.tryAgain();
+    await until(() => second.workflow.state.kind === 'done', 'migration resumes and finishes after Try again');
+    await settle(second);
+    expect(second.server.active.size).toBe(0);
+    expect(second.started.every((s) => s.instance === keptInstance)).toBe(true);
+    expect(await alice.installedTitles()).toEqual(['A', 'B']);
+  });
+
+  // Detects: reopening losing which packs were already in Signal vs installed from index vs uploaded by us, or
+  // resetting the sidebar index count to 0.
+  it('preserves pack origin status and addedToIndex across close and reopen', async () => {
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const packA = world.pack('A');
+    const packB = world.pack('B');
+    const packC = world.pack('C');
+    const packD = world.pack('D');
+    // Pack A is already in Alice's Signal before migration; Pack B was uploaded by someone else.
+    const alice = world.user([packA, packB, packC, packD]);
+    const bob = world.user([packA, packB]);
+    await bob.visit();
+    const packAOnSignal = (await bob.installedPacks()).find((_, i) => i === 0)!;
+    await alice.installOnPhone(packAOnSignal);
+
+    const browser = new Browser();
+    const first = await openPage(alice, browser, { leaveAfterWaitOf: 10 * MINUTE });
+    await signIn(first);
+    await link(first);
+    first.workflow.startMigration();
+    await until(() => first.workflow.error !== null, 'first page leaves at cooldown on D');
+    await settle(first);
+    expect(await alice.installedTitles()).toEqual(['A', 'B', 'C']);
+    expect(first.workflow.stickers!.addedToIndex).toBe(1);
+    browser.closePage();
+
+    // Reopen mid-cooldown and inspect restored statuses before finishing.
+    const second = await openPage(alice, browser, { leaveAfterWaitOf: 10 * MINUTE });
+    await until(() => second.workflow.error !== null, 'second page reaches cooldown on D');
+    const m = second.workflow.stickers!;
+    const byTitle = (t: string) => m.entries.find((e) => e.pack.title === t)!;
+    expect(m.wasAlreadyInSignal(byTitle('A'))).toBe(true);
+    expect(m.wasOnSignal(byTitle('A'))).toBe(false);
+    expect(m.wasOnSignal(byTitle('B'))).toBe(true);
+    expect(m.wasAlreadyInSignal(byTitle('B'))).toBe(false);
+    expect(m.wasOnSignal(byTitle('C'))).toBe(false);
+    expect(m.wasAlreadyInSignal(byTitle('C'))).toBe(false);
+    expect(m.addedToIndex).toBe(1);
+  });
+
+  // Detects: a version 5 record saved before this update failing to resume migrating cleanly.
+  it('continues migrating from a version 5 record', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser);
+    await signIn(first);
+    await link(first);
+    await settle(first);
+    browser.closePage();
+
+    const kept = browser.snapshot as { telegram: string; signal: unknown; deselected: string[] };
+    browser.snapshot = {
+      version: 5,
+      phase: 'migrating',
+      step: 'review',
+      why: null,
+      telegram: kept.telegram,
+      signal: kept.signal,
+      chosen: { stickers: true, friends: false, saved: false },
+      deselected: kept.deselected,
+      tickedFriends: [],
+      savedFrom: null,
+      savedSentUpTo: null,
+    };
+
+    const second = await openPage(alice, browser);
+    await until(() => second.workflow.state.kind === 'done', 'v5 migrating record finishes');
+    await settle(second);
+    expect(await alice.installedTitles()).toEqual(['A', 'B']);
+    expect(browser.snapshot).toBeNull();
+  });
 });

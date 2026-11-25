@@ -187,22 +187,41 @@ export function contactsToAdd(search: FriendSearch, ticked: readonly number[]): 
   );
 }
 
+/**
+ * How many unique Signal accounts among `ticked` friends are already in Signal storage (e.g. written right before
+ * the tab closed prior to `announceStorageChange`).
+ */
+export function tickedAlreadyInSignalCount(search: FriendSearch, ticked: readonly number[]): number {
+  return deduplicateContacts(
+    [...search.found.values()]
+      .filter((friend) => friend.inSignal && ticked.includes(friend.person.userId))
+      .map((friend) => ({
+        ...friend.signal,
+        nickname: { given: friend.person.givenName, family: friend.person.familyName },
+      })),
+  ).length;
+}
+
 /** How often adding is tried again when another device changed the storage service in between. */
 const WRITE_ATTEMPTS = 5;
 
 /**
  * Adds `contacts` to the account's Signal contacts and tells its other devices. A person who has become a contact
- * in the meantime is left as they are. The other devices are told also when every person is a contact already: an
- * earlier attempt can have written them and stopped before telling. Returns how many were added.
+ * in the meantime is left as they are. The other devices are told also when every person is a contact already (or
+ * when `announceIfEmpty` is set after reopening a tab closed between write and announce). Returns how many were added.
  */
 export async function addContacts(
   account: SignalAccount,
   contacts: NewContact[],
   cancel?: AbortSignal,
+  announceIfEmpty = false,
 ): Promise<number> {
   cancel?.throwIfAborted();
   const uniqueContacts = deduplicateContacts(contacts);
-  if (uniqueContacts.length === 0) return 0;
+  if (uniqueContacts.length === 0) {
+    if (announceIfEmpty) await account.announceStorageChange(cancel);
+    return 0;
+  }
   const storage = await account.storage();
   for (let attempt = 0; attempt < WRITE_ATTEMPTS; attempt++) {
     cancel?.throwIfAborted();

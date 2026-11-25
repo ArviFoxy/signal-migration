@@ -178,9 +178,11 @@ While a migration is in progress (until it finishes or the user clears it), the 
   app's own database. The app restores that backup whenever TDLib starts, because TDLib often segfaults and its
   database has to be reset to recover.
 - The linked Signal device's password, storage service key, account identity key pair, and registration ID.
-- Progress and choices so the migration can resume after a reload: what the user chose to move, deselected sticker
-  packs, Telegram user IDs of selected friends, the Saved Messages start date, and the Telegram ID of the last copied
-  message.
+- Progress and choices so the migration can resume if you close or reload the tab: what the user chose to move,
+  deselected sticker packs, pending uploaded sticker pack IDs/keys (until listed and installed), any active Signal
+  sticker upload rate-limit cooldown, sticker index/install status counts, Telegram user IDs of selected friends and
+  whether they have been added, the Saved Messages start date, the Telegram ID of the last copied message, and whether
+  Saved Messages finished copying. No message text, phone numbers, names, or sticker files are stored.
 
 When the migration finishes, the app unlinks the Signal device, signs out of Telegram, and deletes all of it.
 

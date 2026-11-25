@@ -9,6 +9,7 @@ import type { StickerMigration } from '../../kinds/stickers/migration';
 import type { NewContact } from '../../signal/storage';
 import type { StoredDevice } from '../services';
 import type { AppEvent } from './events';
+import type { StickerRunProgress } from './record';
 import type { DeviceKey } from './signal/state';
 import type { LoginQuery } from './telegram/state';
 
@@ -34,7 +35,7 @@ export type Work =
   | { kind: 'signal-watch'; key: string; deviceKey: DeviceKey; device: StoredDevice }
   | { kind: 'signal-unlink'; key: string; deviceKey: DeviceKey; device: StoredDevice }
   /** Reads the Telegram packs and looks them up in the index. */
-  | { kind: 'read-packs'; key: string; instance: string; deselected: string[] }
+  | { kind: 'read-packs'; key: string; instance: string; deselected: string[]; progress: StickerRunProgress }
   | { kind: 'load-previews'; key: string; instance: string; migration: StickerMigration }
   /** Reads which packs the Signal account has. */
   | { kind: 'read-signal'; key: string; migration: StickerMigration; deviceKey: DeviceKey; device: StoredDevice }
@@ -42,8 +43,16 @@ export type Work =
   | { kind: 'find-friends'; key: string; instance: string; deviceKey: DeviceKey; device: StoredDevice }
   /** Reads the Telegram pictures of the people and groups a finished search shows. */
   | { kind: 'load-friend-photos'; key: string; instance: string; search: FriendSearch }
-  /** Adds the chosen friends to the Signal contacts. */
-  | { kind: 'add-friends'; key: string; contacts: NewContact[]; deviceKey: DeviceKey; device: StoredDevice }
+  /** Adds the chosen friends to the Signal contacts (and announces storage if ticked contacts were already written). */
+  | {
+      kind: 'add-friends';
+      key: string;
+      contacts: NewContact[];
+      announceIfEmpty: boolean;
+      recoveredCount: number;
+      deviceKey: DeviceKey;
+      device: StoredDevice;
+    }
   /** Reads the messages of Telegram's Saved Messages. */
   | { kind: 'read-saved'; key: string; instance: string }
   /** Sends these saved messages (and any media they carry) to Signal's Note to Self, in their order. */

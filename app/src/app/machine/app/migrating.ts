@@ -2,12 +2,12 @@
 // rules (settle.ts) end the migration once every selected pack is in Signal and the other devices were told, and go
 // back to the setup when a login is lost.
 
-import { contactsToAdd } from '../../../kinds/friends/search';
+import { contactsToAdd, tickedAlreadyInSignalCount } from '../../../kinds/friends/search';
 import { messagesToCopy, notYetSent } from '../../../kinds/saved/copy';
 import type { Context, Variant, VariantHandlers } from '../core';
 import type { AppEvent } from '../events';
 import type { Work } from '../work';
-import { beginEnding, sessionOf, signedInInstance } from './session';
+import { beginEnding, friendsAddedFor, savedDoneFor, sessionOf, signedInInstance } from './session';
 import type { AppState, SessionState } from './state';
 
 type Migrating = Variant<AppState, 'migrating'>;
@@ -35,9 +35,10 @@ export type MigrationProgress = {
 };
 
 export function migrationProgress(state: SessionState): MigrationProgress {
-  const { chosen, packs, friends, saved } = state;
+  const { chosen, packs, saved } = state;
   const migration = packs.kind === 'read' ? packs.migration : null;
-  const failed = state.kind === 'migrating' && state.run.status === 'failed';
+  const telegramStopped = state.kind === 'migrating' && state.telegram.kind === 'stopped';
+  const failed = state.kind === 'migrating' && (state.run.status === 'failed' || telegramStopped);
   const failedPacks = migration ? migration.selected.filter((entry) => entry.state === 'failed').length : 0;
   const unannounced = migration ? migration.unannounced : 0;
 
@@ -57,15 +58,13 @@ export function migrationProgress(state: SessionState): MigrationProgress {
       unannounced === 0);
 
   const friendsDone =
-    !chosen.friends ||
-    state.kind === 'done' ||
-    state.kind === 'ending' ||
-    (friends.kind === 'found' && state.kind === 'migrating' && state.run.friendsAdded !== null);
+    !chosen.friends || state.kind === 'done' || state.kind === 'ending' || friendsAddedFor(state) !== null;
 
   const savedDone =
     !chosen.saved ||
     state.kind === 'done' ||
     state.kind === 'ending' ||
+    savedDoneFor(state) !== null ||
     (saved.kind === 'read' && savedLeft(state).length === 0);
 
   const readyToFinish = stickersAllInstalled && friendsDone && savedDone && !failed;
@@ -91,7 +90,11 @@ export const migrating: VariantHandlers<AppState, 'migrating', AppEvent, Context
     ...state,
     run: { ...state.run, status: 'failed', error: `The migration stopped: ${event.error}`, savedWait: null },
   }),
-  'run/friends-added': (state, event) => ({ ...state, run: { ...state.run, friendsAdded: event.count } }),
+  'run/friends-added': (state, event) => ({
+    ...state,
+    friendsAdded:
+      state.signal.kind === 'linked' ? { aci: state.signal.device.aci, count: event.count } : state.friendsAdded,
+  }),
   'run/friends-failed': (state, event) => ({
     ...state,
     run: {
@@ -146,17 +149,24 @@ export function migratingWork(state: Migrating): Work[] {
   if (run.status === 'failed' || !instance || state.signal.kind !== 'linked') return [];
   const { deviceKey, device } = state.signal;
   const work: Work[] = [];
-  if (chosen.friends && friends.kind === 'found' && run.friendsAdded === null)
+  if (chosen.friends && friends.kind === 'found' && friendsAddedFor(state) === null) {
+    const contacts = contactsToAdd(friends.search, state.tickedFriends);
+    const recoveredCount = tickedAlreadyInSignalCount(friends.search, state.tickedFriends);
     work.push({
       kind: 'add-friends',
       key: `add-friends:${run.attempt}`,
-      contacts: contactsToAdd(friends.search, state.tickedFriends),
+      contacts,
+      announceIfEmpty: recoveredCount > 0,
+      recoveredCount,
       deviceKey,
       device,
     });
-  const messages = savedLeft(state);
-  if (messages.length > 0)
-    work.push({ kind: 'copy-saved', key: `copy-saved:${run.attempt}`, instance, messages, deviceKey, device });
+  }
+  if (chosen.saved && savedDoneFor(state) === null) {
+    const messages = savedLeft(state);
+    if (messages.length > 0)
+      work.push({ kind: 'copy-saved', key: `copy-saved:${run.attempt}`, instance, messages, deviceKey, device });
+  }
   if (chosen.stickers && run.status === 'running' && packs.kind === 'read' && packs.signalRead === deviceKey)
     work.push({ kind: 'run', key: `run:${run.attempt}`, instance, migration: packs.migration, deviceKey, device });
   return work;

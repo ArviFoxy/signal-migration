@@ -5,6 +5,7 @@ import type { Context } from '../core';
 import type { AppEvent } from '../events';
 import { friendsTransition, type FriendsEvent, type FriendsState } from '../friends';
 import { packsTransition, type PacksEvent, type PacksState } from '../packs';
+import { EMPTY_STICKER_PROGRESS, type SavedDoneRecord } from '../record';
 import { savedTransition, type SavedEvent, type SavedState } from '../saved';
 import { signalTransition, signalWork, type SignalEvent, type SignalState } from '../signal';
 import { telegramTransition, telegramWork, type TelegramEvent, type TelegramState } from '../telegram';
@@ -40,7 +41,7 @@ const withoutError = <S extends { error?: string | null }>(state: S): S =>
 
 /** Passes `event` to the session's machines; each ignores the events that are not its own. */
 export function toMachines<S extends SessionState>(state: S, event: AppEvent, context: Context): S {
-  let { telegram, signal, packs, friends, tickedFriends, saved } = state;
+  let { telegram, signal, packs, friends, tickedFriends, friendsAdded, saved } = state;
   if (isTelegramEvent(event)) telegram = telegramTransition(telegram, event, context);
   if (isSignalEvent(event)) signal = signalTransition(signal, event, context);
   if (isPacksEvent(event)) packs = packsTransition(packs, event, context);
@@ -48,7 +49,13 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
   if (isSavedEvent(event)) saved = savedTransition(saved, event, context);
   if (event.type === 'tick-friends') {
     const others = tickedFriends.filter((userId) => !event.userIds.includes(userId));
-    tickedFriends = event.ticked ? [...others, ...event.userIds] : others;
+    const nextTicked = event.ticked ? [...others, ...event.userIds] : others;
+    const prevSet = new Set(tickedFriends);
+    const changed = nextTicked.length !== prevSet.size || nextTicked.some((id) => !prevSet.has(id));
+    if (changed) {
+      tickedFriends = nextTicked;
+      friendsAdded = null;
+    }
   }
   if (event.type === 'dismiss') {
     // Errors that offer nothing to do; a stopped login keeps its error, which goes with "Try again".
@@ -65,9 +72,10 @@ export function toMachines<S extends SessionState>(state: S, event: AppEvent, co
     packs === state.packs &&
     friends === state.friends &&
     tickedFriends === state.tickedFriends &&
+    friendsAdded === state.friendsAdded &&
     saved === state.saved &&
     notice === state.notice;
-  return same ? state : { ...state, telegram, signal, packs, friends, tickedFriends, saved, notice };
+  return same ? state : { ...state, telegram, signal, packs, friends, tickedFriends, friendsAdded, saved, notice };
 }
 
 export { sessionOf };
@@ -77,6 +85,22 @@ export const signedInInstance = (telegram: TelegramState): string | null =>
 
 export const linkedDevice = (signal: SignalState) =>
   signal.kind === 'linked' || signal.kind === 'unlinking' ? signal.device : null;
+
+/** Completed Friends count for the active Signal account (or preserved final count after unlinking at finish). */
+export function friendsAddedFor(state: Pick<Session, 'signal' | 'friendsAdded'>): number | null {
+  if (!state.friendsAdded) return null;
+  const device = linkedDevice(state.signal);
+  if (!device) return state.friendsAdded.count;
+  return device.aci === state.friendsAdded.aci ? state.friendsAdded.count : null;
+}
+
+/** Completed Saved Messages summary for the active Signal account (or preserved final summary after unlinking). */
+export function savedDoneFor(state: Pick<Session, 'signal' | 'savedDone'>): SavedDoneRecord | null {
+  if (!state.savedDone) return null;
+  const device = linkedDevice(state.signal);
+  if (!device) return state.savedDone;
+  return device.aci === state.savedDone.aci ? state.savedDone : null;
+}
 
 /** The step on screen in a state with a session. */
 export function stepOf(state: SessionState): Step {
@@ -121,15 +145,17 @@ export function packsFollowLogin(session: Session): Session {
     packs.kind === 'read'
       ? packs.migration.entries.filter((entry) => !entry.selected).map((entry) => entry.pack.setId)
       : session.deselected;
+  const stickerProgress = packs.kind === 'read' ? packs.migration.snapshotProgress() : session.stickerProgress;
   const next: PacksState = instance ? { kind: 'reading', instance, attempt: 1, progress: null } : { kind: 'none' };
-  return { ...session, packs: next, deselected };
+  return { ...session, packs: next, deselected, stickerProgress };
 }
 
 /**
  * The friends follow both accounts: looked for once friends are chosen, Telegram is signed in and a Signal device is
- * linked, and again for another login or device lifetime. Without one of the three there is no search.
+ * linked, and again for another login or device lifetime. Without one of the three there is no search. When `skip`
+ * is true (already finished for this account in `migrating`), reopening does not re-scan Telegram or Signal CDSI.
  */
-export function friendsFollowAccounts(session: Session): Session {
+export function friendsFollowAccounts(session: Session, skip = false): Session {
   const instance = signedInInstance(session.telegram);
   const linked = session.signal.kind === 'linked' ? session.signal : null;
   const friends = session.friends;
@@ -140,6 +166,7 @@ export function friendsFollowAccounts(session: Session): Session {
       return session;
     return { ...session, friends: { kind: 'none' } };
   }
+  if (skip && friends.kind === 'none') return session;
   if (friends.kind !== 'none' && friends.instance === instance && friends.deviceKey === linked.deviceKey)
     return session;
   const looking: FriendsState = {
@@ -154,14 +181,16 @@ export function friendsFollowAccounts(session: Session): Session {
 
 /**
  * The saved messages follow the login, as the packs do: read for each new signed-in instance when the user chose
- * them, dropped when there is no login.
+ * them, dropped when there is no login. When `skip` is true (already finished for this account in `migrating`),
+ * reopening does not re-paginate Telegram Saved Messages history.
  */
-export function savedFollowLogin(session: Session): Session {
+export function savedFollowLogin(session: Session, skip = false): Session {
   const instance = session.chosen.saved ? signedInInstance(session.telegram) : null;
   const saved = session.saved;
   const current = saved.kind === 'none' ? null : saved.instance;
   if (instance === current) return session;
   if (!instance && session.telegram.kind === 'saving') return session;
+  if (skip && saved.kind === 'none') return session;
   const next: SavedState = instance ? { kind: 'reading', instance, attempt: 1, read: 0 } : { kind: 'none' };
   return { ...session, saved: next };
 }
@@ -185,6 +214,11 @@ export function beginEnding(state: SessionState, reason: EndReason, context: Con
         );
   const telegram = telegramTransition(state.telegram, { type: 'telegram/stop' }, context);
   const cleared = reason === 'clear';
+  const stickerProgress = cleared
+    ? EMPTY_STICKER_PROGRESS
+    : state.packs.kind === 'read'
+      ? state.packs.migration.snapshotProgress()
+      : state.stickerProgress;
   return {
     kind: 'ending',
     reason,
@@ -193,11 +227,14 @@ export function beginEnding(state: SessionState, reason: EndReason, context: Con
     chosen: cleared ? INITIAL_CHOICE : state.chosen,
     packs: cleared ? { kind: 'none' } : state.packs,
     deselected: cleared ? [] : state.deselected,
+    stickerProgress,
     friends: cleared ? { kind: 'none' } : state.friends,
     tickedFriends: cleared ? [] : state.tickedFriends,
+    friendsAdded: cleared ? null : state.friendsAdded,
     saved: cleared ? { kind: 'none' } : state.saved,
     savedFrom: cleared ? null : state.savedFrom,
     savedSentUpTo: cleared ? null : state.savedSentUpTo,
+    savedDone: cleared ? null : state.savedDone,
     notice: state.notice,
   };
 }
@@ -215,11 +252,14 @@ export function freshSession(state: Session): Session {
     chosen: INITIAL_CHOICE,
     packs: { kind: 'none' },
     deselected: [],
+    stickerProgress: EMPTY_STICKER_PROGRESS,
     friends: { kind: 'none' },
     tickedFriends: [],
+    friendsAdded: null,
     saved: { kind: 'none' },
     savedFrom: null,
     savedSentUpTo: null,
+    savedDone: null,
     notice: state.notice,
   };
 }
@@ -255,6 +295,7 @@ export function sessionWork(state: SessionState): Work[] {
       key: `read-packs:${packs.instance}:${packs.attempt}`,
       instance: packs.instance,
       deselected: state.deselected,
+      progress: state.stickerProgress,
     });
   if (packs.kind !== 'read') return work;
   if (state.kind === 'setup')

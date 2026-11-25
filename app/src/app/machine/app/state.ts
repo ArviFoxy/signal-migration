@@ -11,7 +11,7 @@
 import type { SavedWait } from '../../../kinds/saved/copy';
 import type { FriendsState } from '../friends/state';
 import type { PacksState } from '../packs/state';
-import type { Record } from '../record';
+import type { FriendsAddedRecord, Record, SavedDoneRecord, StickerRunProgress } from '../record';
 import type { SavedState } from '../saved/state';
 import type { SignalState } from '../signal/state';
 import type { TelegramState } from '../telegram/state';
@@ -25,9 +25,13 @@ export type Session = {
   packs: PacksState;
   /** Telegram sticker set IDs the user deselected, kept for when the packs are read again. */
   deselected: string[];
+  /** Minimal sticker-migration progress kept across tab closes (pending uploads, cooldown, counts). */
+  stickerProgress: StickerRunProgress;
   friends: FriendsState;
   /** Telegram user IDs of found friends the user ticked, kept for when the friends are looked for again. */
   tickedFriends: number[];
+  /** Completed Friends addition for this migration (scoped by Signal ACI); null until written and announced. */
+  friendsAdded: FriendsAddedRecord | null;
   saved: SavedState;
   /** The saved messages are copied from this date on (seconds since 1970); null copies from the first message. */
   savedFrom: number | null;
@@ -36,19 +40,19 @@ export type Session = {
    * first.
    */
   savedSentUpTo: number | null;
+  /** Completed Saved Messages copy for this migration (scoped by Signal ACI); null until every message is sent. */
+  savedDone: SavedDoneRecord | null;
   /** Something the user should know, until dismissed: TDLib was restarted, the record could not be written. */
   notice: string | null;
 };
 
 /**
  * The migration run; `attempt` counts the runs, so that each is new work. `status` is that of the sticker packs' run.
- * `friendsAdded`: how many friends were added to the Signal contacts, once that is done. `error`: why the last run
- * stopped.
+ * `error`: why the last run stopped.
  */
 export type Run = {
   attempt: number;
   status: 'running' | 'ended' | 'failed';
-  friendsAdded: number | null;
   error: string | null;
   /** Active rate-limit pause during Saved Messages copying; null/omitted while actively copying or idle. */
   savedWait?: SavedWait | null;
@@ -86,10 +90,13 @@ export const sessionOf = (state: SessionState): Session => ({
   chosen: state.chosen,
   packs: state.packs,
   deselected: state.deselected,
+  stickerProgress: state.stickerProgress,
   friends: state.friends,
   tickedFriends: state.tickedFriends,
+  friendsAdded: state.friendsAdded,
   saved: state.saved,
   savedFrom: state.savedFrom,
   savedSentUpTo: state.savedSentUpTo,
+  savedDone: state.savedDone,
   notice: state.notice,
 });

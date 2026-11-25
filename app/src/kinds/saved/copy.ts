@@ -211,7 +211,7 @@ export type CopyOptions = {
 export async function copyToNoteToSelf(
   account: Pick<SignalAccount, 'withChat' | 'https' | 'sendNoteToSelf'>,
   messages: readonly SavedMessage[],
-  onSent: (id: number) => void,
+  onSent: (id: number, immediate?: boolean) => void,
   cancel: AbortSignal,
   options: CopyOptions = {},
 ): Promise<void> {
@@ -265,7 +265,7 @@ export async function copyToNoteToSelf(
       if (cancel.aborted) return;
       if (error instanceof AttachmentTooLargeError || error instanceof ConversionError) {
         options.onSkipped?.(group, error);
-        onSent(group.lastId);
+        onSent(group.lastId, true);
         continue;
       }
       throw error;
@@ -284,6 +284,6 @@ export async function copyToNoteToSelf(
       if (cancel.aborted) return;
       throw error;
     }
-    onSent(group.lastId);
+    onSent(group.lastId, attachments.length > 0);
   }
 }

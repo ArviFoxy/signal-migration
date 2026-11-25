@@ -88,6 +88,7 @@ export class Runtime extends EventTarget {
         emit,
         cancel: controller.signal,
         deviceName: () => ('signal' in this.state ? this.state.signal.deviceName : DEFAULT_DEVICE_NAME),
+        checkpoint: () => this.written(),
       }).catch(() => undefined);
     }
   }

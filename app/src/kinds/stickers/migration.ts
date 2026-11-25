@@ -7,8 +7,9 @@
 //    every 72 minutes by default), so only the pack being uploaded and the next one are held in memory; the next is
 //    downloaded and converted while waiting for the limit.
 //
-// Nothing is stored between visits. A later visit computes the same state from Telegram, the sticker pack index
-// and the Signal account, so a migration that stopped (closed page, rate limit) continues where it was.
+// Minimal metadata (pending uploaded pack IDs/keys, upload cooldown, and index/install status) is persisted between
+// visits so closing and reopening the tab never loses an upload quota slot, re-uploads an unlisted pack, or hits
+// Signal's upload limit early. Everything else is recomputed from Telegram, the sticker pack index, and Signal.
 // The services it uses (clock, conversion, index) are passed in, so that tests can run it against simulations.
 
 import { sameBytes, toHex } from '../../core/bytes';
@@ -24,6 +25,44 @@ import type { PictureComparison } from './compare-pack';
 import type { PackIndex } from './pack-index';
 import type { TelegramPack, TelegramSource } from './telegram-packs';
 import { MAX_STICKERS, RateLimitedError, type StickerFile, uploadStickerPack } from './upload';
+
+/** A sticker pack this browser uploaded to Signal CDN, kept until listed in the index and installed in Signal storage. */
+export type PendingUploadedPack = {
+  /** Telegram sticker set ID (`entry.pack.setId`). */
+  setId: string;
+  /** Signal pack ID returned by `uploadStickerPack`. */
+  packId: Uint8Array;
+  /** Deterministic content pack key (`contentPackKey`). */
+  packKey: Uint8Array;
+  /** True once `PackIndex.add` accepted the entry. */
+  listed: boolean;
+};
+
+/** Signal sticker upload rate-limit state scoped to one Signal account (`aci`). */
+export type UploadLimitState = {
+  aci: string;
+  /** When the next upload is allowed (ms since 1970), or null once the cooldown elapsed. */
+  allowedAt: number | null;
+  /** Observed interval between uploads (ms) once Signal's limit was reached. */
+  intervalMs: number;
+};
+
+/** Minimal sticker-migration progress kept across tab closes (IDs, timestamps, counts — no user content). */
+export type StickerRunProgress = {
+  pendingPacks: PendingUploadedPack[];
+  uploadLimit: UploadLimitState | null;
+  installedFromIndex: string[];
+  uploadedPacks: string[];
+  addedToIndex: number;
+};
+
+export const EMPTY_STICKER_PROGRESS: StickerRunProgress = {
+  pendingPacks: [],
+  uploadLimit: null,
+  installedFromIndex: [],
+  uploadedPacks: [],
+  addedToIndex: 0,
+};
 
 export type PackState =
   /** Looking the pack up in the index. */
@@ -164,6 +203,9 @@ class IndexUnavailableError extends Error {
   }
 }
 
+/** Internal signal that a persisted upload cooldown is still active before calling `uploadStickerPack`. */
+class CooldownActiveError extends Error {}
+
 export class StickerMigration extends EventTarget {
   entries: PackEntry[] = [];
   readProgress: { done: number; total: number } | null = null;
@@ -201,6 +243,16 @@ export class StickerMigration extends EventTarget {
   #copyChosen = new Set<PackEntry>();
   /** Packs this page uploaded in this visit that the index does not list yet. */
   #notListed = new Set<PackEntry>();
+  /** Packs uploaded by this browser that are not yet installed in Signal storage, persisted across closes. */
+  #pendingPacks = new Map<string, PendingUploadedPack>();
+  /** Packs uploaded by this migration (including across tab closes). */
+  #uploadedPacks = new Set<PackEntry>();
+  /** Packs already installed in the user's Signal before this migration started. */
+  #alreadyInSignal = new Set<PackEntry>();
+  /** Signal account ACI from the last `readSignal`, used to scope persisted upload cooldowns. */
+  #signalAci: string | null = null;
+  /** Cooldown restored from IndexedDB, applied once `readSignal` confirms the Signal account ACI. */
+  #restoredUploadLimit: UploadLimitState | null = null;
   #lookup: Promise<void> | null = null;
   #previewStop: AbortController | null = null;
   /** The packs each run set out to install from the index, and to upload; for progress across runs of a visit. */
@@ -229,6 +281,68 @@ export class StickerMigration extends EventTarget {
   /** Whether the pack was on Signal already when the migration started (installed, not uploaded). */
   wasOnSignal(entry: PackEntry): boolean {
     return this.#plannedInstalls.has(entry);
+  }
+
+  /** Whether the pack was already installed in the user's Signal before this migration started. */
+  wasAlreadyInSignal(entry: PackEntry): boolean {
+    return this.#alreadyInSignal.has(entry);
+  }
+
+  /** Restores minimal persisted progress (pending uploads, cooldown, status sets) after reading Telegram packs. */
+  restoreProgress(progress: StickerRunProgress): void {
+    const bySetId = new Map(this.entries.map((entry) => [entry.pack.setId, entry]));
+    for (const pending of progress.pendingPacks) {
+      const entry = bySetId.get(pending.setId);
+      if (!entry) continue;
+      entry.packId = pending.packId.slice();
+      entry.packKey = pending.packKey.slice();
+      this.#copyChosen.add(entry);
+      this.#uploadedPacks.add(entry);
+      if (!pending.listed) this.#notListed.add(entry);
+      this.#pendingPacks.set(entry.pack.setId, {
+        setId: pending.setId,
+        packId: pending.packId.slice(),
+        packKey: pending.packKey.slice(),
+        listed: pending.listed,
+      });
+    }
+    for (const setId of progress.installedFromIndex) {
+      const entry = bySetId.get(setId);
+      if (entry && !this.#pendingPacks.has(setId)) this.#plannedInstalls.add(entry);
+    }
+    for (const setId of progress.uploadedPacks) {
+      const entry = bySetId.get(setId);
+      if (entry) this.#uploadedPacks.add(entry);
+    }
+    this.addedToIndex = Math.max(this.addedToIndex, progress.addedToIndex);
+    this.#restoredUploadLimit = progress.uploadLimit ? { ...progress.uploadLimit } : null;
+  }
+
+  /** Returns an immutable snapshot of minimal sticker progress to persist in IndexedDB. */
+  snapshotProgress(): StickerRunProgress {
+    const now = this.#services.clock.now();
+    const allowedAt = this.uploadAllowedAt !== null && this.uploadAllowedAt > now ? this.uploadAllowedAt : null;
+    const uploadLimit: UploadLimitState | null = this.#signalAci
+      ? allowedAt !== null || this.#limitReached
+        ? { aci: this.#signalAci, allowedAt, intervalMs: this.uploadIntervalMs }
+        : null
+      : this.#restoredUploadLimit
+        ? { ...this.#restoredUploadLimit }
+        : null;
+    return {
+      pendingPacks: [...this.#pendingPacks.values()].map((pack) => ({
+        setId: pack.setId,
+        packId: pack.packId.slice(),
+        packKey: pack.packKey.slice(),
+        listed: pack.listed,
+      })),
+      uploadLimit,
+      installedFromIndex: [...this.#plannedInstalls]
+        .filter((entry) => entry.state === 'in-signal')
+        .map((entry) => entry.pack.setId),
+      uploadedPacks: [...this.#uploadedPacks].map((entry) => entry.pack.setId),
+      addedToIndex: this.addedToIndex,
+    };
   }
 
   /** The pack the migration is working on or waiting with: the first selected one not yet in Signal or failed. */
@@ -346,17 +460,39 @@ export class StickerMigration extends EventTarget {
    * pack, and whose manifest, decrypted with the key in the account, has that pack's title and its stickers' emoji
    * in order. Anyone can add an index entry, so the entry alone does not show that the installed pack is this one.
    */
-  async readSignal(signal: SignalAccount, cancel?: AbortSignal): Promise<void> {
+  async readSignal(signal: SignalAccount, cancel?: AbortSignal, aci?: string): Promise<void> {
     cancel?.throwIfAborted();
+    const switchedAccount = this.#signalAci !== null && aci !== undefined && this.#signalAci !== aci;
     if (this.signalReadFrom !== null && this.signalReadFrom !== signal) {
       this.#unannounced.clear();
       this.#copyChosen.clear();
       this.#notListed.clear();
       this.announceError = null;
+      if (switchedAccount) {
+        this.uploadAllowedAt = null;
+        this.uploadIntervalMs = UPLOAD_INTERVAL_MS;
+        this.#limitReached = false;
+        this.#restoredUploadLimit = null;
+        this.#plannedInstalls.clear();
+        this.#uploadedPacks.clear();
+      }
+    }
+    if (aci !== undefined && this.#restoredUploadLimit) {
+      if (this.#restoredUploadLimit.aci === aci) {
+        this.uploadIntervalMs = this.#restoredUploadLimit.intervalMs;
+        this.#limitReached = true;
+        this.uploadAllowedAt =
+          this.#restoredUploadLimit.allowedAt !== null &&
+          this.#restoredUploadLimit.allowedAt > this.#services.clock.now()
+            ? this.#restoredUploadLimit.allowedAt
+            : null;
+      }
+      this.#restoredUploadLimit = null;
     }
     const { packs } = await (await signal.storage()).readStickerPacks();
     cancel?.throwIfAborted();
     const { index } = this.#services;
+    this.#alreadyInSignal.clear();
     for (const entry of this.entries) {
       if (entry.state === 'in-signal') {
         const fallback: PackState = index.candidates(entry.identity.lookupKey).length > 0 ? 'available' : 'to-upload';
@@ -368,6 +504,23 @@ export class StickerMigration extends EventTarget {
       CONCURRENT_VERIFICATIONS,
       async (entry) => {
         cancel?.throwIfAborted();
+        const pending = this.#pendingPacks.get(entry.pack.setId);
+        if (pending) {
+          const alreadyInstalled = packs.find(
+            (stored) => sameBytes(stored.packId, pending.packId) && sameBytes(stored.packKey, pending.packKey),
+          );
+          if (alreadyInstalled) {
+            Object.assign(entry, {
+              state: 'in-signal',
+              packId: alreadyInstalled.packId,
+              packKey: alreadyInstalled.packKey,
+              error: null,
+            });
+            this.#pendingPacks.delete(entry.pack.setId);
+            this.#notListed.delete(entry);
+            return;
+          }
+        }
         const candidates = new Set(index.candidates(entry.identity.lookupKey).map(toHex));
         for (const stored of packs.filter((pack) => candidates.has(toHex(pack.packId)))) {
           const manifest = await index.manifest(stored.packId, stored.packKey, cancel);
@@ -379,13 +532,23 @@ export class StickerMigration extends EventTarget {
             manifest.stickers.every((sticker, i) => sticker.emoji === stickers[i].emoji)
           ) {
             Object.assign(entry, { state: 'in-signal', packId: stored.packId, packKey: stored.packKey, error: null });
+            this.#pendingPacks.delete(entry.pack.setId);
+            this.#notListed.delete(entry);
+            if (!this.#plannedInstalls.has(entry) && !this.#uploadedPacks.has(entry)) this.#alreadyInSignal.add(entry);
             return;
           }
+        }
+        if (pending) {
+          entry.packId = pending.packId.slice();
+          entry.packKey = pending.packKey.slice();
+          this.#copyChosen.add(entry);
+          if (!pending.listed) this.#notListed.add(entry);
         }
       },
       cancel,
     );
     cancel?.throwIfAborted();
+    if (aci !== undefined) this.#signalAci = aci;
     this.signalReadFrom = signal;
     this.#changed();
   }
@@ -460,7 +623,13 @@ export class StickerMigration extends EventTarget {
       cancel.throwIfAborted();
       const installed = new Set(snapshot.packs.map((stored) => toHex(stored.packKey)));
       const missing = adding.filter((entry) => !installed.has(toHex(entry.packKey!)));
-      if (missing.length === 0) return;
+      if (missing.length === 0) {
+        for (const entry of adding) {
+          Object.assign(entry, { state: 'in-signal', progress: null, error: null });
+          if (entry.packId) this.#unannounced.add(entry);
+        }
+        return;
+      }
       type Placed = { stored: StoredStickerPack } | { entry: PackEntry };
       const existing = [...snapshot.packs]
         .sort(signalOrder)
@@ -645,6 +814,7 @@ export class StickerMigration extends EventTarget {
     telegram: TelegramSource,
     entry: PackEntry,
     cancel: AbortSignal,
+    checkpoint?: () => Promise<void>,
   ): Promise<void> {
     // The pack key comes from the stickers themselves, and a copy is compared with them, so they are downloaded
     // before the index is asked.
@@ -657,8 +827,12 @@ export class StickerMigration extends EventTarget {
       await this.#prepare(telegram, entry, cancel);
       entry.packId = await this.#faithfulCopy(entry, cancel);
     }
+    let uploadedNow = false;
     if (!entry.packId) {
       cancel.throwIfAborted();
+      if (this.uploadAllowedAt !== null && this.uploadAllowedAt > this.#services.clock.now()) {
+        throw new CooldownActiveError();
+      }
       entry.state = 'uploading';
       this.#changed();
       const content = { title: entry.pack.title, stickers: this.#converted.get(entry)! };
@@ -676,8 +850,16 @@ export class StickerMigration extends EventTarget {
           cancel,
         ),
       );
+      uploadedNow = true;
       this.uploaded++;
+      this.#uploadedPacks.add(entry);
       this.#notListed.add(entry);
+      this.#pendingPacks.set(entry.pack.setId, {
+        setId: entry.pack.setId,
+        packId: entry.packId.slice(),
+        packKey: entry.packKey!.slice(),
+        listed: false,
+      });
     } else if (this.#plannedUploads.delete(entry)) {
       // Uploaded by someone else while this page converted it: an install after all.
       this.#plannedInstalls.add(entry);
@@ -685,6 +867,10 @@ export class StickerMigration extends EventTarget {
     this.#copyChosen.add(entry);
     this.#converted.delete(entry);
     this.#originals.delete(entry);
+    if (uploadedNow) {
+      this.#changed();
+      await checkpoint?.();
+    }
   }
 
   /** Migrates one pack that is not installed: chooses its copy on Signal, lists an own upload, and installs it. */
@@ -693,29 +879,85 @@ export class StickerMigration extends EventTarget {
     telegram: TelegramSource,
     entry: PackEntry,
     cancel: AbortSignal,
+    checkpoint?: () => Promise<void>,
   ): Promise<void> {
     cancel.throwIfAborted();
-    if (!this.#copyChosen.has(entry)) await this.#chooseCopy(signal, telegram, entry, cancel);
+    if (!this.#copyChosen.has(entry)) await this.#chooseCopy(signal, telegram, entry, cancel, checkpoint);
     cancel.throwIfAborted();
     if (this.#notListed.has(entry)) {
       await this.#addToIndex(entry, cancel);
       this.#notListed.delete(entry);
+      const pending = this.#pendingPacks.get(entry.pack.setId);
+      if (pending) pending.listed = true;
+      this.#changed();
+      await checkpoint?.();
     }
     cancel.throwIfAborted();
     entry.state = 'installing';
     this.#changed();
     await this.#install(signal, [entry], cancel);
+    this.#pendingPacks.delete(entry.pack.setId);
     Object.assign(entry, { state: 'in-signal', progress: null, error: null });
+    this.#changed();
+    await checkpoint?.();
   }
 
   /**
-   * Installs every selected pack: first those already uploaded, in one write, then the rest pack by pack, reading
-   * their stickers from `telegram`.
+   * Waits until `this.uploadAllowedAt`, pre-preparing the next upload when `entry` is already prepared (live 429 hit).
+   * Preserves `this.uploadAllowedAt` if the wait ends early (tab closed, Back to start, PageClosed).
+   */
+  async #waitUploadCooldown(
+    entry: PackEntry,
+    queue: PackEntry[],
+    telegram: TelegramSource,
+    cancel: AbortSignal,
+    checkpoint?: () => Promise<void>,
+  ): Promise<void> {
+    const { clock } = this.#services;
+    const allowedAt = this.uploadAllowedAt!;
+    const next = entry.prepared
+      ? queue.find((other) => other !== entry && other.state === 'to-upload' && !other.prepared)
+      : undefined;
+    try {
+      await untilCancelled(
+        Promise.all([
+          clock.sleep(Math.max(0, allowedAt - clock.now())),
+          next &&
+            this.#prepare(telegram, next, cancel).then(
+              () => {
+                if (cancel.aborted) return;
+                next.state = 'to-upload';
+                this.#changed();
+              },
+              () => {
+                if (cancel.aborted) return;
+                Object.assign(next, { state: 'to-upload', progress: null });
+                this.#changed();
+              },
+            ),
+        ]),
+        cancel,
+      );
+    } finally {
+      if (this.uploadAllowedAt !== null && clock.now() >= this.uploadAllowedAt) {
+        this.uploadAllowedAt = null;
+      }
+      if (next && next.state !== 'to-upload' && next.state !== 'in-signal')
+        Object.assign(next, { state: 'to-upload', progress: null });
+      this.#changed();
+    }
+    if (!cancel.aborted) await checkpoint?.();
+  }
+
+  /**
+   * Installs every selected pack: first already-uploaded pending packs, then those already uploaded by others, then
+   * the rest pack by pack, reading their stickers from `telegram`.
    */
   async run(
     signal: SignalAccount,
     telegram: TelegramSource,
     cancel: AbortSignal = new AbortController().signal,
+    checkpoint?: () => Promise<void>,
   ): Promise<void> {
     const { clock } = this.#services;
     Object.assign(this, { phase: 'running', stopReason: null });
@@ -735,20 +977,43 @@ export class StickerMigration extends EventTarget {
     for (const entry of this.#plannedUploads) {
       if (!selectedSet.has(entry) && entry.state !== 'in-signal') this.#plannedUploads.delete(entry);
     }
-    for (const entry of this.selected) if (entry.state === 'available') this.#plannedInstalls.add(entry);
-    // Packs with a listed copy come first: installing them never waits for the upload limit.
+    for (const entry of this.selected) {
+      if (entry.state === 'available' && !this.#pendingPacks.has(entry.pack.setId)) this.#plannedInstalls.add(entry);
+    }
+    // Order: (1) already-uploaded pending packs (only need index/install), (2) packs with a listed copy (install
+    // without upload quota), (3) packs to upload.
+    const priority = (entry: PackEntry) => (this.#copyChosen.has(entry) ? 2 : entry.state === 'available' ? 1 : 0);
     const queue = this.selected
       .filter((entry) => entry.state === 'available' || entry.state === 'to-upload' || entry.state === 'failed')
-      .sort((a, b) => Number(b.state === 'available') - Number(a.state === 'available'));
-    for (const entry of queue) if (!this.#plannedInstalls.has(entry)) this.#plannedUploads.add(entry);
+      .sort((a, b) => priority(b) - priority(a));
+    for (const entry of queue) {
+      if (!this.#plannedInstalls.has(entry) || this.#pendingPacks.has(entry.pack.setId))
+        this.#plannedUploads.add(entry);
+    }
     this.#changed();
     while (queue.length > 0) {
       cancel.throwIfAborted();
       if (!signal.isLinked) break;
       const entry = queue.shift()!;
       entry.error = null;
+      // If a persisted upload cooldown is still active and this pack needs an upload slot, wait it out before
+      // downloading/converting or requesting an upload form from Signal.
+      if (!this.#copyChosen.has(entry) && entry.state !== 'available' && this.uploadAllowedAt !== null) {
+        if (this.uploadAllowedAt > clock.now()) {
+          entry.state = 'to-upload';
+          queue.unshift(entry);
+          await this.#announce(signal, [], true, cancel);
+          this.#changed();
+          await checkpoint?.();
+          await this.#waitUploadCooldown(entry, queue, telegram, cancel, checkpoint);
+          continue;
+        }
+        this.uploadAllowedAt = null;
+        this.#changed();
+        await checkpoint?.();
+      }
       try {
-        await untilCancelled(this.#migrateOne(signal, telegram, entry, cancel), cancel);
+        await untilCancelled(this.#migrateOne(signal, telegram, entry, cancel, checkpoint), cancel);
         cancel.throwIfAborted();
         await this.#announce(signal, [entry], false, cancel);
       } catch (error) {
@@ -761,7 +1026,16 @@ export class StickerMigration extends EventTarget {
             });
           throw error;
         }
-        if (error instanceof RateLimitedError) {
+        if (error instanceof CooldownActiveError) {
+          entry.state = 'to-upload';
+          queue.unshift(entry);
+          await this.#announce(signal, [], true, cancel);
+          this.#changed();
+          await checkpoint?.();
+          if (this.uploadAllowedAt !== null && this.uploadAllowedAt > clock.now()) {
+            await this.#waitUploadCooldown(entry, queue, telegram, cancel, checkpoint);
+          }
+        } else if (error instanceof RateLimitedError) {
           entry.state = 'to-upload';
           queue.unshift(entry);
           const waitMs = (error.retryAfterSeconds ?? UPLOAD_INTERVAL_MS / 1000) * 1000;
@@ -771,34 +1045,8 @@ export class StickerMigration extends EventTarget {
           await this.#announce(signal, [], true, cancel);
           this.uploadAllowedAt = clock.now() + waitMs;
           this.#changed();
-          // While waiting, the next pack is downloaded and converted. If that fails, it is tried again in its turn.
-          const next = queue.find((other) => other !== entry && other.state === 'to-upload' && !other.prepared);
-          try {
-            await untilCancelled(
-              Promise.all([
-                clock.sleep(this.uploadAllowedAt - clock.now()),
-                next &&
-                  this.#prepare(telegram, next, cancel).then(
-                    () => {
-                      if (cancel.aborted) return;
-                      next.state = 'to-upload';
-                      this.#changed();
-                    },
-                    () => {
-                      if (cancel.aborted) return;
-                      Object.assign(next, { state: 'to-upload', progress: null });
-                      this.#changed();
-                    },
-                  ),
-              ]),
-              cancel,
-            );
-          } finally {
-            this.uploadAllowedAt = null;
-            if (next && next.state !== 'to-upload' && next.state !== 'in-signal')
-              Object.assign(next, { state: 'to-upload', progress: null });
-            this.#changed();
-          }
+          await checkpoint?.();
+          await this.#waitUploadCooldown(entry, queue, telegram, cancel, checkpoint);
         } else {
           this.#originals.delete(entry);
           this.#converted.delete(entry);
