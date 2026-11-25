@@ -146,6 +146,50 @@ describe('App session transitions and notices', () => {
     const next = appTransition(state, { type: 'copy-saved-from', from: 1_700_000_000 }, nextContext());
     expect(isSession(next) && next.savedSentUpTo).toBe(42);
   });
+
+  // Detects: run/friends-failed leaving run.savedWait non-null after copy-saved is aborted, keeping a 1 s UI ticker alive.
+  it('clears savedWait when run/friends-failed stops the migration', () => {
+    const linkedDevice = {
+      aci: 'account-a',
+      deviceId: 2,
+      password: 'p',
+      storageServiceKey: new Uint8Array(32).fill(1),
+      identityPublic: new Uint8Array(33),
+      identityPrivate: new Uint8Array(32),
+      registrationId: 1,
+    };
+    const state: AppState = {
+      kind: 'migrating',
+      telegram: { kind: 'signed-in', method: 'qr', instance: 'telegram-1', attempt: 1, error: null },
+      signal: signalTransition(
+        signalTransition(initialSignal('Browser'), { type: 'signal/link' }, nextContext()),
+        { type: 'signal/linked', device: linkedDevice },
+        nextContext(),
+      ),
+      chosen: { stickers: false, friends: true, saved: true },
+      packs: { kind: 'none' },
+      deselected: [],
+      friends: { kind: 'none' },
+      tickedFriends: [],
+      saved: { kind: 'none' },
+      savedFrom: null,
+      savedSentUpTo: null,
+      notice: null,
+      run: {
+        attempt: 1,
+        status: 'running',
+        friendsAdded: null,
+        error: null,
+        savedWait: { service: 'Signal', until: Date.now() + 30_000 },
+      },
+    };
+    const next = appTransition(state, { type: 'run/friends-failed', error: 'storage conflict' }, nextContext());
+    expect(next.kind).toBe('migrating');
+    if (next.kind === 'migrating') {
+      expect(next.run.status).toBe('failed');
+      expect(next.run.savedWait).toBeNull();
+    }
+  });
 });
 
 describe('Workflow invariants: reload, cancellation, cross-account isolation, and disposal', () => {

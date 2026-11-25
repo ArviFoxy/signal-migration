@@ -7,50 +7,32 @@ import { probeWebm, renderWebm, WebmDecodeError } from './webm-decoding';
 
 /** What the page asks the worker. */
 export type WebmCall =
-  | { kind: 'init'; wasmBinary?: ArrayBuffer; wasmUrl?: string }
+  | { kind: 'init'; wasmUrl: string }
   | { kind: 'probe'; file: Uint8Array }
   | { kind: 'render'; file: Uint8Array; size: number; frameRate: number; count: number };
 
 type WebmRequest = WebmCall & { id: number };
 
 let decoder: Promise<WebmDecoderModule> | null = null;
-/** Verified WASM bytes retained for re-instantiation after a trap without re-fetching over the network. */
-let verifiedWasmBytes: Uint8Array | null = null;
 let configuredWasmUrl: string | null = null;
 
 /**
- * Instantiates the Emscripten module from pre-verified WASM bytes via `instantiateWasm`. Emscripten 7+ drops
- * `Module.wasmBinary` and otherwise falls back to `new URL("webm-decoder.wasm", import.meta.url)`, which throws inside
- * an attested `blob:` worker.
+ * Validates that a configured WASM URL is a same-origin `blob:` or `http(s):` URL. Does not pass `self.location.href`
+ * as a base because `new URL(rel, 'blob:...')` throws when the worker itself runs from a `blob:` URL.
  */
-async function createFromBytes(bytes: Uint8Array): Promise<WebmDecoderModule> {
-  const compiled = await WebAssembly.compile(bytes.slice());
-  let rejectInstantiate!: (error: unknown) => void;
-  const instantiateFailed = new Promise<never>((_, reject) => {
-    rejectInstantiate = reject;
-  });
-  const created = createWebmDecoder({
-    instantiateWasm(imports, receiveInstance) {
-      WebAssembly.instantiate(compiled, imports).then(
-        (instance) => receiveInstance(instance),
-        (error) => rejectInstantiate(error),
-      );
-      return {};
-    },
-  });
-  // Emscripten's instantiateWasm wrapper creates a Promise with no reject handler; avoid unhandled rejections if
-  // instantiateFailed wins the race first.
-  created.catch(() => undefined);
-  return Promise.race([created, instantiateFailed]);
+function validateWasmUrl(raw: string): string {
+  const parsed = new URL(raw);
+  const allowedProtocol = parsed.protocol === 'blob:' || parsed.protocol === 'https:' || parsed.protocol === 'http:';
+  if (!allowedProtocol || parsed.origin !== self.location.origin) {
+    throw new Error(`refusing to load WebM decoder from untrusted URL: ${parsed.origin}`);
+  }
+  return parsed.href;
 }
 
 function loadDecoder(): Promise<WebmDecoderModule> {
   if (!decoder) {
-    const pending = verifiedWasmBytes
-      ? createFromBytes(verifiedWasmBytes)
-      : createWebmDecoder({
-          locateFile: () => configuredWasmUrl ?? assetUrl(assetFile('webmDecoderWasm'), import.meta.url),
-        });
+    const wasmUrl = configuredWasmUrl ?? assetUrl(assetFile('webmDecoderWasm'), import.meta.url);
+    const pending = createWebmDecoder({ locateFile: () => wasmUrl });
     decoder = pending.catch((error) => {
       if (decoder === pending) decoder = null;
       throw error;
@@ -66,8 +48,7 @@ self.onmessage = async (event: MessageEvent<WebmRequest>) => {
   let loaded: Promise<WebmDecoderModule> | null = null;
   try {
     if (request.kind === 'init') {
-      if (request.wasmBinary) verifiedWasmBytes = new Uint8Array(request.wasmBinary);
-      if (request.wasmUrl) configuredWasmUrl = request.wasmUrl;
+      configuredWasmUrl = validateWasmUrl(request.wasmUrl);
       reply({ result: null });
       return;
     }

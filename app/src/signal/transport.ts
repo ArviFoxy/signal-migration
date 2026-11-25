@@ -46,12 +46,12 @@ export interface SignalAccount {
    * Tells the account's other devices (the phone and other linked devices) to install these packs and to read the
    * storage service again. Without it, they do not show packs installed through the storage service.
    */
-  announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void>;
+  announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[], cancel?: AbortSignal): Promise<void>;
   /**
    * Tells the account's other devices to read the storage service again. Without it, they show what the app wrote
    * there, such as new contacts, only after their next start.
    */
-  announceStorageChange(): Promise<void>;
+  announceStorageChange(cancel?: AbortSignal): Promise<void>;
   /**
    * Puts a message into the account's Note to Self, by sending it to the account's other devices. A note with the
    * timestamp of one that the devices already have is dropped by them.

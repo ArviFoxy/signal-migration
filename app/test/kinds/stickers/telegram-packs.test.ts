@@ -236,4 +236,81 @@ describe('reading Telegram sticker packs across TDLib restarts', () => {
     expect(read).toHaveLength(1);
     expect(new TextDecoder().decode(await source.readFile(read[0].stickers[0].fileId))).toBe('slow');
   });
+
+  // Detects: a shared per-run 429 sleep in ensureInstalledInRun staying stuck for up to 300 s after TDLib restarts
+  // into a new run, and readFile failing on TDLib's 400 "File download has failed or was canceled" without refreshing.
+  it('aborts a stale run 429 wait immediately on restart and refreshes a sticker set on 400 download failure', async () => {
+    let run = 1;
+    let runController = new AbortController();
+    let listCalls = 0;
+    let setCalls = 0;
+    let readCalls = 0;
+
+    const makeSet = (fileId: number): Td.stickerSet =>
+      ({
+        _: 'stickerSet',
+        id: '501',
+        title: 'Fresh',
+        name: 'fresh_pack',
+        stickers: [
+          {
+            _: 'sticker',
+            emoji: '✨',
+            format: { _: 'stickerFormatWebp' },
+            sticker: { _: 'file', id: fileId, remote: { _: 'remoteFile', id: 'r501', unique_id: 'u501' } },
+          },
+        ],
+      }) as unknown as Td.stickerSet;
+
+    const client = {
+      get run() {
+        return run;
+      },
+      runSignal(forRun: number) {
+        if (forRun !== run) {
+          const c = new AbortController();
+          c.abort();
+          return c.signal;
+        }
+        return runController.signal;
+      },
+      async invokeInRun(pinnedRun: number, query: { _: string }) {
+        if (pinnedRun !== run) throw new TelegramRestartedError();
+        if (query._ === 'getInstalledStickerSets') {
+          listCalls++;
+          if (listCalls === 1) {
+            setTimeout(() => {
+              run = 2;
+              const prev = runController;
+              runController = new AbortController();
+              prev.abort();
+            }, 15);
+            throw new TelegramError(429, 'Too Many Requests: retry after 120');
+          }
+          return { _: 'stickerSets', sets: [{ _: 'stickerSetInfo', id: '501', title: 'Fresh', name: 'fresh_pack' }] };
+        }
+        if (query._ === 'getStickerSet') {
+          setCalls++;
+          return makeSet(10 + setCalls);
+        }
+        throw new Error(`not simulated: ${query._}`);
+      },
+      async readFile(fileId: number) {
+        readCalls++;
+        if (readCalls === 1) throw new TelegramError(400, 'File download has failed or was canceled');
+        return enc(`sticker-${fileId}`);
+      },
+    } as unknown as TelegramClient;
+
+    const source = telegramSource(client);
+    const startedAt = Date.now();
+    const [pack] = await source.readPacks(() => undefined);
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    expect(run).toBe(2);
+
+    const bytes = await source.readFile(pack.stickers[0].fileId);
+    expect(readCalls).toBe(2);
+    expect(setCalls).toBe(2);
+    expect(new TextDecoder().decode(bytes)).toBe('sticker-12');
+  });
 });

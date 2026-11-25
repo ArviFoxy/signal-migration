@@ -318,14 +318,21 @@ it('rejects a .tgs gzip bomb exceeding the decompressed size limit', async () =>
   await expect(page('convert', 'bomb.tgs', 'tgs', 'bomb.png')).rejects.toThrow(/large|limit|size/i);
 });
 
-// Detects: Emscripten ignoring Module.wasmBinary and calling new URL("webm-decoder.wasm", import.meta.url) inside a
-// blob: worker on attested builds, causing every .webm sticker to fail with "Failed to construct 'URL': Invalid URL".
-it('decodes a WebM video sticker in a blob: worker initialized with wasmBinary (attested build path)', async () => {
-  const result = await page<{ duration: number; frameRate: number; frameCount: number; firstFrameBytes: number }>(
-    'decodeWebmInBlobWorker',
-    'video.webm',
-  );
+// Detects: webm-worker failing inside a blob: worker on attested builds (e.g. falling back to
+// new URL("webm-decoder.wasm", import.meta.url) instead of loading the verified application/wasm blob: URL via
+// locateFile), or accepting untrusted cross-origin wasmUrl values.
+it('decodes a WebM video sticker in a blob: worker initialized with a blob: wasmUrl (attested build path)', async () => {
+  const result = await page<{
+    duration: number;
+    frameRate: number;
+    frameCount: number;
+    firstFrameBytes: number;
+    secondFrameCount: number;
+    rejectedUntrustedUrl: boolean;
+  }>('decodeWebmInBlobWorker', 'video.webm');
+  expect(result.rejectedUntrustedUrl).toBe(true);
   expect(result.duration).toBeGreaterThan(0);
   expect(result.frameCount).toBe(3);
+  expect(result.secondFrameCount).toBe(2);
   expect(result.firstFrameBytes).toBe(128 * 128 * 4);
 });

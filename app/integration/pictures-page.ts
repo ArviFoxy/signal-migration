@@ -59,17 +59,24 @@ const pictures = {
   headLinkCount: () => document.head.querySelectorAll('link').length,
 
   /**
-   * Runs the real `webm-worker.js` bundle from a `blob:` URL and initializes it with `wasmBinary`, exactly as
-   * `BuildVerifier.resolveWorkerInput` + `resolveWasmInput` do on attested releases.
+   * Runs the real `webm-worker.js` bundle from a `blob:` URL and initializes it with a `blob:` `application/wasm` URL,
+   * exactly as `WorkerChannel.#ensureWorker` does on attested releases. Also verifies untrusted cross-origin URLs are
+   * rejected and subsequent decode calls reuse the live worker cleanly.
    */
-  async decodeWebmInBlobWorker(
-    name: string,
-  ): Promise<{ duration: number; frameRate: number; frameCount: number; firstFrameBytes: number }> {
+  async decodeWebmInBlobWorker(name: string): Promise<{
+    duration: number;
+    frameRate: number;
+    frameCount: number;
+    firstFrameBytes: number;
+    secondFrameCount: number;
+    rejectedUntrustedUrl: boolean;
+  }> {
     const [workerRes, wasmRes] = await Promise.all([fetch('/webm-worker.js'), fetch('/webm-decoder.wasm')]);
     if (!workerRes.ok) throw new Error(`fetching webm-worker.js answered ${workerRes.status}`);
     if (!wasmRes.ok) throw new Error(`fetching webm-decoder.wasm answered ${wasmRes.status}`);
     const [workerBytes, wasmBinary] = await Promise.all([workerRes.arrayBuffer(), wasmRes.arrayBuffer()]);
     const blobUrl = URL.createObjectURL(new Blob([workerBytes], { type: 'text/javascript' }));
+    const wasmBlobUrl = URL.createObjectURL(new Blob([wasmBinary], { type: 'application/wasm' }));
     const worker = new Worker(blobUrl, { type: 'module' });
     let nextId = 1;
     const call = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>
@@ -94,7 +101,13 @@ const pictures = {
         worker.postMessage({ id, ...message }, transfer);
       });
     try {
-      await call<null>({ kind: 'init', wasmBinary }, [wasmBinary]);
+      let rejectedUntrustedUrl = false;
+      try {
+        await call<null>({ kind: 'init', wasmUrl: 'https://evil.example/evil.wasm' });
+      } catch {
+        rejectedUntrustedUrl = true;
+      }
+      await call<null>({ kind: 'init', wasmUrl: wasmBlobUrl });
       const data = file(name);
       const info = await call<{ duration: number; frameRate: number }>({ kind: 'probe', file: data });
       const frames = await call<ArrayBuffer[]>({
@@ -104,15 +117,25 @@ const pictures = {
         frameRate: 7,
         count: 3,
       });
+      const second = await call<ArrayBuffer[]>({
+        kind: 'render',
+        file: data,
+        size: 128,
+        frameRate: 7,
+        count: 2,
+      });
       return {
         duration: info.duration,
         frameRate: info.frameRate,
         frameCount: frames.length,
         firstFrameBytes: frames[0]?.byteLength ?? 0,
+        secondFrameCount: second.length,
+        rejectedUntrustedUrl,
       };
     } finally {
       worker.terminate();
       URL.revokeObjectURL(blobUrl);
+      URL.revokeObjectURL(wasmBlobUrl);
     }
   },
 

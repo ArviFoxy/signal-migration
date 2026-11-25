@@ -2,7 +2,7 @@
 // their stickers.
 
 import type * as Td from 'tdlib-types';
-import { type TelegramClient, TelegramError, untilNotRestarted } from '../../telegram/client';
+import { type TelegramClient, TelegramError, TelegramRestartedError, untilNotRestarted } from '../../telegram/client';
 import { patiently } from '../../telegram/patiently';
 
 export type StickerFormat = 'webp' | 'tgs' | 'webm';
@@ -104,10 +104,21 @@ export function telegramSource(client: TelegramClient): TelegramSource {
   /** The files of a pack in one run, by their permanent identifier; keyed by run and pack. */
   const reread = new Map<string, Promise<Map<string, number>>>();
 
+  /** Runs a shared per-run RPC with flood-wait retries aborted as soon as `run` ends or the client stops. */
+  const patientlyInRun = async <T>(run: number, request: () => Promise<T>): Promise<T> => {
+    const signal = client.runSignal?.(run);
+    try {
+      return await patiently(request, signal);
+    } catch (error) {
+      if (signal?.aborted && client.run !== run) throw new TelegramRestartedError();
+      throw error;
+    }
+  };
+
   const ensureInstalledInRun = (run: number): Promise<Td.stickerSetInfo[]> => {
     let list = installedInRun.get(run);
     if (!list) {
-      list = patiently(() =>
+      list = patientlyInRun(run, () =>
         client.invokeInRun(run, { _: 'getInstalledStickerSets', sticker_type: { _: 'stickerTypeRegular' } }),
       ).then(({ sets }) => sets);
       installedInRun.set(run, list);
@@ -130,12 +141,14 @@ export function telegramSource(client: TelegramClient): TelegramSource {
   const fetchSetInRun = async (run: number, setId: string, setName: string): Promise<Td.stickerSet> => {
     await ensureInstalledInRun(run);
     try {
-      return await patiently(() => client.invokeInRun(run, { _: 'getStickerSet', set_id: setId }));
+      return await patientlyInRun(run, () => client.invokeInRun(run, { _: 'getStickerSet', set_id: setId }));
     } catch (error) {
       // A pack uninstalled on another device after readPacks is no longer in getInstalledStickerSets; look it up by
       // its short name so TDLib fetches its access hash from Telegram.
       if (setName && error instanceof TelegramError && error.code === 400 && /not found/i.test(error.message)) {
-        return patiently(() => client.invokeInRun(run, { _: 'searchStickerSet', name: setName, ignore_cache: false }));
+        return patientlyInRun(run, () =>
+          client.invokeInRun(run, { _: 'searchStickerSet', name: setName, ignore_cache: false }),
+        );
       }
       throw error;
     }
@@ -161,10 +174,15 @@ export function telegramSource(client: TelegramClient): TelegramSource {
   };
 
   /** TDLib's number in one run for a file this source gave out, paired with that run. */
-  const currentId = async (fileId: number, cancel?: AbortSignal): Promise<{ run: number; id: number }> => {
+  const currentId = async (
+    fileId: number,
+    cancel?: AbortSignal,
+    forceRefresh = false,
+  ): Promise<{ run: number; id: number }> => {
     const run = client.run;
     const file = issued[fileId];
-    if (file.run === run) return { run, id: file.id };
+    if (!forceRefresh && file.run === run) return { run, id: file.id };
+    if (forceRefresh) reread.delete(`${run}:${file.setId}`);
     const id = file.uniqueId
       ? (await withAbort(filesInRun(run, file.setId, file.setName), cancel)).get(file.uniqueId)
       : undefined;
@@ -182,7 +200,22 @@ export function telegramSource(client: TelegramClient): TelegramSource {
       untilNotRestarted(async () => {
         cancel?.throwIfAborted();
         const { run, id } = await currentId(fileId, cancel);
-        return patiently(() => client.readFile(id, run, cancel), cancel);
+        try {
+          return await patiently(() => client.readFile(id, run, cancel), cancel);
+        } catch (error) {
+          // TDLib's synchronous downloadFile collapses failed file_reference repairs into 400 "File download has
+          // failed or was canceled" (FileManager.cpp:3029); re-read the sticker set once to refresh file references.
+          if (
+            !cancel?.aborted &&
+            error instanceof TelegramError &&
+            error.code === 400 &&
+            /file download has failed or was canceled/i.test(error.message)
+          ) {
+            const refreshed = await currentId(fileId, cancel, true);
+            return patiently(() => client.readFile(refreshed.id, refreshed.run, cancel), cancel);
+          }
+          throw error;
+        }
       }),
   };
 }

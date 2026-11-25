@@ -252,6 +252,8 @@ export class TelegramClient {
   /** Fails the requests sent to the current run when it stops. */
   #runEnded: Promise<never> = new Promise<never>(() => undefined);
   #endRun: (error: Error) => void = () => undefined;
+  /** Aborted whenever the current TDLib run ends or the client stops, so shared per-run waits stop immediately. */
+  #runController = new AbortController();
   /** Resolves once the current run takes requests: after a restart, once TDLib has reported its login state. */
   #usable: Promise<void>;
   /** In-flight startup/restore work that must finish before dispose() deletes IndexedDB. */
@@ -290,11 +292,23 @@ export class TelegramClient {
     return this.#run;
   }
 
+  /** An AbortSignal that aborts as soon as `run` is no longer active or this client stops. */
+  runSignal(run: number): AbortSignal {
+    if (this.#isStopped || this.#run !== run) {
+      const controller = new AbortController();
+      controller.abort();
+      return controller.signal;
+    }
+    return this.#runController.signal;
+  }
+
   /**
    * Advances `#run` synchronously before async startup begins so any caller woken by a restart immediately observes
    * the new run epoch and never reuses a file or chat handle from the previous run.
    */
   #beginRun(delayMs: number, prevCleanup: Promise<void>): Promise<void> {
+    this.#runController.abort();
+    this.#runController = new AbortController();
     const run = ++this.#run;
     this.#activeFileReaders.clear();
     const usable = this.#startRun(run, delayMs, prevCleanup);
@@ -386,6 +400,7 @@ export class TelegramClient {
     this.#prevCleanup = cleanup;
     if (!restarted) {
       this.#isStopped = true;
+      this.#runController.abort();
       this.#stop(new Error('the Telegram connection was closed'));
     } else {
       const delay = RESTART_DELAYS_MS[Math.min(this.#failedRestarts++, RESTART_DELAYS_MS.length - 1)];
@@ -651,6 +666,7 @@ export class TelegramClient {
   /** Stops TDLib's worker now and keeps the instance's databases, for TDLib to start on them again. */
   terminate(): void {
     this.#isStopped = true;
+    this.#runController.abort();
     this.#activeFileReaders.clear();
     const td = this.#td;
     this.#td = null;
@@ -661,6 +677,7 @@ export class TelegramClient {
   /** Stops TDLib's worker now and deletes the instance's databases. Requests still waiting fail. */
   async dispose(): Promise<void> {
     this.#isStopped = true;
+    this.#runController.abort();
     this.#activeFileReaders.clear();
     this.#stop(new Error('the Telegram connection was closed'));
     // Wait for any in-flight startup/restore to finish so it cannot re-create IndexedDB after we delete it.

@@ -96,31 +96,33 @@ export class SignalConnection implements SignalAccount {
    * Tells the account's other devices to install these packs, then to read the storage service again, which
    * holds the packs' order. Two messages: Android acts on only one kind of request per sync message.
    */
-  async announceStickerPacks(packs: { packId: Uint8Array; packKey: Uint8Array }[]): Promise<void> {
+  async announceStickerPacks(
+    packs: { packId: Uint8Array; packKey: Uint8Array }[],
+    cancel?: AbortSignal,
+  ): Promise<void> {
+    cancel?.throwIfAborted();
     const devices = await this.#toOwnDevices();
-    await this.withChat(async (chat) => {
-      if (packs.length > 0) await devices.send(chat, installStickerPacksMessage(packs));
-      await devices.send(chat, fetchLatestStorageMessage());
-    });
+    const target = <T>(action: (chat: ChatChannel) => Promise<T>) => this.withChat(action);
+    if (packs.length > 0) await devices.send(target, installStickerPacksMessage(packs), { cancel });
+    await devices.send(target, fetchLatestStorageMessage(), { cancel });
   }
 
-  announceStorageChange(): Promise<void> {
-    return this.announceStickerPacks([]);
+  announceStorageChange(cancel?: AbortSignal): Promise<void> {
+    return this.announceStickerPacks([], cancel);
   }
 
   async sendNoteToSelf(note: Note, options?: SendNoteOptions): Promise<void> {
     options?.cancel?.throwIfAborted();
     const devices = await this.#toOwnDevices();
     const content = noteToSelfMessage(this.#account.credentials.aci, note);
-    // Not urgent, as Signal Desktop sends a transcript (sendSyncMessageOnly): the phone is not woken for each note.
-    await this.withChat((chat) =>
-      devices.send(chat, content, {
-        timestamp: note.timestamp,
-        urgent: false,
-        cancel: options?.cancel,
-        onWait: options?.onWait,
-      }),
-    );
+    // Pass `withChat` per request so an idle WebSocket drop during a long 429 sleep reconnects transparently
+    // without discarding the encrypted batch or advancing the Signal Double Ratchet.
+    await devices.send((action) => this.withChat(action), content, {
+      timestamp: note.timestamp,
+      urgent: false,
+      cancel: options?.cancel,
+      onWait: options?.onWait,
+    });
   }
 
   /** Shows a QR code through `showQrCode` and waits until the phone has linked this device, or `cancel`. */

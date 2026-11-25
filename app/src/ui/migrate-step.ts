@@ -113,8 +113,9 @@ export class MigrateStep extends MigrationView {
 
   connectedCallback(): void {
     super.connectedCallback();
-    // Rate-limit countdowns (sticker upload limit and Saved Messages) are redrawn every second.
+    // Rate-limit countdowns (sticker upload limit and Saved Messages) are redrawn every second while active.
     this.#ticker = setInterval(() => {
+      if (this.run.failed || this.run.ended) return;
       if (this.migration?.uploadAllowedAt || (this.saved?.kind === 'ready' && this.saved.wait?.until)) {
         this.requestUpdate();
       }
@@ -329,7 +330,7 @@ export class MigrateStep extends MigrationView {
         ${migration.announceError}</span
       >`;
     }
-    const waitUntil = migration.uploadAllowedAt;
+    const waitUntil = !this.run.failed && !ended ? migration.uploadAllowedAt : null;
     if (waitUntil) {
       const left = waitUntil - Date.now();
       return html`<span class="flex items-start gap-1.5 text-upload-text">
@@ -401,11 +402,19 @@ export class MigrateStep extends MigrationView {
           aria-label="Saved Messages"
           class="flex flex-none flex-col gap-2 rounded-xl bg-white px-4 py-3.5 ring-1 ring-card-line ring-inset"
         >
-          <div class="flex items-center justify-between gap-3">
-            <span class="text-sm font-semibold">Saved Messages</span>
-            <span class="text-sm text-muted">Reading your Saved Messages…</span>
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="text-sm font-semibold whitespace-nowrap">Saved Messages</span>
+            <span class="text-right text-sm ${this.run.failed ? 'text-danger' : 'text-muted'}"
+              >${this.run.failed ? 'Stopped before your Saved Messages finished reading' : 'Reading your Saved Messages…'}</span
+            >
           </div>
-          ${progressBar('Reading Saved Messages', 0, 1, 'accent', this.run.failed ? 'failed' : 'active')}
+          ${progressBar(
+            'Reading Saved Messages',
+            0,
+            1,
+            this.run.failed ? 'danger' : 'accent',
+            this.run.failed ? 'failed' : 'active',
+          )}
         </section>`;
       case 'failed':
         return html`<section
@@ -495,7 +504,12 @@ export class MigrateStep extends MigrationView {
   /** Sticker packs card: top progress bar matching Saved Messages, with an inset subcard for the stickers window. */
   private packsBlock(migration: StickerMigration) {
     const selected = migration.selected;
-    const stickersEnded = migration.phase === 'done' || migration.phase === 'stopped';
+    const stickersEnded =
+      migration.phase === 'done' ||
+      migration.phase === 'stopped' ||
+      this.run.ending ||
+      this.run.finished ||
+      (this.run.ended && !this.run.failed);
     const done = selected.filter((entry) => entry.state === 'in-signal').length;
     const failed = selected.filter((entry) => entry.state === 'failed').length;
     const remainingUploads = migration.uploadQueue.filter(
@@ -514,7 +528,7 @@ export class MigrateStep extends MigrationView {
     ];
     let barColour: 'accent' | 'upload' | 'danger' = 'accent';
     let barState: ProgressState = 'idle';
-    if (migration.uploadAllowedAt) {
+    if (!this.run.failed && !stickersEnded && migration.uploadAllowedAt) {
       barColour = 'upload';
       barState = 'throttled';
     } else if (!stickersEnded && !this.run.failed) {
@@ -566,7 +580,7 @@ export class MigrateStep extends MigrationView {
           </div>
           ${
             shown.length === 0
-              ? html`<p class="bg-white px-4 py-6 text-sm text-muted">No packs here.</p>`
+              ? html`<p class="flex-1 bg-white px-4 py-6 text-sm text-muted">No packs here.</p>`
               : html`<div class="relative flex min-h-[200px] flex-1 flex-col lg:min-h-0">
                   <ul
                     aria-label="Packs"

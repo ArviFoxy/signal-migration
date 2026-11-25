@@ -87,6 +87,12 @@ export function progressBar(
 ): TemplateResult {
   const width = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
   const fill = colour === 'accent' ? 'bg-accent' : colour === 'upload' ? 'bg-upload' : 'bg-danger';
+  const track =
+    width === 0 && activity === 'throttled'
+      ? 'bg-upload-soft'
+      : width === 0 && activity === 'failed'
+        ? 'bg-danger/15'
+        : 'bg-line';
   const trackActive = activity === 'active' && width === 0 ? 'progress-track-active' : '';
   const fillActive = activity === 'active' && width > 0 ? 'progress-fill-active' : '';
   return html`<div
@@ -96,7 +102,7 @@ export function progressBar(
     aria-valuemax=${total}
     aria-valuenow=${done}
     data-state=${activity}
-    class="relative h-2 overflow-hidden rounded bg-line ${trackActive}"
+    class="relative h-2 overflow-hidden rounded ${track} ${trackActive}"
   >
     <div class="h-full transition-[width] duration-300 ${fill} ${fillActive}" style="width: ${width}%"></div>
   </div>`;

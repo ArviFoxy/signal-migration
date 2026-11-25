@@ -57,13 +57,13 @@
   }
 }
 
-/* Progress bar activity cues: flowing diagonal sheen while actively working; completely still when throttled or done. */
+/* Progress bar activity cues: seamless 45° diagonal sheen while actively working; still when throttled or done. */
 @keyframes progress-sheen {
   from {
     background-position: 0 0;
   }
   to {
-    background-position: 28px 0;
+    background-position: 20px 0;
   }
 }
 
@@ -77,15 +77,18 @@
 }
 
 .progress-fill-active {
-  background-image: repeating-linear-gradient(
+  background-image: linear-gradient(
     -45deg,
-    rgba(255, 255, 255, 0.24) 0px,
-    rgba(255, 255, 255, 0.24) 7px,
-    transparent 7px,
-    transparent 14px
+    rgba(255, 255, 255, 0.24) 25%,
+    transparent 25%,
+    transparent 50%,
+    rgba(255, 255, 255, 0.24) 50%,
+    rgba(255, 255, 255, 0.24) 75%,
+    transparent 75%,
+    transparent
   );
-  background-size: 28px 28px;
-  animation: progress-sheen 0.9s linear infinite;
+  background-size: 20px 20px;
+  animation: progress-sheen 0.8s linear infinite;
 }
 
 .progress-track-active::after {
@@ -94,7 +97,12 @@
   inset: 0 auto 0 0;
   width: 35%;
   border-radius: inherit;
-  background: linear-gradient(90deg, transparent, rgba(63, 60, 187, 0.35), transparent);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    color-mix(in srgb, var(--color-accent) 35%, transparent),
+    transparent
+  );
   animation: progress-glide 1.5s ease-in-out infinite;
 }
 

@@ -16,7 +16,40 @@ import {
 import { fromBase64, sameBytes, toBase64 } from '../core/bytes';
 import { randomBytes } from '../core/random';
 import { OwnDeviceSessions, randomInt } from '../wasm/signal_migration_wasm';
-import { type ChatChannel, chatHeader } from './transport';
+import { type ChatChannel, chatHeader, type ChatResponse } from './transport';
+
+/** Either a direct chat channel or a session-reconnecting `withChat` wrapper so retries survive idle socket closes. */
+export type ChatTarget = ChatChannel | (<T>(action: (chat: ChatChannel) => Promise<T>) => Promise<T>);
+
+function requestOn(
+  target: ChatTarget,
+  verb: string,
+  path: string,
+  options?: { body?: Uint8Array; headers?: string[] },
+): Promise<ChatResponse> {
+  return typeof target === 'function'
+    ? target((chat) => chat.request(verb, path, options))
+    : target.request(verb, path, options);
+}
+
+function raceAbort<T>(promise: Promise<T>, cancel?: AbortSignal): Promise<T> {
+  if (!cancel) return promise;
+  if (cancel.aborted) return Promise.reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+    cancel.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cancel.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error) => {
+        cancel.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
 
 const MAX_RATE_LIMIT_RETRIES = 8;
 const MAX_BACKOFF_WAIT_S = 60;
@@ -155,8 +188,28 @@ export class OwnDevices {
   }
 
   /** Starts sessions from the prekey bundles of the account's devices: all of them (`*`), or one. */
-  async #startSessions(chat: ChatChannel, devices: '*' | number): Promise<void> {
-    const response = await chat.request('GET', `/v2/keys/${this.sender.aci}/${devices}`);
+  async #startSessions(
+    target: ChatTarget,
+    devices: '*' | number,
+    cancel?: AbortSignal,
+    onWait?: (until: number | null) => void,
+  ): Promise<void> {
+    let response!: ChatResponse;
+    for (let rateRetries = 0; ;) {
+      cancel?.throwIfAborted();
+      response = await requestOn(target, 'GET', `/v2/keys/${this.sender.aci}/${devices}`);
+      if (response.status === 429 && rateRetries < MAX_RATE_LIMIT_RETRIES) {
+        const waitMs = retryWaitMs(chatHeader(response.headers, 'Retry-After'), rateRetries++);
+        onWait?.(Date.now() + waitMs);
+        try {
+          await abortableWait(waitMs, cancel);
+        } finally {
+          onWait?.(null);
+        }
+        continue;
+      }
+      break;
+    }
     if (response.status === 404) return;
     if (response.status !== 200) throw new Error(`reading the keys of your other devices answered ${response.status}`);
     const bundle = parse<PreKeyResponse>(response.body);
@@ -187,23 +240,46 @@ export class OwnDevices {
 
   /**
    * Sends one message (a serialized Content) to every other device of the account. Calls are serialized so concurrent
-   * migration kinds never race on prekey bundle fetches or 409/410 device-list recovery. `timestamp` is the message's
-   * timestamp in milliseconds; `urgent` asks Signal to wake a sleeping phone for the message.
+   * migration kinds never race on prekey bundle fetches or 409/410 device-list recovery; waiting callers abort
+   * immediately if `cancel` fires. `timestamp` is the message's timestamp in milliseconds; `urgent` asks Signal to
+   * wake a sleeping phone for the message.
    */
-  send(chat: ChatChannel, content: Uint8Array, options: OwnDeviceSendOptions = {}): Promise<void> {
-    const run = this.#sendQueue.then(() => this.#sendSerialized(chat, content, options));
-    this.#sendQueue = run.catch(() => undefined);
-    return run;
+  send(target: ChatTarget, content: Uint8Array, options: OwnDeviceSendOptions = {}): Promise<void> {
+    const { cancel } = options;
+    if (cancel?.aborted) {
+      return Promise.reject(cancel.reason ?? new DOMException('Aborted', 'AbortError'));
+    }
+    const prev = this.#sendQueue;
+    let release!: () => void;
+    const done = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.#sendQueue = prev.then(() => done);
+
+    return (async () => {
+      try {
+        await raceAbort(prev, cancel);
+      } catch (error) {
+        release();
+        throw error;
+      }
+      try {
+        cancel?.throwIfAborted();
+        await this.#sendSerialized(target, content, options);
+      } finally {
+        release();
+      }
+    })();
   }
 
   async #sendSerialized(
-    chat: ChatChannel,
+    target: ChatTarget,
     content: Uint8Array,
     { timestamp = Date.now(), urgent = true, cancel, onWait }: OwnDeviceSendOptions = {},
   ): Promise<void> {
     cancel?.throwIfAborted();
     if (!this.#bundlesRead) {
-      await this.#startSessions(chat, '*');
+      await this.#startSessions(target, '*', cancel, onWait);
       this.#bundlesRead = true;
     }
     const padded = padMessageBody(content);
@@ -232,7 +308,7 @@ export class OwnDevices {
           return message;
         });
       }
-      const response = await chat.request('PUT', `/v1/messages/${this.sender.aci}`, {
+      const response = await requestOn(target, 'PUT', `/v1/messages/${this.sender.aci}`, {
         headers: ['content-type:application/json'],
         body: json({ messages: encryptedBatch, online: false, urgent, timestamp }),
       });
@@ -255,14 +331,14 @@ export class OwnDevices {
           extraDevices?: number[];
         }>(response.body);
         for (const deviceId of extraDevices) this.#devices.delete(deviceId);
-        for (const deviceId of missingDevices) await this.#startSessions(chat, deviceId);
+        for (const deviceId of missingDevices) await this.#startSessions(target, deviceId, cancel, onWait);
       } else if (response.status === 410 && deviceRetries < 3) {
         deviceRetries++;
         encryptedBatch = null;
         const { staleDevices = [] } = parse<{ staleDevices?: number[] }>(response.body);
         for (const deviceId of staleDevices) {
           this.#devices.delete(deviceId);
-          await this.#startSessions(chat, deviceId);
+          await this.#startSessions(target, deviceId, cancel, onWait);
         }
       } else if (response.status === 409 || response.status === 410) {
         throw new Error('your devices changed while the message was being sent; try again');

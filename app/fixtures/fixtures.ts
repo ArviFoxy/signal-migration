@@ -680,8 +680,9 @@ const FIXTURES: Record<string, Fixture> = {
   },
   'migrate-throttled': {
     async state() {
-      const { state, migration } = await migrating(40);
+      const { state, migration } = await migrating(50);
       migration.uploadAllowedAt = Date.now() + 14 * 60_000 + 32_000;
+      Object.assign(migration.entries[51], { state: 'downloading', progress: { done: 5, total: 18 } });
       return {
         ...state,
         chosen: { stickers: true, friends: false, saved: true },

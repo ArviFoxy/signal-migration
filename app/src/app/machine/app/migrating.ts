@@ -94,7 +94,12 @@ export const migrating: VariantHandlers<AppState, 'migrating', AppEvent, Context
   'run/friends-added': (state, event) => ({ ...state, run: { ...state.run, friendsAdded: event.count } }),
   'run/friends-failed': (state, event) => ({
     ...state,
-    run: { ...state.run, status: 'failed', error: `Adding your friends to Signal failed: ${event.error}` },
+    run: {
+      ...state.run,
+      status: 'failed',
+      error: `Adding your friends to Signal failed: ${event.error}`,
+      savedWait: null,
+    },
   }),
   'run/saved-sent': (state, event) => ({
     ...state,
