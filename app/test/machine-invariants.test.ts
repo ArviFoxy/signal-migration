@@ -7,6 +7,7 @@ import { appTransition, appWork, isSession, recordOf, type AppState } from '../s
 import { fromRecord } from '../src/app/machine/app/loading';
 import { settle } from '../src/app/machine/app/settle';
 import type { Context } from '../src/app/machine/core';
+import { EMPTY_STICKER_PROGRESS, readRecord } from '../src/app/machine/record';
 import { initialSignal, signalTransition } from '../src/app/machine/signal';
 import { initialTelegram, telegramTransition, type TelegramState } from '../src/app/machine/telegram';
 import { Workflow } from '../src/app/workflow';
@@ -115,11 +116,14 @@ describe('App session transitions and notices', () => {
       chosen: { stickers: true, friends: false, saved: false },
       packs: { kind: 'none' },
       deselected: [],
+      stickerProgress: EMPTY_STICKER_PROGRESS,
       friends: { kind: 'none' },
       tickedFriends: [],
+      friendsAdded: null,
       saved: { kind: 'none' },
       savedFrom: null,
       savedSentUpTo: null,
+      savedDone: null,
       notice: null,
     };
     const next = appTransition(state, { type: 'signal/unlinked-from-phone' }, nextContext());
@@ -136,15 +140,136 @@ describe('App session transitions and notices', () => {
       chosen: { stickers: false, friends: false, saved: true },
       packs: { kind: 'none' },
       deselected: [],
+      stickerProgress: EMPTY_STICKER_PROGRESS,
       friends: { kind: 'none' },
       tickedFriends: [],
+      friendsAdded: null,
       saved: { kind: 'none' },
       savedFrom: 1_700_000_000,
       savedSentUpTo: 42,
+      savedDone: { aci: 'account-a', copied: 10 },
       notice: null,
     };
-    const next = appTransition(state, { type: 'copy-saved-from', from: 1_700_000_000 }, nextContext());
-    expect(isSession(next) && next.savedSentUpTo).toBe(42);
+    const same = appTransition(state, { type: 'copy-saved-from', from: 1_700_000_000 }, nextContext());
+    expect(isSession(same) && same.savedSentUpTo).toBe(42);
+    expect(isSession(same) && same.savedDone).toEqual({ aci: 'account-a', copied: 10 });
+    const changed = appTransition(state, { type: 'copy-saved-from', from: 1_600_000_000 }, nextContext());
+    expect(isSession(changed) && changed.savedSentUpTo).toBeNull();
+    expect(isSession(changed) && changed.savedDone).toBeNull();
+  });
+
+  // Detects: run/saved-sent for the last message not setting savedDone atomically in the same transition, or
+  // friendsAdded/savedDone leaking across different Signal accounts.
+  it('sets savedDone atomically on final run/saved-sent and scopes completion markers by Signal ACI', () => {
+    const deviceFor = (aci: string) => ({
+      aci,
+      deviceId: 2,
+      password: 'p',
+      storageServiceKey: new Uint8Array(32).fill(1),
+      identityPublic: new Uint8Array(33),
+      identityPrivate: new Uint8Array(32),
+      registrationId: 1,
+    });
+    const linkedA = signalTransition(
+      signalTransition(initialSignal('Browser'), { type: 'signal/link' }, nextContext()),
+      { type: 'signal/linked', device: deviceFor('account-a') },
+      nextContext(),
+    );
+    const migratingA: AppState = {
+      kind: 'migrating',
+      telegram: { kind: 'signed-in', method: 'qr', instance: 'telegram-1', attempt: 1, error: null },
+      signal: linkedA,
+      chosen: { stickers: true, friends: true, saved: true },
+      packs: { kind: 'reading', instance: 'telegram-1', attempt: 1, progress: null },
+      deselected: [],
+      stickerProgress: EMPTY_STICKER_PROGRESS,
+      friends: { kind: 'none' },
+      tickedFriends: [2],
+      friendsAdded: { aci: 'account-a', count: 1 },
+      saved: {
+        kind: 'read',
+        instance: 'telegram-1',
+        attempt: 1,
+        messages: [
+          { id: 10, date: 1_700_000_000, kind: 'text', body: 'one', styles: [] },
+          { id: 20, date: 1_700_000_100, kind: 'text', body: 'two', styles: [] },
+        ],
+      },
+      savedFrom: null,
+      savedSentUpTo: 10,
+      savedDone: null,
+      notice: null,
+      run: { attempt: 1, status: 'running', error: null },
+    };
+
+    // Sending the last saved message atomically sets both savedSentUpTo and savedDone in one transition / record write.
+    const afterFinal = appTransition(migratingA, { type: 'run/saved-sent', upTo: 20 }, nextContext());
+    expect(afterFinal.kind).toBe('migrating');
+    const savedRecord = recordOf(afterFinal);
+    expect(savedRecord?.savedSentUpTo).toBe(20);
+    expect(savedRecord?.savedDone).toEqual({ aci: 'account-a', copied: 2 });
+
+    // No-op tick-friends preserves friendsAdded; changing ticks clears it.
+    const sameTicks = appTransition(migratingA, { type: 'tick-friends', userIds: [2], ticked: true }, nextContext());
+    expect(isSession(sameTicks) && sameTicks.friendsAdded).toEqual({ aci: 'account-a', count: 1 });
+    const diffTicks = appTransition(migratingA, { type: 'tick-friends', userIds: [3], ticked: true }, nextContext());
+    expect(isSession(diffTicks) && diffTicks.friendsAdded).toBeNull();
+
+    // Switching to a different Signal account (account-b) must NOT inherit account-a's friendsAdded or savedDone.
+    const reloadedOnB = settle(
+      fromRecord(
+        {
+          ...savedRecord!,
+          signal: deviceFor('account-b'),
+        },
+        nextContext(),
+      ),
+      nextContext(),
+    );
+    expect(reloadedOnB.kind).toBe('migrating');
+    // Simulate Telegram signing in on account-b: friendsFollowAccounts and savedFollowLogin MUST run (not skip).
+    const signedInOnB = appTransition(
+      appTransition(reloadedOnB, { type: 'telegram/auth', auth: { _: 'authorizationStateReady' } }, nextContext()),
+      { type: 'telegram/saved' },
+      nextContext(),
+    );
+    expect(signedInOnB.kind).toBe('migrating');
+    if (signedInOnB.kind === 'migrating') {
+      expect(signedInOnB.friends.kind).toBe('looking');
+      expect(signedInOnB.saved.kind).toBe('reading');
+    }
+  });
+
+  // Detects: malformed v6 persisted fields crashing readRecord instead of falling back cleanly.
+  it('normalizes missing or malformed v6 fields in readRecord', () => {
+    const normalized = readRecord({
+      version: 6,
+      phase: 'migrating',
+      step: 'review',
+      why: null,
+      telegram: 'telegram-1',
+      signal: null,
+      chosen: { stickers: true, friends: false, saved: false },
+      deselected: [],
+      tickedFriends: [],
+      friendsAdded: { aci: 'a', count: -1 },
+      savedFrom: null,
+      savedSentUpTo: null,
+      savedDone: 'bad',
+      pendingPacks: [{ setId: 'x', packId: 'not-bytes', packKey: new Uint8Array(32), listed: false }],
+      uploadLimit: { aci: 'a', allowedAt: Number.NaN, intervalMs: 0 },
+      installedFromIndex: [123, 'ok'],
+      uploadedPacks: null,
+      addedToIndex: -5,
+    });
+    expect(normalized).not.toBeNull();
+    expect(normalized!.friendsAdded).toBeNull();
+    expect(normalized!.savedDone).toBeNull();
+    expect(normalized!.pendingPacks).toEqual([]);
+    expect(normalized!.uploadLimit).toBeNull();
+    expect(normalized!.installedFromIndex).toEqual(['ok']);
+    expect(normalized!.uploadedPacks).toEqual([]);
+    expect(normalized!.addedToIndex).toBe(0);
   });
 
   // Detects: run/friends-failed leaving run.savedWait non-null after copy-saved is aborted, keeping a 1 s UI ticker alive.
@@ -169,16 +294,18 @@ describe('App session transitions and notices', () => {
       chosen: { stickers: false, friends: true, saved: true },
       packs: { kind: 'none' },
       deselected: [],
+      stickerProgress: EMPTY_STICKER_PROGRESS,
       friends: { kind: 'none' },
       tickedFriends: [],
+      friendsAdded: null,
       saved: { kind: 'none' },
       savedFrom: null,
       savedSentUpTo: null,
+      savedDone: null,
       notice: null,
       run: {
         attempt: 1,
         status: 'running',
-        friendsAdded: null,
         error: null,
         savedWait: { service: 'Signal', until: Date.now() + 30_000 },
       },
@@ -202,7 +329,7 @@ describe('Workflow invariants: reload, cancellation, cross-account isolation, an
     const linked = alice.linkDevice();
     const reloaded = settle(
       fromRecord(
-        {
+        readRecord({
           version: 5,
           phase: 'migrating',
           step: 'review',
@@ -222,7 +349,7 @@ describe('Workflow invariants: reload, cancellation, cross-account isolation, an
           tickedFriends: [2],
           savedFrom: null,
           savedSentUpTo: null,
-        },
+        }),
         nextContext(),
       ),
       nextContext(),
@@ -384,7 +511,7 @@ describe('Workflow invariants: reload, cancellation, cross-account isolation, an
       for (const signal of [null, device]) {
         const state = settle(
           fromRecord(
-            {
+            readRecord({
               version: 5,
               phase,
               step: 'review',
@@ -396,7 +523,7 @@ describe('Workflow invariants: reload, cancellation, cross-account isolation, an
               tickedFriends: [],
               savedFrom: null,
               savedSentUpTo: null,
-            },
+            }),
             nextContext(),
           ),
           nextContext(),

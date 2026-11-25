@@ -30,6 +30,8 @@ export type WorkContext = {
   cancel: AbortSignal;
   /** The device name the user entered, read when the phone has scanned the code. */
   deviceName: () => string;
+  /** Waits until all record writes queued so far have committed to IndexedDB (never rejects). */
+  checkpoint: () => Promise<void>;
 };
 
 /** How many Telegram pictures are read at the same time. */
@@ -220,6 +222,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           if (work.deselected.includes(entry.pack.setId)) migration.setSelected(entry, false);
         await migration.lookUpInIndex(cancel);
         cancel.throwIfAborted();
+        migration.restoreProgress(work.progress);
         emit({ type: 'packs/read', migration });
       } catch (error) {
         if (!cancel.aborted) emit({ type: 'packs/read-failed', error: errorMessage(error) });
@@ -234,7 +237,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
     }
     case 'read-signal':
       try {
-        await work.migration.readSignal(deviceOf(context, work.deviceKey, work.device), cancel);
+        await work.migration.readSignal(deviceOf(context, work.deviceKey, work.device), cancel, work.device.aci);
         if (!cancel.aborted) emit({ type: 'packs/signal-read', deviceKey: work.deviceKey });
       } catch (error) {
         if (!cancel.aborted) emit({ type: 'packs/signal-failed', error: errorMessage(error) });
@@ -289,8 +292,12 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
     }
     case 'add-friends':
       try {
-        await addContacts(deviceOf(context, work.deviceKey, work.device), work.contacts, cancel);
-        if (!cancel.aborted) emit({ type: 'run/friends-added', count: work.contacts.length });
+        await addContacts(deviceOf(context, work.deviceKey, work.device), work.contacts, cancel, work.announceIfEmpty);
+        if (!cancel.aborted)
+          emit({
+            type: 'run/friends-added',
+            count: work.contacts.length > 0 ? work.contacts.length : work.recoveredCount,
+          });
       } catch (error) {
         if (!cancel.aborted) emit({ type: 'run/friends-failed', error: errorMessage(error) });
       }
@@ -306,8 +313,8 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
       }
       return;
     case 'copy-saved': {
-      // Every message sent is reported, but not every one at once: the browser keeps the last one reported, and
-      // writes it each time. What a reload loses of the last half second is sent again, and Signal's apps drop it.
+      // Every media/attachment message is reported at once; rapid text-only bursts are batched every 500 ms (and
+      // Signal's apps deduplicate by deterministic timestamp if the tab closes mid-burst).
       let sent: number | null = null;
       let reported: number | null = null;
       let reportedAt = 0;
@@ -321,9 +328,9 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
         await copyToNoteToSelf(
           deviceOf(context, work.deviceKey, work.device),
           work.messages,
-          (id) => {
+          (id, immediate) => {
             sent = id;
-            if (Date.now() - reportedAt >= SAVED_PROGRESS_EVERY_MS) report();
+            if (immediate || Date.now() - reportedAt >= SAVED_PROGRESS_EVERY_MS) report();
           },
           cancel,
           {
@@ -348,6 +355,7 @@ export async function runWork(work: Work, context: WorkContext): Promise<void> {
           deviceOf(context, work.deviceKey, work.device),
           sessionOf(resources, work.instance).source,
           cancel,
+          context.checkpoint,
         );
         if (!cancel.aborted) emit({ type: 'run/ended' });
       } catch (error) {

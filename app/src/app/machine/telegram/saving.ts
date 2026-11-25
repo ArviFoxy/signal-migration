@@ -37,7 +37,7 @@ export const saving: ExhaustiveVariantHandlers<TelegramState, 'saving', Telegram
   'telegram/save-failed': (state, event) =>
     signedIn(
       state,
-      `This browser could not save the Telegram login, so a reload will ask to sign in again: ${event.error}`,
+      `This browser could not save the Telegram login, so closing or reloading this tab will ask to sign in again: ${event.error}`,
     ),
   'telegram/logged-out': IGNORE,
   'telegram/logout-failed': IGNORE,

@@ -5,7 +5,7 @@
 import { DEFAULT_DEVICE_NAME } from '../../../signal/device-name';
 import type { Context, Variant, VariantHandlers } from '../core';
 import type { AppEvent } from '../events';
-import type { Record } from '../record';
+import { type Record, stickerProgressOf } from '../record';
 import { deviceKeyOf, initialSignal, type SignalState } from '../signal';
 import { initialTelegram, type TelegramState } from '../telegram';
 import type { Work } from '../work';
@@ -34,11 +34,14 @@ export function fromRecord(record: Record | null, context: Context): AppState {
     chosen: record?.chosen ?? INITIAL_CHOICE,
     packs: { kind: 'none' },
     deselected: record?.deselected ?? [],
+    stickerProgress: stickerProgressOf(record),
     friends: { kind: 'none' },
     tickedFriends: record?.tickedFriends ?? [],
+    friendsAdded: record?.friendsAdded ? { ...record.friendsAdded } : null,
     saved: { kind: 'none' },
     savedFrom: record?.savedFrom ?? null,
     savedSentUpTo: record?.savedSentUpTo ?? null,
+    savedDone: record?.savedDone ? { ...record.savedDone } : null,
     notice: null,
   };
   if (!record) return { ...session, kind: 'setup', step: 'start' };
@@ -49,7 +52,7 @@ export function fromRecord(record: Record | null, context: Context): AppState {
       return {
         ...session,
         kind: 'migrating',
-        run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+        run: { attempt: 1, status: 'running', error: null },
       };
     case 'ending':
       return beginEnding({ ...session, kind: 'setup', step: 'start' }, record.why ?? 'clear', context);

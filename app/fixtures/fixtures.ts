@@ -14,7 +14,12 @@ import type { BuildVerification } from '../src/attestation/verify';
 import type { FriendSearch } from '../src/kinds/friends/search';
 import type { ChatEntry, Person } from '../src/kinds/friends/telegram-people';
 import type { SavedMessage } from '../src/kinds/saved/messages';
-import { type PackEntry, type PackState, StickerMigration } from '../src/kinds/stickers/migration';
+import {
+  EMPTY_STICKER_PROGRESS,
+  type PackEntry,
+  type PackState,
+  StickerMigration,
+} from '../src/kinds/stickers/migration';
 import type { PackIndex } from '../src/kinds/stickers/pack-index';
 import type { StickerFormat } from '../src/kinds/stickers/telegram-packs';
 import type { MigrationApp } from '../src/ui/migration-app';
@@ -54,11 +59,14 @@ const session = (parts: Partial<Session> = {}): Session => ({
   chosen: { stickers: true, friends: false, saved: false },
   packs: { kind: 'none' },
   deselected: [],
+  stickerProgress: EMPTY_STICKER_PROGRESS,
   friends: { kind: 'none' },
   tickedFriends: [],
+  friendsAdded: null,
   saved: { kind: 'none' },
   savedFrom: null,
   savedSentUpTo: null,
+  savedDone: null,
   notice: null,
   ...parts,
 });
@@ -191,7 +199,7 @@ async function migrating(done: number): Promise<{ state: AppState; migration: St
   const state: AppState = {
     ...session({ telegram: signedIn, signal: linked, packs: read(migration) }),
     kind: 'migrating',
-    run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+    run: { attempt: 1, status: 'running', error: null },
   };
   return { state, migration };
 }
@@ -572,7 +580,8 @@ const FIXTURES: Record<string, Fixture> = {
         chosen: BOTH,
         friends: foundFriends(),
         tickedFriends: TICKED_FRIENDS,
-        run: { attempt: 1, status: 'running', friendsAdded: 5, error: null },
+        friendsAdded: { aci: device.aci, count: 5 },
+        run: { attempt: 1, status: 'running', error: null },
       };
     },
   },
@@ -586,7 +595,7 @@ const FIXTURES: Record<string, Fixture> = {
         tickedFriends: TICKED_FRIENDS,
       }),
       kind: 'migrating',
-      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      run: { attempt: 1, status: 'running', error: null },
     }),
   },
   'start-everything': {
@@ -660,7 +669,7 @@ const FIXTURES: Record<string, Fixture> = {
         savedSentUpTo: SAVED_MESSAGES[1900].id,
       }),
       kind: 'migrating',
-      run: { attempt: 1, status: 'running', friendsAdded: null, error: null },
+      run: { attempt: 1, status: 'running', error: null },
     }),
   },
   'migrate-everything': {
@@ -671,10 +680,11 @@ const FIXTURES: Record<string, Fixture> = {
         chosen: EVERYTHING,
         friends: foundFriends(),
         tickedFriends: TICKED_FRIENDS,
+        friendsAdded: { aci: device.aci, count: 5 },
         saved: readSaved(),
         savedFrom: SAVED_FROM,
         savedSentUpTo: SAVED_MESSAGES[1900].id,
-        run: { attempt: 1, status: 'running', friendsAdded: 5, error: null },
+        run: { attempt: 1, status: 'running', error: null },
       };
     },
   },
@@ -692,7 +702,6 @@ const FIXTURES: Record<string, Fixture> = {
         run: {
           attempt: 1,
           status: 'running',
-          friendsAdded: null,
           error: null,
           savedWait: { service: 'Signal', until: Date.now() + 42_000 },
         },

@@ -214,4 +214,130 @@ describe('finding friends', () => {
     expect(second.workflow.chosen).toEqual({ stickers: false, friends: true, saved: false });
     expect(second.workflow.friendsToAdd).toBe(1);
   });
+
+  // Detects: reopening during a multi-kind migration after Friends already finished re-scanning Telegram groups,
+  // re-calling Signal contact discovery (burning CDSI quota / wedging on 4008), or resetting friendsAdded to 0.
+  it('skips findFriends and Signal contact discovery on reopen once Friends already finished', async () => {
+    const MINUTE = 60_000;
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const browser = new Browser();
+    const first = appServices(alice, browser, {
+      people,
+      friendSources: [source().friendSource],
+      leaveAfterWaitOf: 10 * MINUTE,
+    });
+    const w1 = new Workflow(first.services);
+    w1.start();
+    await until(() => isSession(w1.state), 'first page loaded');
+    w1.choose('friends', true);
+    w1.goTo('friends');
+    await until(() => first.scanTelegramCode(), 'telegram qr');
+    await until(() => first.scanSignalCode(), 'signal qr');
+    await until(() => w1.friends.kind === 'found' && w1.packsReady, 'friends and packs ready');
+    w1.tickFriends([MARA.userId], true);
+    w1.goTo('review');
+    await until(() => w1.step === 'review' && w1.ready, 'review ready');
+    w1.startMigration();
+    await until(() => w1.friendsAdded === 1 && w1.error !== null, 'friends added and stickers hit cooldown');
+    await w1.settled();
+    browser.closePage();
+
+    // On reopen, BOTH Telegram people scan and Signal CDSI would throw if called.
+    let peopleReads = 0;
+    let cdsiCalls = 0;
+    const forbiddenPeople: PeopleSource = {
+      readPeople: () => {
+        peopleReads++;
+        return Promise.reject(new Error('should not re-scan Telegram people after friends finished'));
+      },
+      readPhoto: () => Promise.reject(new Error('unused')),
+    };
+    const forbiddenCdsi: FriendSource = {
+      find: () => {
+        cdsiCalls++;
+        return Promise.reject(new Error('CDSI allowance used up (4008)'));
+      },
+    };
+    await world.clock.advance(2 * 72 * MINUTE);
+    const second = appServices(alice, browser, { people: forbiddenPeople, friendSources: [forbiddenCdsi] });
+    const w2 = new Workflow(second.services);
+    w2.start();
+    await until(() => w2.state.kind === 'done', 'migration finishes on reopen without re-running friends');
+
+    expect(peopleReads).toBe(0);
+    expect(cdsiCalls).toBe(0);
+    expect(w2.friendsAdded).toBe(1);
+    expect(await contactNumbers(alice)).toEqual([MARA.phoneNumber]);
+    expect(await alice.installedTitles()).toEqual(['A', 'B']);
+  });
+
+  // Detects: closing the tab between storage.addContacts and announceStorageChange leaving other devices never told
+  // on reopen because contactsToAdd filtered out the already-written contacts.
+  it('announces Signal storage on reopen when contacts were written just before closing prior to announce', async () => {
+    const world = new StickerWorld();
+    const alice = world.user([]);
+    const browser = new Browser();
+    const first = await openPage(alice, browser, source().friendSource);
+    first.workflow.choose('stickers', false);
+    first.workflow.choose('friends', true);
+    await connectAndLook(first);
+    first.workflow.tickFriends([MARA.userId], true);
+    first.workflow.goTo('review');
+    await until(() => first.workflow.step === 'review' && first.workflow.ready, 'review ready');
+
+    // Storage write succeeds, then announceStorageChange fails right before the tab closes.
+    world.signal.failAnnouncements = 1;
+    first.workflow.startMigration();
+    await until(() => first.workflow.runFailed, 'announce fails');
+    await first.workflow.settled();
+    expect(await contactNumbers(alice)).toEqual([MARA.phoneNumber]);
+    expect(world.signal.toldToFetchStorage.get(alice.aci) ?? 0).toBe(0);
+    expect((browser.snapshot as { friendsAdded: unknown }).friendsAdded).toBeNull();
+    browser.closePage();
+
+    const second = await openPage(alice, browser, source().friendSource);
+    await until(() => second.workflow.state.kind === 'done', 'reopen announces storage and finishes');
+    expect(world.signal.toldToFetchStorage.get(alice.aci)).toBeGreaterThan(0);
+    expect(second.workflow.friendsAdded).toBe(1);
+  });
+
+  // Detects: ticking an additional friend after going Back to start keeping the stale friendsAdded marker and
+  // skipping the newly ticked friend on the second start.
+  it('resets friendsAdded when the user goes back and ticks another friend', async () => {
+    const MINUTE = 60_000;
+    const world = new StickerWorld({ uploadLimit: { burst: 1, intervalMs: 72 * MINUTE } });
+    const alice = world.user([world.pack('A'), world.pack('B')]);
+    const browser = new Browser();
+    const page = appServices(alice, browser, {
+      people,
+      friendSources: [source().friendSource],
+      leaveAfterWaitOf: 10 * MINUTE,
+    });
+    const workflow = new Workflow(page.services);
+    workflow.start();
+    await until(() => isSession(workflow.state), 'loaded');
+    workflow.choose('friends', true);
+    workflow.goTo('friends');
+    await until(() => page.scanTelegramCode(), 'telegram qr');
+    await until(() => page.scanSignalCode(), 'signal qr');
+    await until(() => workflow.friends.kind === 'found' && workflow.packsReady, 'ready');
+    workflow.tickFriends([MARA.userId], true);
+    workflow.goTo('review');
+    workflow.startMigration();
+    await until(() => workflow.friendsAdded === 1 && workflow.error !== null, 'Mara added, stickers paused');
+    expect(await contactNumbers(alice)).toEqual([MARA.phoneNumber]);
+
+    // Go back, tick Aiko too, and finish once cooldown has elapsed.
+    workflow.goTo('friends');
+    await until(() => workflow.step === 'friends', 'back on friends step');
+    workflow.tickFriends([AIKO.userId], true);
+    expect(workflow.friendsAdded).toBeNull();
+    await world.clock.advance(2 * 72 * MINUTE);
+    workflow.goTo('review');
+    await until(() => workflow.step === 'review' && workflow.ready, 'review ready');
+    workflow.startMigration();
+    await until(() => workflow.state.kind === 'done', 'finished with both friends');
+    expect((await contactNumbers(alice)).sort()).toEqual([MARA.phoneNumber, AIKO.phoneNumber].sort());
+  });
 });
