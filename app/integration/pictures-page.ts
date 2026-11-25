@@ -59,6 +59,64 @@ const pictures = {
   headLinkCount: () => document.head.querySelectorAll('link').length,
 
   /**
+   * Runs the real `webm-worker.js` bundle from a `blob:` URL and initializes it with `wasmBinary`, exactly as
+   * `BuildVerifier.resolveWorkerInput` + `resolveWasmInput` do on attested releases.
+   */
+  async decodeWebmInBlobWorker(
+    name: string,
+  ): Promise<{ duration: number; frameRate: number; frameCount: number; firstFrameBytes: number }> {
+    const [workerRes, wasmRes] = await Promise.all([fetch('/webm-worker.js'), fetch('/webm-decoder.wasm')]);
+    if (!workerRes.ok) throw new Error(`fetching webm-worker.js answered ${workerRes.status}`);
+    if (!wasmRes.ok) throw new Error(`fetching webm-decoder.wasm answered ${wasmRes.status}`);
+    const [workerBytes, wasmBinary] = await Promise.all([workerRes.arrayBuffer(), wasmRes.arrayBuffer()]);
+    const blobUrl = URL.createObjectURL(new Blob([workerBytes], { type: 'text/javascript' }));
+    const worker = new Worker(blobUrl, { type: 'module' });
+    let nextId = 1;
+    const call = <T>(message: object, transfer: Transferable[] = []): Promise<T> =>
+      new Promise<T>((resolve, reject) => {
+        const id = nextId++;
+        const onMessage = (event: MessageEvent<{ id: number; result?: T; error?: string }>) => {
+          if (event.data.id !== id) return;
+          cleanup();
+          if (event.data.error !== undefined) reject(new Error(event.data.error));
+          else resolve(event.data.result as T);
+        };
+        const onError = (event: ErrorEvent) => {
+          cleanup();
+          reject(new Error(event.message || 'worker error'));
+        };
+        const cleanup = () => {
+          worker.removeEventListener('message', onMessage);
+          worker.removeEventListener('error', onError);
+        };
+        worker.addEventListener('message', onMessage);
+        worker.addEventListener('error', onError);
+        worker.postMessage({ id, ...message }, transfer);
+      });
+    try {
+      await call<null>({ kind: 'init', wasmBinary }, [wasmBinary]);
+      const data = file(name);
+      const info = await call<{ duration: number; frameRate: number }>({ kind: 'probe', file: data });
+      const frames = await call<ArrayBuffer[]>({
+        kind: 'render',
+        file: data,
+        size: 128,
+        frameRate: 7,
+        count: 3,
+      });
+      return {
+        duration: info.duration,
+        frameRate: info.frameRate,
+        frameCount: frames.length,
+        firstFrameBytes: frames[0]?.byteLength ?? 0,
+      };
+    } finally {
+      worker.terminate();
+      URL.revokeObjectURL(blobUrl);
+    }
+  },
+
+  /**
    * Draws a still picture of 512 × 512 pixels with fine detail, so that its lossless WebP is larger than Signal's
    * limit, and keeps the WebP under `name`. With `mark`, the picture has one more disc, 40 pixels wide. With
    * `transparent`, a band on its left is see-through. Returns the size of the file in bytes.
