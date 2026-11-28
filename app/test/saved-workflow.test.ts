@@ -3,7 +3,7 @@
 // Signal's apps do: in the order of arrival, one message per timestamp. Each test names the failure it exists to
 // catch.
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { isSession } from '../src/app/machine/app';
 import { Workflow } from '../src/app/workflow';
 import { noteOf, type SavedMessage } from '../src/kinds/saved/messages';
@@ -474,8 +474,17 @@ describe('copying Saved Messages', () => {
     await until(() => first.scanSignalCode(), 'signal qr');
     await until(() => w1.saved.kind === 'read' && w1.packsReady, 'saved and packs read');
     w1.goTo('review');
+    await until(() => w1.step === 'review' && w1.ready, 'review ready');
+    // Hold sticker pack A before listing until Saved Messages finishes, so stickers' PageClosed cooldown
+    // never aborts copy-saved mid-flight on a slower runner.
+    let savedFinished!: () => void;
+    const waitForSaved = new Promise<void>((resolve) => (savedFinished = resolve));
+    world.index.beforeAdd = () => waitForSaved;
     w1.startMigration();
-    await until(() => w1.savedCopy?.copied === 8 && w1.error !== null, 'saved finished and stickers paused');
+    await until(() => w1.savedCopy?.copied === 8, 'saved messages finished');
+    savedFinished();
+    world.index.beforeAdd = async () => undefined;
+    await until(() => w1.error !== null, 'stickers paused at cooldown');
     await w1.settled();
     expect((browser.snapshot as { savedDone: { aci: string; copied: number } | null }).savedDone).toEqual({
       aci: alice.aci,
@@ -530,16 +539,21 @@ describe('copying Saved Messages', () => {
     w1.start();
     await until(() => isSession(w1.state), 'loaded');
     await connectAndRead({ workflow: w1, ...first });
-    const startedAt = Date.now();
-    await startMigration({ workflow: w1, ...first });
-    await delivered;
-    await until(
-      () => (browser.snapshot as { savedSentUpTo: number | null } | null)?.savedSentUpTo === MESSAGES[2].id,
-      'photo message persisted immediately',
-    );
-    expect(Date.now() - startedAt).toBeLessThan(400);
-    expect(mediaDownloads).toBe(1);
-    browser.closePage();
+    // Freeze Date.now() so the 500 ms text-progress debounce never expires on visit 1: reaching
+    // MESSAGES[2].id proves the immediate media flush ran, regardless of runner CPU speed.
+    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+    try {
+      await startMigration({ workflow: w1, ...first });
+      await delivered;
+      await until(
+        () => (browser.snapshot as { savedSentUpTo: number | null } | null)?.savedSentUpTo === MESSAGES[2].id,
+        'photo message persisted immediately',
+      );
+      expect(mediaDownloads).toBe(1);
+      browser.closePage();
+    } finally {
+      nowSpy.mockRestore();
+    }
 
     const second = appServices(alice, browser, {
       saved: {
