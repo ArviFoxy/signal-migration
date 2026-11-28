@@ -238,8 +238,16 @@ describe('finding friends', () => {
     w1.tickFriends([MARA.userId], true);
     w1.goTo('review');
     await until(() => w1.step === 'review' && w1.ready, 'review ready');
+    // Hold sticker pack A before listing until Friends finishes, so stickers' PageClosed cooldown
+    // never aborts add-friends mid-flight on a slower runner.
+    let friendsFinished!: () => void;
+    const waitForFriends = new Promise<void>((resolve) => (friendsFinished = resolve));
+    world.index.beforeAdd = () => waitForFriends;
     w1.startMigration();
-    await until(() => w1.friendsAdded === 1 && w1.error !== null, 'friends added and stickers hit cooldown');
+    await until(() => w1.friendsAdded === 1, 'friends added');
+    friendsFinished();
+    world.index.beforeAdd = async () => undefined;
+    await until(() => w1.error !== null, 'stickers hit cooldown');
     await w1.settled();
     browser.closePage();
 
@@ -324,8 +332,17 @@ describe('finding friends', () => {
     await until(() => workflow.friends.kind === 'found' && workflow.packsReady, 'ready');
     workflow.tickFriends([MARA.userId], true);
     workflow.goTo('review');
+    await until(() => workflow.step === 'review' && workflow.ready, 'review ready');
+    // Hold sticker pack A before listing until Mara is added, so stickers' PageClosed cooldown
+    // never aborts add-friends mid-flight on a slower runner.
+    let friendsFinished!: () => void;
+    const waitForFriends = new Promise<void>((resolve) => (friendsFinished = resolve));
+    world.index.beforeAdd = () => waitForFriends;
     workflow.startMigration();
-    await until(() => workflow.friendsAdded === 1 && workflow.error !== null, 'Mara added, stickers paused');
+    await until(() => workflow.friendsAdded === 1, 'Mara added');
+    friendsFinished();
+    world.index.beforeAdd = async () => undefined;
+    await until(() => workflow.error !== null, 'stickers paused');
     expect(await contactNumbers(alice)).toEqual([MARA.phoneNumber]);
 
     // Go back, tick Aiko too, and finish once cooldown has elapsed.
